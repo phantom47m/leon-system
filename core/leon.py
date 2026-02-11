@@ -53,10 +53,42 @@ class Leon:
         else:
             self.projects_config = {"projects": []}
 
+        # Security system
+        from security.vault import SecureVault, OwnerAuth, AuditLog, PermissionSystem
+        self.audit_log = AuditLog("data/audit.log")
+        self.vault = SecureVault("data/.vault.enc")
+        self.owner_auth = OwnerAuth("data/.auth.json")
+        self.permissions = PermissionSystem(self.audit_log)
+
+        # Hardware — 3D printing
+        from hardware.printing import PrinterManager
+        printer_config = "config/printers.yaml"
+        self.printer = PrinterManager(printer_config, self.api) if Path(printer_config).exists() else None
+
+        # Vision system
+        from vision.vision import VisionSystem
+        self.vision = VisionSystem(api_client=self.api, analysis_interval=3.0)
+
+        # Business modules
+        from business.leads import LeadGenerator
+        from business.crm import CRM
+        from business.finance import FinanceTracker
+        from business.comms import CommsHub
+        from business.assistant import PersonalAssistant
+        self.leads = LeadGenerator()
+        self.crm = CRM()
+        self.finance = FinanceTracker()
+        self.comms = CommsHub()
+        self.assistant = PersonalAssistant(
+            crm=self.crm, finance=self.finance, comms=self.comms,
+            memory=self.memory, api_client=self.api,
+        )
+
         self.running = False
         self._awareness_task = None
+        self._vision_task = None
 
-        logger.info("Leon initialized successfully")
+        logger.info("Leon initialized — all systems loaded")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -65,13 +97,28 @@ class Leon:
     async def start(self):
         self.running = True
         self._awareness_task = asyncio.create_task(self._awareness_loop())
-        logger.info("Leon is now running")
+
+        # Start vision if camera available
+        try:
+            self.vision.start()
+            self._vision_task = asyncio.create_task(self.vision.run_analysis_loop())
+            logger.info("Vision system active")
+        except Exception as e:
+            logger.warning(f"Vision system not started: {e}")
+
+        self.audit_log.log("system_start", "Leon started", "info")
+        logger.info("Leon is now running — all systems active")
 
     async def stop(self):
         logger.info("Stopping Leon...")
         self.running = False
         if self._awareness_task:
             self._awareness_task.cancel()
+        if self._vision_task:
+            self._vision_task.cancel()
+        self.vision.stop()
+        self.vault.lock()
+        self.audit_log.log("system_stop", "Leon stopped", "info")
         self.memory.save()
         logger.info("Leon stopped")
 
@@ -90,7 +137,11 @@ class Leon:
         # Analyze what the user wants
         analysis = await self._analyze_request(message)
 
-        if analysis is None or analysis.get("type") == "simple":
+        # Check for special command routing
+        routed = await self._route_special_commands(message)
+        if routed:
+            response = routed
+        elif analysis is None or analysis.get("type") == "simple":
             response = await self._respond_conversationally(message)
         elif analysis.get("type") == "single_task":
             response = await self._handle_single_task(message, analysis)
@@ -99,6 +150,64 @@ class Leon:
 
         self.memory.add_conversation(response, role="assistant")
         return response
+
+    # ------------------------------------------------------------------
+    # Special command routing (hardware, business, vision, security)
+    # ------------------------------------------------------------------
+
+    async def _route_special_commands(self, message: str) -> Optional[str]:
+        """Route messages to specialized modules when keywords match."""
+        msg = message.lower()
+
+        # 3D Printing
+        if self.printer and any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti"]):
+            if "find" in msg or "search" in msg or "stl" in msg:
+                query = message  # Let the printer manager parse it
+                results = await self.printer.search_stl(query)
+                if results:
+                    lines = ["Found some STL files:\n"]
+                    for i, r in enumerate(results[:5], 1):
+                        lines.append(f"{i}. **{r.get('name', 'Untitled')}** — {r.get('url', 'N/A')}")
+                    return "\n".join(lines)
+                return "Couldn't find any matching STL files. Try different keywords."
+            if "status" in msg:
+                statuses = self.printer.get_all_status()
+                if not statuses:
+                    return "No printers configured. Update config/printers.yaml with your printer details."
+                lines = ["Printer status:\n"]
+                for name, s in statuses.items():
+                    lines.append(f"**{name}**: {s.get('state', 'unknown')} — {s.get('progress', 0)}%")
+                return "\n".join(lines)
+
+        # Vision
+        if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around"]):
+            return self.vision.describe_scene()
+
+        # Business — leads
+        if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect"]):
+            self.audit_log.log("lead_hunt", message, "info")
+            return "Starting lead hunt... I'll search for businesses that need websites and score them. Check back shortly."
+
+        # Business — finance
+        if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings"]):
+            summary = self.finance.get_daily_summary()
+            return summary
+
+        # Business — briefing
+        if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief"]):
+            return await self.assistant.daily_briefing()
+
+        # Security
+        if "audit log" in msg:
+            entries = self.audit_log.get_recent(10)
+            if not entries:
+                return "Audit log is clean — no entries yet."
+            lines = ["Recent audit entries:\n"]
+            for e in entries:
+                lines.append(f"[{e.get('timestamp', '?')}] **{e.get('action')}** — {e.get('details', '')} ({e.get('severity')})")
+            return "\n".join(lines)
+
+        return None
 
     # ------------------------------------------------------------------
     # Request analysis
@@ -149,10 +258,13 @@ Rules:
         projects = self.memory.list_projects()
 
         # Inject memory context into system prompt
+        vision_desc = self.vision.describe_scene() if self.vision._running else "Vision inactive"
+
         context_block = f"""
 ## Current State
 Active tasks: {json.dumps(list(active.values()), default=str) if active else "None"}
 Known projects: {json.dumps([{'name': p['name'], 'status': p.get('status')} for p in projects], default=str) if projects else "None"}
+Vision: {vision_desc}
 """
 
         messages = [{"role": m["role"], "content": m["content"]} for m in recent]
@@ -362,4 +474,12 @@ spawned_by: Leon v1.0
             "tasks": self.task_queue.get_status_summary(),
             "projects": self.memory.list_projects(),
             "active_agents": len(self.agent_manager.active_agents),
+            "vision": self.vision.get_status(),
+            "security": {
+                "vault_unlocked": self.vault._unlocked,
+                "authenticated": self.owner_auth.is_authenticated(),
+                "audit_integrity": self.audit_log.verify_integrity(),
+            },
+            "printer": self.printer is not None,
+            "crm_pipeline": self.crm.get_pipeline_summary() if self.crm else {},
         }

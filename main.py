@@ -115,6 +115,19 @@ def run_cli(enable_voice=False, enable_dashboard=False):
                 print(f"  Completed:     {tasks['completed']}")
                 for t in tasks.get("active_tasks", []):
                     print(f"    • {t['description'][:60]} ({t['project']})")
+                # Vision
+                v = status.get("vision", {})
+                if v.get("active"):
+                    print(f"  Vision:        ACTIVE — {v.get('scene', 'N/A')}")
+                    print(f"                 People: {v.get('people_count', 0)} | Objects: {len(v.get('objects', []))}")
+                else:
+                    print(f"  Vision:        INACTIVE")
+                # Security
+                sec = status.get("security", {})
+                print(f"  Vault:         {'UNLOCKED' if sec.get('vault_unlocked') else 'LOCKED'}")
+                print(f"  Auth:          {'OK' if sec.get('authenticated') else 'REQUIRED'}")
+                # Printer
+                print(f"  3D Printer:    {'CONNECTED' if status.get('printer') else 'NOT CONFIGURED'}")
                 print()
                 continue
 
