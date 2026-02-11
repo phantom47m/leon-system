@@ -1,0 +1,39 @@
+leon:
+  version: "1.0"
+  name: "Leon"
+  personality_file: "config/personality.yaml"
+  memory_file: "data/leon_memory.json"
+  projects_file: "config/projects.yaml"
+
+api:
+  provider: "anthropic"
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 8000
+  temperature: 0.7
+
+agents:
+  max_concurrent: 5
+  timeout_minutes: 60
+  auto_retry: true
+  retry_attempts: 2
+  output_directory: "data/agent_outputs"
+  brief_directory: "data/task_briefs"
+
+openclaw:
+  config_path: "~/.openclaw/openclaw.json"
+  gateway_port: 18789
+  auth_profile: "anthropic:leon"
+
+ui:
+  theme: "dark"
+  position: "top-right"
+  width: 500
+  height: 700
+  always_on_top: true
+  show_notifications: true
+
+system:
+  auto_start: true
+  hotkey: "Super+L"
+  log_level: "INFO"
+  log_file: "logs/leon_system.log"

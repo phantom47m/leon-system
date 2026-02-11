@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+data/leon_memory.json
+data/agent_outputs/*
+data/task_briefs/*
+logs/*
+.env
+!data/agent_outputs/.gitkeep
+!data/task_briefs/.gitkeep
+!logs/.gitkeep

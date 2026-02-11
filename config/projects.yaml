@@ -1,0 +1,27 @@
+# Leon - Known Projects
+# Add your projects here so Leon knows where to work
+
+projects:
+  # Example project - replace with your actual projects:
+  #
+  # - name: "MotoRev API"
+  #   path: "/home/phantom47/projects/motorev-api"
+  #   type: "backend"
+  #   tech_stack:
+  #     - "Node.js"
+  #     - "Express"
+  #     - "PostgreSQL"
+  #
+  # - name: "RingZero"
+  #   path: "/home/phantom47/projects/ringzero"
+  #   type: "frontend"
+  #   tech_stack:
+  #     - "React"
+  #     - "TypeScript"
+
+  []  # Empty list - add projects above
+
+default_preferences:
+  coding_style: "clean, well-commented"
+  commit_message_style: "conventional"
+  test_before_commit: true
