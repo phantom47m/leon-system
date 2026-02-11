@@ -1,0 +1,41 @@
+# Leon — 3D Printer Configuration
+# Add your Bambu Lab printers here
+
+# To find your printer's IP:
+#   Open Bambu Studio → Device → Your printer → Network info
+#
+# To find your access code:
+#   On the printer: Settings → Network → LAN access code
+#
+# To find your serial number:
+#   On the printer: Settings → About → Serial Number
+#   Or in Bambu Studio device info
+
+printers:
+  - name: "P1S"
+    model: "P1S"
+    ip: "192.168.1.XXX"          # CHANGE THIS to your printer's IP
+    serial: "YOUR_SERIAL_HERE"    # CHANGE THIS
+    access_code: "YOUR_CODE"      # CHANGE THIS (8-digit LAN access code)
+
+  # Add more printers:
+  # - name: "P1S-2"
+  #   model: "P1S"
+  #   ip: "192.168.1.XXX"
+  #   serial: "SERIAL_HERE"
+  #   access_code: "CODE_HERE"
+
+# Default print settings
+defaults:
+  bed_leveling: true
+  flow_calibration: true
+  vibration_calibration: true
+  timelapse: false
+  use_ams: true
+
+# Spaghetti detection
+monitoring:
+  enabled: true
+  check_interval_seconds: 120    # Check camera every 2 minutes
+  auto_pause_on_failure: true    # Automatically pause on detected failure
+  notify_on_warning: true        # Alert for minor issues too
