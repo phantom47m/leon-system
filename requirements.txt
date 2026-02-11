@@ -1,7 +1,27 @@
+# Leon AI Orchestrator — Dependencies
+
+# Core
 anthropic>=0.40.0
-PyGObject>=3.42.0
 pyyaml>=6.0
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
 watchdog>=3.0.0
 colorlog>=6.7.0
+
+# Voice — STT (Deepgram Nova-2)
+deepgram-sdk>=3.0.0
+
+# Voice — TTS (ElevenLabs)
+elevenlabs>=1.0.0
+
+# Voice — Audio I/O
+pyaudio>=0.2.14
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Voice — Local TTS fallback
+pyttsx3>=2.90
+
+# GTK4 UI (also needs system packages):
+# sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+PyGObject>=3.42.0

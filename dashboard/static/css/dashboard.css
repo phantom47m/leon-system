@@ -1,0 +1,506 @@
+/* ════════════════════════════════════════════════════════
+   LEON BRAIN DASHBOARD — TRON / IRON MAN JARVIS THEME
+   ════════════════════════════════════════════════════════ */
+
+:root {
+    --cyan:       #4fc3f7;
+    --orange:     #ff7043;
+    --purple:     #ab47bc;
+    --green:      #76ff03;
+    --bg:         #0a0a1a;
+    --panel-bg:   rgba(10, 15, 30, 0.85);
+    --border:     rgba(79, 195, 247, 0.2);
+    --text:       #c0c8e0;
+    --text-dim:   #5a6380;
+    --glow-cyan:  0 0 10px rgba(79, 195, 247, 0.3);
+    --glow-orange: 0 0 10px rgba(255, 112, 67, 0.3);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    overflow: hidden;
+    cursor: crosshair;
+}
+
+/* ── 3D Container ──────────────────────────────────────── */
+#brain-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1;
+}
+
+/* ── HUD Overlay ───────────────────────────────────────── */
+#hud {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 10;
+    pointer-events: none;
+}
+
+#hud > * {
+    pointer-events: auto;
+}
+
+/* ── Top Bar ───────────────────────────────────────────── */
+#top-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 30px;
+    background: linear-gradient(180deg, rgba(10, 15, 30, 0.9) 0%, transparent 100%);
+    border-bottom: 1px solid var(--border);
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    font-size: 28px;
+    color: var(--cyan);
+    filter: drop-shadow(var(--glow-cyan));
+    animation: logoSpin 8s linear infinite;
+}
+
+@keyframes logoSpin {
+    0%, 100% { transform: rotate(0deg); }
+    50% { transform: rotate(180deg); }
+}
+
+.logo-text {
+    font-family: 'Orbitron', monospace;
+    font-size: 24px;
+    font-weight: 900;
+    color: var(--cyan);
+    letter-spacing: 8px;
+    text-shadow: var(--glow-cyan);
+}
+
+.logo-sub {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+.top-right {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--green);
+}
+
+.dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+}
+
+.dot.pulse {
+    animation: dotPulse 2s ease-in-out infinite;
+}
+
+@keyframes dotPulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--green); }
+    50% { opacity: 0.4; box-shadow: 0 0 12px var(--green); }
+}
+
+/* ── Panels ────────────────────────────────────────────── */
+.panel {
+    position: absolute;
+    width: 260px;
+    padding: 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    backdrop-filter: blur(10px);
+}
+
+#left-panel {
+    left: 24px;
+    top: 80px;
+    border-left: 2px solid var(--cyan);
+}
+
+#right-panel {
+    right: 24px;
+    top: 80px;
+    border-right: 2px solid var(--orange);
+}
+
+.panel-header {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--cyan);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#right-panel .panel-header {
+    color: var(--orange);
+}
+
+.panel-icon {
+    font-size: 14px;
+}
+
+.panel-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+}
+
+.status {
+    font-family: 'Orbitron', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 14px;
+    letter-spacing: 2px;
+}
+
+.status.active {
+    color: var(--green);
+    text-shadow: 0 0 8px rgba(118, 255, 3, 0.4);
+}
+
+.status.synced {
+    color: var(--purple);
+    text-shadow: 0 0 8px rgba(171, 71, 188, 0.4);
+}
+
+.status.idle {
+    color: var(--text-dim);
+}
+
+/* ── Stats ─────────────────────────────────────────────── */
+.panel-stats {
+    margin-bottom: 14px;
+}
+
+.stat {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.stat-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    min-width: 70px;
+}
+
+.stat-value {
+    font-family: 'Orbitron', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--cyan);
+}
+
+#right-panel .stat-value {
+    color: var(--orange);
+}
+
+.stat-bar {
+    flex: 1;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 2px;
+    margin-left: 10px;
+    overflow: hidden;
+}
+
+.stat-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--cyan), rgba(79, 195, 247, 0.5));
+    border-radius: 2px;
+    transition: width 0.5s ease;
+    box-shadow: var(--glow-cyan);
+}
+
+.stat-fill.right-fill {
+    background: linear-gradient(90deg, var(--orange), rgba(255, 112, 67, 0.5));
+    box-shadow: var(--glow-orange);
+}
+
+.stat-fill.listening {
+    animation: listenPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes listenPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.panel-detail {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.8;
+}
+
+/* ── Bottom Panel ──────────────────────────────────────── */
+#bottom-panel {
+    position: absolute;
+    bottom: 20px;
+    left: 24px;
+    right: 24px;
+    display: flex;
+    gap: 20px;
+    height: 160px;
+}
+
+.bottom-left {
+    width: 280px;
+    padding: 14px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    border-bottom: 2px solid var(--purple);
+    backdrop-filter: blur(10px);
+}
+
+.bottom-left .panel-header {
+    color: var(--purple);
+}
+
+.bottom-right {
+    flex: 1;
+    padding: 14px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    backdrop-filter: blur(10px);
+    overflow-y: auto;
+}
+
+/* ── Bridge Visual ─────────────────────────────────────── */
+.bridge-visual {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin-top: 16px;
+}
+
+.bridge-node {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.left-node {
+    background: rgba(79, 195, 247, 0.2);
+    border: 1px solid var(--cyan);
+    color: var(--cyan);
+}
+
+.right-node {
+    background: rgba(255, 112, 67, 0.2);
+    border: 1px solid var(--orange);
+    color: var(--orange);
+}
+
+.bridge-line {
+    width: 50px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--cyan), var(--purple), var(--orange));
+    opacity: 0.4;
+}
+
+.bridge-signal {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--purple);
+    box-shadow: 0 0 12px var(--purple);
+    animation: signalMove 2s ease-in-out infinite;
+}
+
+@keyframes signalMove {
+    0%   { transform: translateX(-30px); opacity: 0; }
+    20%  { opacity: 1; }
+    80%  { opacity: 1; }
+    100% { transform: translateX(30px); opacity: 0; }
+}
+
+/* ── Activity Feed ─────────────────────────────────────── */
+#activity-feed {
+    max-height: 110px;
+    overflow-y: auto;
+}
+
+.feed-item {
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    animation: feedFadeIn 0.3s ease;
+}
+
+@keyframes feedFadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.feed-time {
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-right: 8px;
+}
+
+/* ── Voice Indicator ───────────────────────────────────── */
+#voice-indicator {
+    position: absolute;
+    bottom: 200px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+}
+
+.voice-ring {
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    border: 1px solid rgba(79, 195, 247, 0.15);
+    border-radius: 50%;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    animation: voiceRipple 3s ease-out infinite;
+}
+
+.ring-2 { animation-delay: 1s; }
+.ring-3 { animation-delay: 2s; }
+
+@keyframes voiceRipple {
+    0%   { width: 40px; height: 40px; opacity: 0.6; }
+    100% { width: 120px; height: 120px; opacity: 0; }
+}
+
+.voice-text {
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    margin-top: 40px;
+}
+
+/* ── Corner Decorations ────────────────────────────────── */
+.corner {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    pointer-events: none;
+}
+
+.top-left-corner {
+    top: 65px;
+    left: 5px;
+    border-top: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+}
+
+.top-right-corner {
+    top: 65px;
+    right: 5px;
+    border-top: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+}
+
+.bottom-left-corner {
+    bottom: 5px;
+    left: 5px;
+    border-bottom: 1px solid var(--border);
+    border-left: 1px solid var(--border);
+}
+
+.bottom-right-corner {
+    bottom: 5px;
+    right: 5px;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+}
+
+/* ── Scan Lines (subtle CRT effect) ────────────────────── */
+.scanlines {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 100;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+    );
+}
+
+/* ── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar {
+    width: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+}
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .panel { width: 200px; }
+    #bottom-panel { flex-direction: column; height: auto; }
+    .bottom-left { width: 100%; }
+}
