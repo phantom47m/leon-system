@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,11 +26,17 @@ DASHBOARD_DIR = Path(__file__).parent
 TEMPLATES_DIR = DASHBOARD_DIR / "templates"
 STATIC_DIR = DASHBOARD_DIR / "static"
 
-# Connected WebSocket clients
+# Connected WebSocket clients (unauthenticated, waiting for auth)
 ws_clients: set[web.WebSocketResponse] = set()
+
+# Authenticated WebSocket clients (passed auth check)
+ws_authenticated: set[web.WebSocketResponse] = set()
 
 # Startup time for uptime tracking
 _start_time = time.monotonic()
+
+# Auth timeout for new connections
+WS_AUTH_TIMEOUT = 5.0
 
 
 # ── Routes ───────────────────────────────────────────────
@@ -47,7 +54,7 @@ async def health(request):
     return web.json_response({
         "status": "ok",
         "uptime": uptime,
-        "clients": len(ws_clients),
+        "clients": len(ws_authenticated),
         "leon_core": leon is not None,
     })
 
@@ -57,10 +64,50 @@ async def websocket_handler(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    ws_clients.add(ws)
-    logger.info(f"Dashboard client connected ({len(ws_clients)} total)")
+    session_token = request.app.get("session_token", "")
 
-    # Send initial state
+    # ── Require authentication as first message ──
+    ws_clients.add(ws)
+    logger.info(f"Dashboard client connected, awaiting auth ({len(ws_clients)} pending)")
+
+    authenticated = False
+    try:
+        # Wait for auth message within timeout
+        auth_msg = await asyncio.wait_for(ws.receive(), timeout=WS_AUTH_TIMEOUT)
+        if auth_msg.type == web.WSMsgType.TEXT:
+            try:
+                data = json.loads(auth_msg.data)
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+
+            if (data.get("command") == "auth"
+                    and data.get("token") == session_token):
+                authenticated = True
+                ws_authenticated.add(ws)
+                await ws.send_json({"type": "auth_result", "success": True})
+                logger.info(f"Dashboard client authenticated ({len(ws_authenticated)} total)")
+            else:
+                await ws.send_json({"type": "auth_result", "success": False,
+                                    "message": "Invalid token"})
+                logger.warning("Dashboard client failed authentication")
+                await ws.close()
+                return ws
+        else:
+            await ws.close()
+            return ws
+    except asyncio.TimeoutError:
+        logger.warning("Dashboard client did not authenticate within timeout")
+        await ws.send_json({"type": "auth_result", "success": False,
+                            "message": "Auth timeout"})
+        await ws.close()
+        return ws
+    finally:
+        ws_clients.discard(ws)
+
+    if not authenticated:
+        return ws
+
+    # ── Send initial state ──
     leon = request.app.get("leon_core")
     if leon:
         state = _build_state(leon)
@@ -83,7 +130,7 @@ async def websocket_handler(request):
 
                     # Slash commands — handled directly, no API call
                     if user_msg.startswith("/") and leon:
-                        slash_response = _handle_slash_command(user_msg, leon)
+                        slash_response = _handle_slash_command(user_msg, leon, request.app)
                         await ws.send_json({
                             "type": "input_response",
                             "message": slash_response,
@@ -112,8 +159,9 @@ async def websocket_handler(request):
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"WebSocket error: {ws.exception()}")
     finally:
+        ws_authenticated.discard(ws)
         ws_clients.discard(ws)
-        logger.info(f"Dashboard client disconnected ({len(ws_clients)} total)")
+        logger.info(f"Dashboard client disconnected ({len(ws_authenticated)} authenticated)")
 
     return ws
 
@@ -122,20 +170,20 @@ async def broadcast_state(app):
     """Background task that broadcasts brain state to all connected clients."""
     leon = app.get("leon_core")
     while True:
-        if ws_clients and leon:
+        if ws_authenticated and leon:
             state = _build_state(leon)
             dead = set()
-            for ws in ws_clients:
+            for ws in ws_authenticated:
                 try:
                     await ws.send_json(state)
                 except Exception:
                     dead.add(ws)
-            ws_clients -= dead
+            ws_authenticated -= dead
 
         await asyncio.sleep(2)  # Update every 2 seconds
 
 
-def _handle_slash_command(command: str, leon) -> str:
+def _handle_slash_command(command: str, leon, app=None) -> str:
     """Handle dashboard slash commands directly — no API call needed."""
     parts = command.strip().split(None, 1)
     cmd = parts[0].lower()
@@ -181,6 +229,9 @@ def _handle_slash_command(command: str, leon) -> str:
         elif cmd == "/kill":
             if not arg:
                 return "Usage: `/kill <agent_id>`"
+            # Permission check
+            if leon.permissions and not leon.permissions.check_permission("modify_system"):
+                return "Permission denied: `modify_system` required. Use `/approve modify_system` to grant."
             agents = leon.agent_manager.active_agents
             # Match partial agent ID
             match = None
@@ -252,6 +303,62 @@ def _handle_slash_command(command: str, leon) -> str:
             ]
             return "\n".join(lines)
 
+        elif cmd == "/setkey":
+            if not arg:
+                return "Usage: `/setkey <api_key>`"
+            # Store key in vault and set in environment
+            if leon.vault and leon.vault._unlocked:
+                leon.vault.store("ANTHROPIC_API_KEY", arg)
+                os.environ["ANTHROPIC_API_KEY"] = arg
+                if hasattr(leon, 'api') and hasattr(leon.api, 'set_api_key'):
+                    leon.api.set_api_key(arg)
+                if leon.audit_log:
+                    leon.audit_log.log("set_api_key", "API key updated via dashboard", "info")
+                return "API key stored in vault and activated. Leon can now respond to messages."
+            else:
+                # Vault not unlocked — just set env
+                os.environ["ANTHROPIC_API_KEY"] = arg
+                if hasattr(leon, 'api') and hasattr(leon.api, 'set_api_key'):
+                    leon.api.set_api_key(arg)
+                return "API key set in environment (vault locked — key not persisted). Leon can now respond."
+
+        elif cmd == "/vault":
+            if arg == "list" or not arg:
+                if not leon.vault:
+                    return "Vault module not loaded."
+                if not leon.vault._unlocked:
+                    return "Vault is locked. Set LEON_MASTER_KEY env var to unlock."
+                keys = leon.vault.list_keys()
+                if not keys:
+                    return "Vault is empty — no keys stored."
+                lines = ["**Vault Keys:**\n"]
+                for k in keys:
+                    lines.append(f"- `{k}`")
+                return "\n".join(lines)
+            else:
+                return "Usage: `/vault list`"
+
+        elif cmd == "/approve":
+            if not arg:
+                valid = ", ".join(sorted(leon.permissions.REQUIRE_APPROVAL)) if leon.permissions else "N/A"
+                return f"Usage: `/approve <action>`\n\nActions requiring approval:\n{valid}"
+            if not leon.permissions:
+                return "Permission system not loaded."
+            action = arg.strip()
+            leon.permissions.grant_temporary(action, duration_minutes=30)
+            return f"Temporary permission granted for `{action}` (30 minutes)."
+
+        elif cmd == "/login":
+            if not arg:
+                return "Usage: `/login <pin>`"
+            if not leon.owner_auth:
+                return "Auth module not loaded."
+            if leon.owner_auth.verify_pin(arg):
+                return "Authentication successful."
+            else:
+                remaining = leon.owner_auth.max_attempts - leon.owner_auth.failed_attempts
+                return f"Authentication failed. {remaining} attempts remaining."
+
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -262,6 +369,10 @@ def _handle_slash_command(command: str, leon) -> str:
                 "- `/retry <id>` — retry a failed agent\n"
                 "- `/history` — recent completed tasks\n"
                 "- `/bridge` — Right Brain connection status\n"
+                "- `/setkey <key>` — store API key in vault\n"
+                "- `/vault list` — show stored vault keys\n"
+                "- `/approve <action>` — grant temporary permission\n"
+                "- `/login <pin>` — authenticate as owner\n"
                 "- `/help` — this message"
             )
 
@@ -380,6 +491,12 @@ def create_app(leon_core=None) -> web.Application:
     app = web.Application()
     app["leon_core"] = leon_core
 
+    # Generate session token for WebSocket authentication
+    token = secrets.token_hex(16)
+    app["session_token"] = token
+    print(f"\n  Dashboard session token: {token}\n")
+    logger.info(f"Dashboard session token generated (printed to terminal)")
+
     # Routes
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
@@ -399,7 +516,7 @@ def create_app(leon_core=None) -> web.Application:
     return app
 
 
-def run_standalone(host="0.0.0.0", port=3000):
+def run_standalone(host="127.0.0.1", port=3000):
     """Run dashboard in standalone/demo mode (no Leon core)."""
     logger.info(f"Starting Leon Brain Dashboard at http://localhost:{port}")
     app = create_app(leon_core=None)

@@ -12,20 +12,36 @@ logger = logging.getLogger("leon.api")
 class AnthropicAPI:
     """Wrapper for Anthropic API calls used by Leon's brain"""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, vault=None):
         import anthropic
         import os
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+        # Try loading from vault if env var is empty
+        if not api_key and vault and vault._unlocked:
+            api_key = vault.retrieve("ANTHROPIC_API_KEY")
+            if api_key:
+                os.environ["ANTHROPIC_API_KEY"] = api_key
+                logger.info("API key loaded from vault")
+
         if api_key:
             self.client = anthropic.AsyncAnthropic(api_key=api_key)
         else:
             self.client = anthropic.AsyncAnthropic()
-            logger.warning("ANTHROPIC_API_KEY not set — API calls will fail until configured")
+            logger.warning("ANTHROPIC_API_KEY not set — use /setkey in dashboard or set env var")
         self.model = config.get("model", "claude-sonnet-4-5-20250929")
         self.max_tokens = config.get("max_tokens", 8000)
         self.temperature = config.get("temperature", 0.7)
         logger.info(f"API client initialized - model: {self.model}")
+
+    def set_api_key(self, key: str):
+        """Update the API key at runtime."""
+        import anthropic
+        import os
+        os.environ["ANTHROPIC_API_KEY"] = key
+        self.client = anthropic.AsyncAnthropic(api_key=key)
+        logger.info("API key updated at runtime")
 
     async def create_message(self, system: str, messages: list) -> str:
         """Full conversation-style request"""

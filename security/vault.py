@@ -12,7 +12,6 @@ Security layers:
 6. Automatic threat detection
 """
 
-import base64
 import hashlib
 import hmac
 import json
@@ -24,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 logger = logging.getLogger("leon.security")
 
 
@@ -34,7 +35,7 @@ logger = logging.getLogger("leon.security")
 class SecureVault:
     """
     Encrypted storage for all API keys, tokens, and secrets.
-    Uses AES-256 encryption with a master password.
+    Uses AES-256-GCM encryption with a master password.
 
     Keys are NEVER stored in plain text on disk.
     """
@@ -42,6 +43,7 @@ class SecureVault:
     def __init__(self, vault_path: str = "data/.vault.enc", master_key: str = None):
         self.vault_path = Path(vault_path)
         self.vault_path.parent.mkdir(parents=True, exist_ok=True)
+        self._salt_path = self.vault_path.parent / ".vault.salt"
         self._secrets: dict = {}
         self._master_key = master_key or os.getenv("LEON_MASTER_KEY", "")
         self._unlocked = False
@@ -114,42 +116,33 @@ class SecureVault:
         encrypted = self._encrypt(plaintext, self._master_key)
         self.vault_path.write_bytes(encrypted)
 
+    def _get_or_create_salt(self) -> bytes:
+        """Get existing salt or generate a new random 16-byte salt."""
+        if self._salt_path.exists():
+            return self._salt_path.read_bytes()
+        salt = os.urandom(16)
+        self._salt_path.write_bytes(salt)
+        os.chmod(self._salt_path, 0o600)
+        return salt
+
     def _derive_key(self, password: str) -> bytes:
-        """Derive encryption key from password using PBKDF2."""
-        salt = b"leon_vault_salt_v1"  # Static salt (vault is local only)
+        """Derive encryption key from password using PBKDF2 with random salt."""
+        salt = self._get_or_create_salt()
         return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100000)
 
     def _encrypt(self, data: bytes, key: bytes) -> bytes:
         """AES-256-GCM encryption."""
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            nonce = os.urandom(12)
-            aesgcm = AESGCM(key)
-            ciphertext = aesgcm.encrypt(nonce, data, None)
-            return nonce + ciphertext
-        except ImportError:
-            # Fallback: XOR with key hash (less secure but works without cryptography lib)
-            logger.warning("cryptography library not installed — using basic encryption")
-            return self._xor_encrypt(data, key)
+        nonce = os.urandom(12)
+        aesgcm = AESGCM(key)
+        ciphertext = aesgcm.encrypt(nonce, data, None)
+        return nonce + ciphertext
 
     def _decrypt(self, data: bytes, key: bytes) -> bytes:
         """AES-256-GCM decryption."""
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            nonce = data[:12]
-            ciphertext = data[12:]
-            aesgcm = AESGCM(key)
-            return aesgcm.decrypt(nonce, ciphertext, None)
-        except ImportError:
-            return self._xor_decrypt(data, key)
-
-    def _xor_encrypt(self, data: bytes, key: bytes) -> bytes:
-        """Simple XOR fallback."""
-        key_stream = (key * ((len(data) // len(key)) + 1))[:len(data)]
-        return bytes(a ^ b for a, b in zip(data, key_stream))
-
-    def _xor_decrypt(self, data: bytes, key: bytes) -> bytes:
-        return self._xor_encrypt(data, key)  # XOR is symmetric
+        nonce = data[:12]
+        ciphertext = data[12:]
+        aesgcm = AESGCM(key)
+        return aesgcm.decrypt(nonce, ciphertext, None)
 
 
 # ══════════════════════════════════════════════════════════
@@ -239,7 +232,21 @@ class AuditLog:
     def __init__(self, log_file: str = "data/audit.log"):
         self.log_file = Path(log_file)
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        self._last_hash = "GENESIS"
+        self._last_hash = self._rebuild_last_hash()
+
+    def _rebuild_last_hash(self) -> str:
+        """Read the last entry from the log file to restore hash chain state."""
+        if not self.log_file.exists():
+            return "GENESIS"
+        try:
+            text = self.log_file.read_text().strip()
+            if not text:
+                return "GENESIS"
+            last_line = text.split("\n")[-1]
+            entry = json.loads(last_line)
+            return entry.get("hash", "GENESIS")
+        except (json.JSONDecodeError, OSError):
+            return "GENESIS"
 
     def log(self, action: str, details: str = "", severity: str = "info"):
         """Log an auditable action."""
@@ -324,7 +331,7 @@ class NetworkSecurity:
         for line in result.stdout.split("\n"):
             for port in NetworkSecurity.BLOCKED_PORTS_EXTERNAL:
                 if f":{port}" in line and "0.0.0.0" in line:
-                    warnings.append(f"⚠️ Port {port} is exposed to all interfaces!")
+                    warnings.append(f"Port {port} is exposed to all interfaces!")
         return warnings
 
     @staticmethod

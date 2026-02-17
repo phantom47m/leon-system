@@ -661,19 +661,75 @@ function updateNeuronFiring(time) {
     });
 }
 
+// ── AUTH ─────────────────────────────────────────────────
+let wsAuthenticated = false;
+
+function getStoredToken() {
+    return localStorage.getItem('leon_session_token') || '';
+}
+
+function setStoredToken(token) {
+    localStorage.setItem('leon_session_token', token);
+}
+
+function showAuthOverlay(errorMsg) {
+    const overlay = document.getElementById('auth-overlay');
+    if (!overlay) return;
+    overlay.style.display = 'flex';
+    const errEl = document.getElementById('auth-error');
+    if (errEl) errEl.textContent = errorMsg || '';
+
+    const tokenInput = document.getElementById('auth-token-input');
+    const submitBtn = document.getElementById('auth-submit');
+    if (!tokenInput || !submitBtn) return;
+
+    // Focus the input
+    setTimeout(() => tokenInput.focus(), 100);
+
+    function doAuth() {
+        const token = tokenInput.value.trim();
+        if (!token) return;
+        setStoredToken(token);
+        overlay.style.display = 'none';
+        // Reconnect with new token
+        if (wsConnection) {
+            wsConnection.close();
+        } else {
+            connectWebSocket();
+        }
+    }
+
+    submitBtn.onclick = doAuth;
+    tokenInput.onkeydown = (e) => {
+        if (e.key === 'Enter') doAuth();
+    };
+}
+
+function hideAuthOverlay() {
+    const overlay = document.getElementById('auth-overlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
 // ── WEBSOCKET ───────────────────────────────────────────
 function connectWebSocket() {
+    const token = getStoredToken();
+
+    // If no token saved, show auth overlay immediately
+    if (!token) {
+        showAuthOverlay('');
+        startDemoMode();
+        return;
+    }
+
     try {
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
         wsConnection = ws;
+        wsAuthenticated = false;
 
         ws.onopen = () => {
             wsReconnectDelay = 1000; // Reset backoff on successful connect
-            // Stop demo mode if it was running
-            if (demoInterval) {
-                clearInterval(demoInterval);
-                demoInterval = null;
-            }
+            // Send auth message as first message
+            ws.send(JSON.stringify({ command: 'auth', token: token }));
         };
 
         ws.onmessage = (event) => {
@@ -683,6 +739,25 @@ function connectWebSocket() {
             } catch (e) {
                 return; // Ignore malformed messages
             }
+
+            // Handle auth result
+            if (data.type === 'auth_result') {
+                if (data.success) {
+                    wsAuthenticated = true;
+                    hideAuthOverlay();
+                    // Stop demo mode if it was running
+                    if (demoInterval) {
+                        clearInterval(demoInterval);
+                        demoInterval = null;
+                    }
+                } else {
+                    wsAuthenticated = false;
+                    localStorage.removeItem('leon_session_token');
+                    showAuthOverlay(data.message || 'Authentication failed');
+                }
+                return;
+            }
+
             // Handle input responses separately
             if (data.type === 'input_response') {
                 appendToFeed(data.timestamp || nowTime(), `Leon: ${escapeHtml(data.message)}`);
@@ -693,6 +768,7 @@ function connectWebSocket() {
 
         ws.onclose = () => {
             wsConnection = null;
+            wsAuthenticated = false;
             // Reconnect with exponential backoff
             setTimeout(connectWebSocket, wsReconnectDelay);
             wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
@@ -700,6 +776,7 @@ function connectWebSocket() {
 
         ws.onerror = () => {
             wsConnection = null;
+            wsAuthenticated = false;
             // Run in demo mode if no server
             startDemoMode();
         };
@@ -959,6 +1036,10 @@ const SLASH_COMMANDS = [
     { cmd: '/retry',   desc: 'Retry a failed agent' },
     { cmd: '/history', desc: 'Recent completed tasks' },
     { cmd: '/bridge',  desc: 'Right Brain connection' },
+    { cmd: '/setkey',  desc: 'Store API key in vault' },
+    { cmd: '/vault',   desc: 'List vault keys' },
+    { cmd: '/approve', desc: 'Grant temp permission' },
+    { cmd: '/login',   desc: 'Authenticate as owner' },
     { cmd: '/help',    desc: 'Show all commands' },
 ];
 

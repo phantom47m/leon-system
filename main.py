@@ -61,7 +61,7 @@ def run_cli(enable_voice=False, enable_dashboard=False):
             from dashboard.server import create_app
             from aiohttp import web
             app = create_app(leon_core=leon)
-            web.run_app(app, host="0.0.0.0", port=3000, print=lambda _: None)
+            web.run_app(app, host="127.0.0.1", port=3000, print=lambda _: None)
 
         dash_thread = threading.Thread(target=start_dashboard, daemon=True)
         dash_thread.start()
@@ -187,7 +187,7 @@ def run_gui():
                     from dashboard.server import create_app
                     from aiohttp import web
                     app = create_app(leon_core=self.leon_core)
-                    web.run_app(app, host="0.0.0.0", port=3000, print=lambda _: None)
+                    web.run_app(app, host="127.0.0.1", port=3000, print=lambda _: None)
                 threading.Thread(target=start_dashboard, daemon=True).start()
                 logger.info("🧠 Brain Dashboard: http://localhost:3000")
 
@@ -231,7 +231,7 @@ def run_headless():
     print()
     print("╔════════════════════════════════════════════╗")
     print("║    Leon Left Brain — Headless Daemon       ║")
-    print("║    Bridge: wss://0.0.0.0:9100/bridge       ║")
+    print("║    Bridge: wss://127.0.0.1:9100/bridge      ║")
     print("║    Dashboard: http://localhost:3000         ║")
     print("║    Ctrl+C to stop                          ║")
     print("╚════════════════════════════════════════════╝")
@@ -241,7 +241,7 @@ def run_headless():
     app = create_app(leon_core=leon)
     runner = web.AppRunner(app)
     loop.run_until_complete(runner.setup())
-    site = web.TCPSite(runner, "0.0.0.0", 3000)
+    site = web.TCPSite(runner, "127.0.0.1", 3000)
     loop.run_until_complete(site.start())
     logger.info("Dashboard running on http://localhost:3000")
 

@@ -147,6 +147,22 @@
         <div class="scanlines"></div>
     </div>
 
+    <!-- Auth Overlay -->
+    <div id="auth-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(5,5,15,0.95); align-items:center; justify-content:center;">
+        <div style="text-align:center; font-family:'Orbitron',monospace;">
+            <div style="font-size:2rem; color:#4fc3f7; margin-bottom:8px;">LEON</div>
+            <div style="font-size:0.8rem; color:rgba(255,255,255,0.4); margin-bottom:32px; letter-spacing:4px;">NEURAL INTERFACE</div>
+            <div style="margin-bottom:16px; color:rgba(255,255,255,0.6); font-family:'Rajdhani',sans-serif; font-size:0.9rem;">Enter session token to connect</div>
+            <input type="text" id="auth-token-input" placeholder="Session token..." autocomplete="off" spellcheck="false"
+                style="width:320px; padding:12px 16px; background:rgba(79,195,247,0.08); border:1px solid rgba(79,195,247,0.3); border-radius:8px; color:#4fc3f7; font-family:'JetBrains Mono','Fira Code',monospace; font-size:0.9rem; outline:none; text-align:center;">
+            <br>
+            <button id="auth-submit" style="margin-top:16px; padding:10px 40px; background:rgba(79,195,247,0.15); border:1px solid rgba(79,195,247,0.4); border-radius:8px; color:#4fc3f7; font-family:'Orbitron',monospace; font-size:0.85rem; cursor:pointer; letter-spacing:2px; transition:all 0.2s;">
+                CONNECT
+            </button>
+            <div id="auth-error" style="margin-top:16px; color:#ff4444; font-family:'Rajdhani',sans-serif; font-size:0.85rem; min-height:1.2em;"></div>
+        </div>
+    </div>
+
     <!-- Command Input Bar (outside HUD so it's always clickable) -->
     <div id="command-bar" class="command-bar">
         <span class="command-prefix">LEON &gt;</span>

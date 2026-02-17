@@ -46,12 +46,35 @@ class Leon:
             logger.critical(f"Invalid YAML in {config_path}: {e}")
             raise SystemExit(f"Bad config: {e}")
 
+        # Security system — load early so vault is available for API key
+        try:
+            from security.vault import SecureVault, OwnerAuth, AuditLog, PermissionSystem
+            self.audit_log = AuditLog("data/audit.log")
+            self.vault = SecureVault("data/.vault.enc")
+            self.owner_auth = OwnerAuth("data/.auth.json")
+            self.permissions = PermissionSystem(self.audit_log)
+        except Exception as e:
+            logger.error(f"Security module failed to load: {e}")
+            self.audit_log = self.vault = self.owner_auth = self.permissions = None
+
         # Core components
         self.memory = MemorySystem(self.config["leon"]["memory_file"])
         self.openclaw = OpenClawInterface(self.config["openclaw"]["config_path"])
         self.agent_manager = AgentManager(self.openclaw, self.config["agents"])
         self.task_queue = TaskQueue(self.config["agents"]["max_concurrent"])
-        self.api = AnthropicAPI(self.config["api"])
+
+        # API client — try vault for API key if env var is empty
+        self.api = AnthropicAPI(self.config["api"], vault=self.vault)
+
+        # If vault has API key, also set env so agent spawning works
+        if self.vault and self.vault._unlocked:
+            vault_api_key = self.vault.retrieve("ANTHROPIC_API_KEY")
+            if vault_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+                os.environ["ANTHROPIC_API_KEY"] = vault_api_key
+                logger.info("ANTHROPIC_API_KEY loaded from vault into environment")
+
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            logger.warning("ANTHROPIC_API_KEY not configured — use /setkey in dashboard or set env var")
 
         # Load personality
         personality_file = self.config["leon"]["personality_file"]
@@ -73,17 +96,6 @@ class Leon:
                 self.projects_config = {"projects": []}
         else:
             self.projects_config = {"projects": []}
-
-        # Security system
-        try:
-            from security.vault import SecureVault, OwnerAuth, AuditLog, PermissionSystem
-            self.audit_log = AuditLog("data/audit.log")
-            self.vault = SecureVault("data/.vault.enc")
-            self.owner_auth = OwnerAuth("data/.auth.json")
-            self.permissions = PermissionSystem(self.audit_log)
-        except Exception as e:
-            logger.error(f"Security module failed to load: {e}")
-            self.audit_log = self.vault = self.owner_auth = self.permissions = None
 
         # Hardware — 3D printing
         try:
@@ -135,6 +147,18 @@ class Leon:
         self._right_brain_status: dict = {}
         if self.brain_role == "left":
             bridge_config = self.config.get("bridge", {})
+            # Load bridge token from env var or vault
+            bridge_token = os.environ.get("LEON_BRIDGE_TOKEN", bridge_config.get("token", ""))
+            if not bridge_token and self.vault and self.vault._unlocked:
+                bridge_token = self.vault.retrieve("LEON_BRIDGE_TOKEN")
+                if not bridge_token:
+                    # Generate and store a new bridge token
+                    import secrets as _secrets
+                    bridge_token = _secrets.token_hex(32)
+                    self.vault.store("LEON_BRIDGE_TOKEN", bridge_token)
+                    logger.info("Generated new bridge token and stored in vault")
+            if bridge_token:
+                bridge_config["token"] = bridge_token
             self.bridge = BridgeServer(bridge_config)
             self.bridge.on(MSG_TASK_STATUS, self._handle_remote_task_status)
             self.bridge.on(MSG_TASK_RESULT, self._handle_remote_task_result)
@@ -170,6 +194,22 @@ class Leon:
 
         if self.audit_log:
             self.audit_log.log("system_start", "Leon started", "info")
+
+        # Lock down sensitive file permissions
+        sensitive_files = [
+            "data/.vault.enc",
+            "data/.vault.salt",
+            "data/.auth.json",
+            "config/settings.yaml",
+            "data/leon_memory.json",
+        ]
+        for fpath in sensitive_files:
+            p = Path(fpath)
+            if p.exists():
+                try:
+                    os.chmod(p, 0o600)
+                except OSError:
+                    pass
 
         # Auto-trigger daily briefing on startup
         asyncio.create_task(self._auto_daily_briefing())
@@ -221,6 +261,13 @@ class Leon:
         """
         logger.info(f"User: {message[:80]}...")
         self.memory.add_conversation(message, role="user")
+
+        # Permission check for sensitive actions
+        if self.permissions:
+            denied = self._check_sensitive_permissions(message)
+            if denied:
+                self.memory.add_conversation(denied, role="assistant")
+                return denied
 
         # Analyze what the user wants
         analysis = await self._analyze_request(message)
@@ -299,6 +346,10 @@ class Leon:
         if any(w in msg for w in ["send email", "check email", "inbox", "messages", "unread", "compose"]):
             if not self.comms:
                 return "Communications module is not available."
+            # Sending email requires permission
+            if "send" in msg and self.permissions:
+                if not self.permissions.check_permission("send_email"):
+                    return "This requires owner approval. Use `/approve send_email` to grant temporary access."
             return "Comms hub active. What would you like to do — check inbox, send an email, or review messages?"
 
         # Business — briefing
@@ -325,6 +376,27 @@ class Leon:
                 lines.append(f"[{e.get('timestamp', '?')}] **{e.get('action')}** — {e.get('details', '')} ({e.get('severity')})")
             return "\n".join(lines)
 
+        return None
+
+    def _check_sensitive_permissions(self, message: str) -> Optional[str]:
+        """Check if the message requests a sensitive action that needs approval."""
+        msg = message.lower()
+
+        # Map keywords to permission actions
+        checks = [
+            (["delete", "remove file", "rm ", "erase"], "delete_files"),
+            (["purchase", "buy", "order", "checkout"], "make_purchase"),
+            (["transfer money", "send money", "pay ", "wire "], "send_money"),
+            (["post publicly", "tweet", "publish"], "post_publicly"),
+        ]
+
+        for keywords, action in checks:
+            if any(kw in msg for kw in keywords):
+                if not self.permissions.check_permission(action):
+                    return (
+                        f"This requires owner approval for `{action}`. "
+                        f"Use `/approve {action}` to grant temporary access."
+                    )
         return None
 
     def _build_help_text(self) -> str:

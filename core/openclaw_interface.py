@@ -1,10 +1,11 @@
 """
-Leon OpenClaw Interface - Bridge to OpenClaw for system automation
+Leon OpenClaw Interface - Safe system status and OpenClaw process management.
+
+Only exposes structured, non-injectable operations.
+Agent spawning is handled separately by agent_manager.py via subprocess.Popen.
 """
 
-import json
 import logging
-import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -13,64 +14,11 @@ logger = logging.getLogger("leon.openclaw")
 
 
 class OpenClawInterface:
-    """Interface to OpenClaw for system-level automation and agent management"""
+    """Safe interface to OpenClaw — no arbitrary shell execution."""
 
     def __init__(self, config_path: str = "~/.openclaw/openclaw.json"):
-        self.config_path = Path(os.path.expanduser(config_path))
-        self.config = self._load_config()
-        self.gateway_port = self.config.get("gateway", {}).get("port", 18789)
-        logger.info(f"OpenClaw interface initialized (port {self.gateway_port})")
-
-    def _load_config(self) -> dict:
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load OpenClaw config: {e}")
-        return {}
-
-    async def execute_command(self, command: str, cwd: str = None) -> subprocess.Popen:
-        """Execute a shell command, return the process for monitoring."""
-        logger.debug(f"Executing: {command[:80]}...")
-        process = subprocess.Popen(
-            ["bash", "-c", command],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
-        )
-        return process
-
-    async def run_and_wait(self, command: str, cwd: str = None, timeout: int = 120) -> dict:
-        """Execute command and wait for completion."""
-        process = await self.execute_command(command, cwd=cwd)
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-            return {
-                "returncode": process.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "success": process.returncode == 0,
-            }
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return {
-                "returncode": -1,
-                "stdout": "",
-                "stderr": "Command timed out",
-                "success": False,
-            }
-
-    async def check_process_running(self, process: subprocess.Popen) -> bool:
-        return process.poll() is None
-
-    async def kill_process(self, process: subprocess.Popen):
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        self.config_path = Path(config_path).expanduser()
+        logger.info("OpenClaw interface initialized")
 
     def is_openclaw_running(self) -> bool:
         """Check if OpenClaw gateway is running."""
@@ -97,3 +45,50 @@ class OpenClawInterface:
         except Exception as e:
             logger.error(f"Failed to start OpenClaw: {e}")
             return False
+
+    def get_system_status(self) -> dict:
+        """Get system resource usage via /proc (no shell execution)."""
+        status = {}
+
+        # CPU load average
+        try:
+            with open("/proc/loadavg", "r") as f:
+                parts = f.read().split()
+                status["load_1m"] = float(parts[0])
+                status["load_5m"] = float(parts[1])
+                status["load_15m"] = float(parts[2])
+        except (OSError, IndexError, ValueError):
+            status["load_1m"] = -1
+
+        # Memory info
+        try:
+            with open("/proc/meminfo", "r") as f:
+                meminfo = {}
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        val = parts[1].strip().split()[0]  # value in kB
+                        meminfo[key] = int(val)
+                total = meminfo.get("MemTotal", 1)
+                available = meminfo.get("MemAvailable", 0)
+                status["mem_total_mb"] = total // 1024
+                status["mem_available_mb"] = available // 1024
+                status["mem_used_pct"] = round((1 - available / total) * 100, 1) if total > 0 else 0
+        except (OSError, ValueError):
+            status["mem_used_pct"] = -1
+
+        # Disk usage for root partition
+        try:
+            st = Path("/").stat()
+            import os
+            disk = os.statvfs("/")
+            total = disk.f_blocks * disk.f_frsize
+            free = disk.f_bavail * disk.f_frsize
+            status["disk_total_gb"] = round(total / (1024 ** 3), 1)
+            status["disk_free_gb"] = round(free / (1024 ** 3), 1)
+            status["disk_used_pct"] = round((1 - free / total) * 100, 1) if total > 0 else 0
+        except OSError:
+            status["disk_used_pct"] = -1
+
+        return status
