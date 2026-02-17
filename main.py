@@ -60,8 +60,14 @@ def run_cli(enable_voice=False, enable_dashboard=False):
         def start_dashboard():
             from dashboard.server import create_app
             from aiohttp import web
+            dash_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(dash_loop)
             app = create_app(leon_core=leon)
-            web.run_app(app, host="127.0.0.1", port=3000, print=lambda _: None)
+            runner = web.AppRunner(app)
+            dash_loop.run_until_complete(runner.setup())
+            site = web.TCPSite(runner, "127.0.0.1", 3000)
+            dash_loop.run_until_complete(site.start())
+            dash_loop.run_forever()
 
         dash_thread = threading.Thread(target=start_dashboard, daemon=True)
         dash_thread.start()
@@ -186,8 +192,14 @@ def run_gui():
                 def start_dashboard():
                     from dashboard.server import create_app
                     from aiohttp import web
+                    dash_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(dash_loop)
                     app = create_app(leon_core=self.leon_core)
-                    web.run_app(app, host="127.0.0.1", port=3000, print=lambda _: None)
+                    runner = web.AppRunner(app)
+                    dash_loop.run_until_complete(runner.setup())
+                    site = web.TCPSite(runner, "127.0.0.1", 3000)
+                    dash_loop.run_until_complete(site.start())
+                    dash_loop.run_forever()
                 threading.Thread(target=start_dashboard, daemon=True).start()
                 logger.info("🧠 Brain Dashboard: http://localhost:3000")
 

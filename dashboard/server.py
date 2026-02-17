@@ -168,6 +168,7 @@ async def websocket_handler(request):
 
 async def broadcast_state(app):
     """Background task that broadcasts brain state to all connected clients."""
+    global ws_authenticated
     leon = app.get("leon_core")
     while True:
         if ws_authenticated and leon:
@@ -494,8 +495,8 @@ def create_app(leon_core=None) -> web.Application:
     # Generate session token for WebSocket authentication
     token = secrets.token_hex(16)
     app["session_token"] = token
-    print(f"\n  Dashboard session token: {token}\n")
-    logger.info(f"Dashboard session token generated (printed to terminal)")
+    print(f"\n  Dashboard session token: {token}\n", flush=True)
+    logger.info(f"Dashboard session token: {token}")
 
     # Routes
     app.router.add_get("/", index)
