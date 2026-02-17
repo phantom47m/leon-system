@@ -56,12 +56,15 @@ class AgentManager:
         stderr_fh = open(error_file, "w")
 
         # Pipe brief via stdin to avoid argument length limits and shell injection
+        # Unset CLAUDECODE to allow spawning from within a Claude Code session
+        spawn_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         process = subprocess.Popen(
             ["claude", "--print", "-"],
             stdin=subprocess.PIPE,
             stdout=stdout_fh,
             stderr=stderr_fh,
             cwd=project_path,
+            env=spawn_env,
         )
 
         # Write the full brief to stdin and close it so the process can run
