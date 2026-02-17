@@ -19,6 +19,8 @@ import yaml
 from .memory import MemorySystem
 from .agent_manager import AgentManager
 from .task_queue import TaskQueue
+from .agent_index import AgentIndex
+from .scheduler import TaskScheduler
 from .openclaw_interface import OpenClawInterface
 from .api_client import AnthropicAPI
 from .neural_bridge import (
@@ -62,6 +64,9 @@ class Leon:
         self.openclaw = OpenClawInterface(self.config["openclaw"]["config_path"])
         self.agent_manager = AgentManager(self.openclaw, self.config["agents"])
         self.task_queue = TaskQueue(self.config["agents"]["max_concurrent"])
+        self.agent_index = AgentIndex("data/agent_index.json")
+        scheduler_tasks = self.config.get("scheduler", {}).get("tasks", [])
+        self.scheduler = TaskScheduler(scheduler_tasks)
 
         # API client — try vault for API key if env var is empty
         self.api = AnthropicAPI(self.config["api"], vault=self.vault)
@@ -176,6 +181,9 @@ class Leon:
     async def start(self):
         self.running = True
 
+        # Run health checks before anything else
+        self._run_health_checks()
+
         # Start bridge server if Left Brain
         if self.bridge:
             await self.bridge.start()
@@ -215,6 +223,71 @@ class Leon:
         asyncio.create_task(self._auto_daily_briefing())
 
         logger.info("Leon is now running — all systems active")
+
+    def _run_health_checks(self):
+        """Validate system state on startup. Warns but doesn't block."""
+        import socket
+        checks_passed = 0
+        checks_total = 0
+
+        def check(name: str, ok: bool, warn_msg: str = ""):
+            nonlocal checks_passed, checks_total
+            checks_total += 1
+            if ok:
+                checks_passed += 1
+                logger.info(f"  [OK] {name}")
+            else:
+                logger.warning(f"  [!!] {name}: {warn_msg}")
+
+        logger.info("Running startup health checks...")
+
+        # 1. Config file exists and is valid
+        check("Config loaded", bool(self.config), "settings.yaml failed to load")
+
+        # 2. Required data directories
+        for d in ["data", "data/task_briefs", "data/agent_outputs", "logs"]:
+            p = Path(d)
+            check(f"Directory {d}", p.is_dir(), f"missing — creating")
+            if not p.is_dir():
+                p.mkdir(parents=True, exist_ok=True)
+
+        # 3. Check ports aren't already in use
+        for port, name in [(3000, "Dashboard"), (9100, "Bridge")]:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(0.5)
+                result = sock.connect_ex(("127.0.0.1", port))
+                in_use = result == 0
+            except Exception:
+                in_use = False
+            finally:
+                sock.close()
+            check(f"Port {port} ({name}) available", not in_use,
+                  f"port {port} already in use — another Leon instance?")
+
+        # 4. Security modules
+        check("Vault loaded", self.vault is not None, "security/vault.py failed to import")
+        check("Audit log loaded", self.audit_log is not None, "audit log unavailable")
+        check("Permissions loaded", self.permissions is not None, "permission system unavailable")
+
+        # 5. API key configured
+        has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        check("API key configured", has_api_key,
+              "ANTHROPIC_API_KEY not set — use /setkey in dashboard")
+
+        # 6. Sensitive file permissions
+        for fpath in ["data/.vault.enc", "data/.auth.json", "config/settings.yaml"]:
+            p = Path(fpath)
+            if p.exists():
+                mode = oct(p.stat().st_mode)[-3:]
+                check(f"{fpath} permissions ({mode})", mode == "600",
+                      f"expected 600, got {mode}")
+
+        # 7. Memory file
+        mem_file = Path(self.config.get("leon", {}).get("memory_file", "data/leon_memory.json"))
+        check("Memory file accessible", mem_file.parent.is_dir(), f"parent dir missing")
+
+        logger.info(f"Health checks: {checks_passed}/{checks_total} passed")
 
     async def stop(self):
         logger.info("Stopping Leon...")
@@ -520,6 +593,10 @@ Vision: {vision_desc}
         }
         self.task_queue.add_task(agent_id, task_obj)
         self.memory.add_active_task(agent_id, task_obj)
+        self.agent_index.record_spawn(
+            agent_id, task_desc, project["name"], brief_path,
+            str(self.agent_manager.output_dir / f"{agent_id}.log"),
+        )
 
         location = " (local fallback)" if self.brain_role == "left" else ""
         return (
@@ -723,6 +800,12 @@ spawned_by: Leon v1.0
                         results = await self.agent_manager.get_agent_results(agent_id)
                         self.memory.complete_task(agent_id, results)
                         self.task_queue.complete_task(agent_id)
+                        self.agent_index.record_completion(
+                            agent_id,
+                            results.get("summary", ""),
+                            results.get("files_modified", []),
+                            status.get("duration_seconds", 0),
+                        )
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
 
@@ -740,6 +823,11 @@ spawned_by: Leon v1.0
                             "files_modified": [],
                         })
                         self.task_queue.fail_task(agent_id, results.get("errors", ""))
+                        self.agent_index.record_failure(
+                            agent_id,
+                            results.get("errors", "unknown"),
+                            status.get("duration_seconds", 0),
+                        )
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")
 
@@ -763,6 +851,19 @@ spawned_by: Leon v1.0
                 elif self.brain_role == "left":
                     self._bridge_connected = False
                     self._right_brain_status = {}
+
+                # Check scheduled tasks
+                if self.scheduler:
+                    due_tasks = self.scheduler.get_due_tasks()
+                    for sched_task in due_tasks:
+                        cmd = sched_task.get("command", "")
+                        if cmd:
+                            logger.info(f"Running scheduled task: {sched_task['name']} -> {cmd}")
+                            try:
+                                await self.process_user_input(cmd)
+                            except Exception as e:
+                                logger.error(f"Scheduled task failed: {sched_task['name']}: {e}")
+                            self.scheduler.mark_completed(sched_task["name"])
 
                 # Periodic save
                 self.memory.save()

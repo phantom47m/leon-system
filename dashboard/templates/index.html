@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LEON — Brain Monitor</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=6">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=7">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -110,7 +110,7 @@
             <div id="agents-list"></div>
         </div>
 
-        <!-- Bottom Panel — Neural Bridge + Activity -->
+        <!-- Bottom Panel — Neural Bridge + Chat Log -->
         <div id="bottom-panel">
             <div class="bottom-left">
                 <div class="panel-header">
@@ -126,13 +126,14 @@
                     <span class="bridge-node right-node">R</span>
                 </div>
             </div>
-            <div class="bottom-right">
+            <div class="bottom-right" id="chat-panel">
                 <div class="panel-header">
                     <span class="panel-icon">▤</span>
-                    ACTIVITY FEED
+                    COMMAND LOG
+                    <span id="chat-count" class="chat-count">0</span>
                 </div>
                 <div id="activity-feed">
-                    <div class="feed-item"><span class="feed-time">--:--</span> System initialized. Awaiting input.</div>
+                    <div class="feed-item feed-system"><span class="feed-time">--:--</span> System initialized. Awaiting input.</div>
                 </div>
             </div>
         </div>
@@ -178,7 +179,7 @@
         }
     }
     </script>
-    <script type="module" src="/static/js/brain.js?v=5"></script>
+    <script type="module" src="/static/js/brain.js?v=6"></script>
     <script>
         // Show any JS errors on screen for debugging
         window.onerror = function(msg, url, line) {

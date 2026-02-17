@@ -760,7 +760,16 @@ function connectWebSocket() {
 
             // Handle input responses separately
             if (data.type === 'input_response') {
-                appendToFeed(data.timestamp || nowTime(), `Leon: ${escapeHtml(data.message)}`);
+                appendToFeed(data.timestamp || nowTime(), `Leon: ${data.message}`, 'feed-response');
+                return;
+            }
+            // Handle agent completion/failure notifications
+            if (data.type === 'agent_completed') {
+                appendToFeed(nowTime(), `Agent #${(data.agent_id || '').slice(-8)} completed: ${data.summary || ''}`, 'feed-agent-ok');
+                return;
+            }
+            if (data.type === 'agent_failed') {
+                appendToFeed(nowTime(), `Agent #${(data.agent_id || '').slice(-8)} failed: ${data.error || ''}`, 'feed-agent-fail');
                 return;
             }
             updateBrainState(data);
@@ -1007,40 +1016,35 @@ function updateAgentsPanel() {
 }
 
 function updateActivityFeed() {
+    // Only update server-side feed items (agent status);
+    // local items (commands + responses) are already in the DOM via appendToFeed
     const feed = document.getElementById('activity-feed');
     if (!feed) return;
 
-    // Merge server feed items with local items
-    const serverItems = (brainState.taskFeed || []).map(t =>
-        `<div class="feed-item"><span class="feed-time">${escapeHtml(t.time)}</span> ${escapeHtml(t.message)}</div>`
-    );
-
-    const localItems = localFeedItems.slice(-8).map(t =>
-        `<div class="feed-item feed-local"><span class="feed-time">${escapeHtml(t.time)}</span> ${escapeHtml(t.message)}</div>`
-    );
-
-    // Show local items first (most recent), then server items
-    const combined = [...localItems.reverse(), ...serverItems].slice(0, 10);
-
-    if (combined.length > 0) {
-        feed.innerHTML = combined.join('');
+    // Update chat count badge
+    const countEl = document.getElementById('chat-count');
+    if (countEl) {
+        countEl.textContent = feed.children.length;
     }
 }
 
 // ── SLASH COMMANDS ───────────────────────────────────────
 const SLASH_COMMANDS = [
-    { cmd: '/agents',  desc: 'List active agents' },
-    { cmd: '/status',  desc: 'System overview' },
-    { cmd: '/kill',    desc: 'Terminate an agent' },
-    { cmd: '/queue',   desc: 'Show queued tasks' },
-    { cmd: '/retry',   desc: 'Retry a failed agent' },
-    { cmd: '/history', desc: 'Recent completed tasks' },
-    { cmd: '/bridge',  desc: 'Right Brain connection' },
-    { cmd: '/setkey',  desc: 'Store API key in vault' },
-    { cmd: '/vault',   desc: 'List vault keys' },
-    { cmd: '/approve', desc: 'Grant temp permission' },
-    { cmd: '/login',   desc: 'Authenticate as owner' },
-    { cmd: '/help',    desc: 'Show all commands' },
+    { cmd: '/agents',   desc: 'List active agents' },
+    { cmd: '/status',   desc: 'System overview' },
+    { cmd: '/kill',     desc: 'Terminate an agent' },
+    { cmd: '/queue',    desc: 'Show queued tasks' },
+    { cmd: '/retry',    desc: 'Retry a failed agent' },
+    { cmd: '/history',  desc: 'Recent completed tasks' },
+    { cmd: '/search',   desc: 'Search agent history' },
+    { cmd: '/stats',    desc: 'Agent run statistics' },
+    { cmd: '/schedule', desc: 'View scheduled tasks' },
+    { cmd: '/bridge',   desc: 'Right Brain connection' },
+    { cmd: '/setkey',   desc: 'Store API key in vault' },
+    { cmd: '/vault',    desc: 'List vault keys' },
+    { cmd: '/approve',  desc: 'Grant temp permission' },
+    { cmd: '/login',    desc: 'Authenticate as owner' },
+    { cmd: '/help',     desc: 'Show all commands' },
 ];
 
 // ── COMMAND BAR ─────────────────────────────────────────
@@ -1138,7 +1142,7 @@ function initCommandBar() {
         const time = nowTime();
 
         // Add command to local feed
-        appendToFeed(time, `> ${text}`);
+        appendToFeed(time, `> ${text}`, 'feed-command');
 
         // Send via WebSocket
         if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
@@ -1146,7 +1150,7 @@ function initCommandBar() {
         } else {
             // Demo mode response
             setTimeout(() => {
-                appendToFeed(nowTime(), `Leon: [Demo] Received: ${text}`);
+                appendToFeed(nowTime(), `Leon: [Demo] Received: ${text}`, 'feed-response');
             }, 500 + Math.random() * 1000);
         }
 
@@ -1179,16 +1183,47 @@ function initCommandBar() {
     });
 }
 
-function appendToFeed(time, message) {
-    localFeedItems.push({ time, message });
+function appendToFeed(time, message, cssClass) {
+    const feed = document.getElementById('activity-feed');
+    if (!feed) return;
 
-    // Keep local feed bounded
-    if (localFeedItems.length > 50) {
-        localFeedItems = localFeedItems.slice(-30);
+    // Determine CSS class from message content if not provided
+    if (!cssClass) {
+        if (message.startsWith('> ')) {
+            cssClass = 'feed-command';
+        } else if (message.startsWith('Leon:')) {
+            cssClass = 'feed-response';
+        } else if (message.includes('completed') || message.includes('finished')) {
+            cssClass = 'feed-agent-ok';
+        } else if (message.includes('failed') || message.includes('error')) {
+            cssClass = 'feed-agent-fail';
+        } else {
+            cssClass = 'feed-local';
+        }
     }
 
-    // Immediate UI update for the feed
-    updateActivityFeed();
+    const div = document.createElement('div');
+    div.className = `feed-item ${cssClass}`;
+    div.innerHTML = `<span class="feed-time">${escapeHtml(time)}</span> ${escapeHtml(message)}`;
+    feed.appendChild(div);
+
+    // Keep feed bounded (remove oldest items)
+    while (feed.children.length > 200) {
+        feed.removeChild(feed.firstChild);
+    }
+
+    // Auto-scroll to bottom
+    feed.scrollTop = feed.scrollHeight;
+
+    // Update count
+    const countEl = document.getElementById('chat-count');
+    if (countEl) countEl.textContent = feed.children.length;
+
+    // Also store in localFeedItems for state tracking
+    localFeedItems.push({ time, message });
+    if (localFeedItems.length > 200) {
+        localFeedItems = localFeedItems.slice(-100);
+    }
 }
 
 // ── RESIZE ──────────────────────────────────────────────

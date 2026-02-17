@@ -318,7 +318,7 @@ body {
     right: 24px;
     display: flex;
     gap: 20px;
-    height: 130px;
+    height: 240px;
 }
 
 .bottom-left {
@@ -401,21 +401,62 @@ body {
     100% { transform: translateX(30px); opacity: 0; }
 }
 
-/* ── Activity Feed ─────────────────────────────────────── */
+/* ── Chat / Activity Feed ─────────────────────────────── */
 #activity-feed {
-    max-height: 95px;
+    flex: 1;
     overflow-y: auto;
+    padding-right: 4px;
+    scroll-behavior: smooth;
+}
+
+#chat-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-count {
+    margin-left: auto;
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
 }
 
 .feed-item {
     font-size: 12px;
-    padding: 3px 0;
+    padding: 4px 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     animation: feedFadeIn 0.3s ease;
+    line-height: 1.5;
+    word-break: break-word;
 }
 
 .feed-item.feed-local {
     color: var(--cyan);
+}
+
+.feed-item.feed-command {
+    color: var(--cyan);
+    font-weight: 600;
+}
+
+.feed-item.feed-response {
+    color: var(--text);
+    padding-left: 12px;
+    border-left: 2px solid rgba(79, 195, 247, 0.15);
+}
+
+.feed-item.feed-system {
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+.feed-item.feed-agent-ok {
+    color: var(--green);
+}
+
+.feed-item.feed-agent-fail {
+    color: var(--orange);
 }
 
 @keyframes feedFadeIn {
@@ -433,7 +474,7 @@ body {
 /* ── Active Agents Panel ──────────────────────────────── */
 #agents-panel {
     position: absolute;
-    bottom: 274px;
+    bottom: 384px;
     left: 50%;
     transform: translateX(-50%);
     width: 600px;

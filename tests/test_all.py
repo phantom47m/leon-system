@@ -76,8 +76,14 @@ class TestMemorySystem(unittest.TestCase):
 
 class TestTaskQueue(unittest.TestCase):
     def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
         from core.task_queue import TaskQueue
-        self.queue = TaskQueue(max_concurrent=2)
+        self.queue = TaskQueue(max_concurrent=2,
+                               persist_path=os.path.join(self.tmp_dir, "tq.json"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_add_and_status(self):
         self.queue.add_task("t1", {"description": "Task 1"})
@@ -458,6 +464,301 @@ class TestConfigFiles(unittest.TestCase):
         ]
         for f in required:
             self.assertTrue((ROOT / f).exists(), f"Missing file: {f}")
+
+
+# ══════════════════════════════════════════════════════════
+# TASK QUEUE — PERSISTENCE
+# ══════════════════════════════════════════════════════════
+
+class TestTaskQueuePersistence(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.persist_path = os.path.join(self.tmp_dir, "task_queue.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_persist_and_reload(self):
+        from core.task_queue import TaskQueue
+        q = TaskQueue(max_concurrent=2, persist_path=self.persist_path)
+        q.add_task("t1", {"description": "Test task 1"})
+        q.add_task("t2", {"description": "Test task 2"})
+        q.complete_task("t1")
+
+        # Reload from disk
+        q2 = TaskQueue(max_concurrent=2, persist_path=self.persist_path)
+        summary = q2.get_status_summary()
+        # t2 was active — should be moved to completed (process lost on restart)
+        # t1 was already completed
+        self.assertEqual(summary["active"], 0)
+        self.assertGreaterEqual(summary["completed"], 2)
+
+    def test_queued_tasks_survive_restart(self):
+        from core.task_queue import TaskQueue
+        q = TaskQueue(max_concurrent=1, persist_path=self.persist_path)
+        q.add_task("t1", {"description": "Active task"})
+        q.add_task("t2", {"description": "Queued task"})
+        summary = q.get_status_summary()
+        self.assertEqual(summary["queued"], 1)
+
+        # Reload — t1 is moved to failed, t2 promoted
+        q2 = TaskQueue(max_concurrent=1, persist_path=self.persist_path)
+        summary2 = q2.get_status_summary()
+        self.assertEqual(summary2["completed"], 1)  # t1 failed on restart
+
+    def test_atomic_write_survives_corruption(self):
+        from core.task_queue import TaskQueue
+        q = TaskQueue(max_concurrent=2, persist_path=self.persist_path)
+        q.add_task("t1", {"description": "Task"})
+
+        # Corrupt the file
+        with open(self.persist_path, "w") as f:
+            f.write("{corrupt json")
+
+        # Should handle gracefully
+        q2 = TaskQueue(max_concurrent=2, persist_path=self.persist_path)
+        summary = q2.get_status_summary()
+        self.assertEqual(summary["active"], 0)
+
+
+# ══════════════════════════════════════════════════════════
+# AGENT INDEX
+# ══════════════════════════════════════════════════════════
+
+class TestAgentIndex(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.index_path = os.path.join(self.tmp_dir, "agent_index.json")
+        from core.agent_index import AgentIndex
+        self.index = AgentIndex(self.index_path)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_record_and_search(self):
+        self.index.record_spawn("a1", "Fix login bug", "my-project", "/brief", "/out")
+        self.index.record_completion("a1", "Fixed the login page", ["src/login.py"], 45.2)
+
+        results = self.index.search("login")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "completed")
+
+    def test_record_failure(self):
+        self.index.record_spawn("a2", "Deploy feature", "webapp", "/brief", "/out")
+        self.index.record_failure("a2", "Timeout", 120.0)
+
+        results = self.index.search("deploy")
+        self.assertEqual(len(results), 1)
+        self.assertIn("FAILED", results[0]["summary"])
+
+    def test_get_by_project(self):
+        self.index.record_spawn("a1", "Task 1", "proj-a", "/b", "/o")
+        self.index.record_spawn("a2", "Task 2", "proj-b", "/b", "/o")
+        self.index.record_spawn("a3", "Task 3", "proj-a", "/b", "/o")
+
+        results = self.index.get_by_project("proj-a")
+        self.assertEqual(len(results), 2)
+
+    def test_stats(self):
+        self.index.record_spawn("a1", "T1", "p1", "/b", "/o")
+        self.index.record_completion("a1", "Done", [], 10)
+        self.index.record_spawn("a2", "T2", "p1", "/b", "/o")
+        self.index.record_failure("a2", "Err", 5)
+
+        stats = self.index.get_stats()
+        self.assertEqual(stats["total_runs"], 2)
+        self.assertEqual(stats["completed"], 1)
+        self.assertEqual(stats["failed"], 1)
+
+    def test_persistence(self):
+        self.index.record_spawn("a1", "Persisted task", "proj", "/b", "/o")
+
+        from core.agent_index import AgentIndex
+        idx2 = AgentIndex(self.index_path)
+        self.assertEqual(len(idx2.entries), 1)
+
+
+# ══════════════════════════════════════════════════════════
+# SCHEDULER
+# ══════════════════════════════════════════════════════════
+
+class TestScheduler(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.state_path = os.path.join(self.tmp_dir, "scheduler.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_due_tasks(self):
+        from core.scheduler import TaskScheduler
+        config = [
+            {"name": "Task A", "command": "do a", "interval_hours": 24, "enabled": True},
+            {"name": "Task B", "command": "do b", "interval_hours": 24, "enabled": False},
+        ]
+        sched = TaskScheduler(config, self.state_path)
+        due = sched.get_due_tasks()
+        # Task A should be due (never run), Task B disabled
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["name"], "Task A")
+
+    def test_mark_completed_prevents_rerun(self):
+        from core.scheduler import TaskScheduler
+        config = [{"name": "T1", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+
+        due = sched.get_due_tasks()
+        self.assertEqual(len(due), 1)
+
+        sched.mark_completed("T1")
+
+        due2 = sched.get_due_tasks()
+        self.assertEqual(len(due2), 0)  # Not due anymore
+
+    def test_schedule_summary(self):
+        from core.scheduler import TaskScheduler
+        config = [
+            {"name": "Daily", "command": "briefing", "interval_hours": 24, "enabled": True},
+        ]
+        sched = TaskScheduler(config, self.state_path)
+        summary = sched.get_schedule_summary()
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["name"], "Daily")
+        self.assertEqual(summary[0]["last_run"], "never")
+
+    def test_state_persistence(self):
+        from core.scheduler import TaskScheduler
+        config = [{"name": "T1", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+        sched.mark_completed("T1")
+
+        sched2 = TaskScheduler(config, self.state_path)
+        due = sched2.get_due_tasks()
+        self.assertEqual(len(due), 0)
+
+
+# ══════════════════════════════════════════════════════════
+# AUDIT LOG — HASH CHAIN REBUILD
+# ══════════════════════════════════════════════════════════
+
+class TestAuditLogRestart(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        self.tmp.close()
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def test_hash_chain_survives_restart(self):
+        from security.vault import AuditLog
+        # First instance
+        audit1 = AuditLog(self.tmp.name)
+        audit1.log("action1", "first boot")
+        audit1.log("action2", "second event")
+
+        # Simulate restart — new instance reads last hash from file
+        audit2 = AuditLog(self.tmp.name)
+        audit2.log("action3", "after restart")
+
+        # Verify full chain integrity
+        self.assertTrue(audit2.verify_integrity())
+
+    def test_multiple_restarts(self):
+        from security.vault import AuditLog
+        for i in range(5):
+            audit = AuditLog(self.tmp.name)
+            audit.log(f"boot_{i}", f"Boot number {i}")
+
+        final = AuditLog(self.tmp.name)
+        self.assertTrue(final.verify_integrity())
+
+
+# ══════════════════════════════════════════════════════════
+# VAULT — RANDOM SALT
+# ══════════════════════════════════════════════════════════
+
+class TestVaultRandomSalt(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.vault_path = os.path.join(self.tmp_dir, ".vault.enc")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_salt_file_created(self):
+        from security.vault import SecureVault
+        vault = SecureVault(self.vault_path)
+        vault.unlock("test_password")
+        salt_path = os.path.join(self.tmp_dir, ".vault.salt")
+        self.assertTrue(os.path.exists(salt_path))
+        with open(salt_path, "rb") as f:
+            salt_data = f.read()
+        self.assertEqual(len(salt_data), 16)
+
+    def test_salt_reused_on_reopen(self):
+        from security.vault import SecureVault
+        vault1 = SecureVault(self.vault_path)
+        vault1.unlock("password123")
+        vault1.store("key", "value")
+
+        salt_path = os.path.join(self.tmp_dir, ".vault.salt")
+        with open(salt_path, "rb") as f:
+            salt1 = f.read()
+
+        vault2 = SecureVault(self.vault_path)
+        vault2.unlock("password123")
+        with open(salt_path, "rb") as f:
+            salt2 = f.read()
+        self.assertEqual(salt1, salt2)
+        self.assertEqual(vault2.retrieve("key"), "value")
+
+
+# ══════════════════════════════════════════════════════════
+# OPENCLAW — SAFE INTERFACE
+# ══════════════════════════════════════════════════════════
+
+class TestOpenClawSafe(unittest.TestCase):
+    def test_no_execute_command(self):
+        """Verify the dangerous execute_command method is removed."""
+        from core.openclaw_interface import OpenClawInterface
+        oci = OpenClawInterface("/nonexistent/config")
+        self.assertFalse(hasattr(oci, "execute_command"))
+        self.assertFalse(hasattr(oci, "run_and_wait"))
+
+    def test_system_status(self):
+        from core.openclaw_interface import OpenClawInterface
+        oci = OpenClawInterface("/nonexistent/config")
+        status = oci.get_system_status()
+        self.assertIn("load_1m", status)
+        self.assertIn("mem_total_mb", status)
+        self.assertIn("disk_total_gb", status)
+
+
+# ══════════════════════════════════════════════════════════
+# PERMISSION CHECKS
+# ══════════════════════════════════════════════════════════
+
+class TestPermissionGating(unittest.TestCase):
+    def test_temporary_grant_expires(self):
+        from security.vault import AuditLog, PermissionSystem
+        tmp = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        tmp.close()
+        try:
+            audit = AuditLog(tmp.name)
+            perms = PermissionSystem(audit)
+            self.assertFalse(perms.check_permission("delete_files"))
+            perms.grant_temporary("delete_files", duration_minutes=30)
+            self.assertTrue(perms.check_permission("delete_files"))
+
+            # Manually expire the grant
+            perms.temporary_approvals["delete_files"] = time.time() - 1
+            self.assertFalse(perms.check_permission("delete_files"))
+        finally:
+            os.unlink(tmp.name)
 
 
 # ══════════════════════════════════════════════════════════

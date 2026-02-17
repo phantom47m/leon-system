@@ -360,6 +360,56 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 remaining = leon.owner_auth.max_attempts - leon.owner_auth.failed_attempts
                 return f"Authentication failed. {remaining} attempts remaining."
 
+        elif cmd == "/schedule":
+            if hasattr(leon, 'scheduler'):
+                schedule = leon.scheduler.get_schedule_summary()
+                if not schedule:
+                    return "No scheduled tasks configured. Add them to `scheduler.tasks` in settings.yaml."
+                lines = ["**Scheduled Tasks:**\n"]
+                for s in schedule:
+                    status = "ON" if s["enabled"] else "OFF"
+                    lines.append(
+                        f"- [{status}] **{s['name']}** — every {s['interval_hours']}h "
+                        f"(last: {s['last_run']}, next: {s['next_run']})"
+                    )
+                return "\n".join(lines)
+            return "Scheduler not available."
+
+        elif cmd == "/search":
+            if not arg:
+                return "Usage: `/search <query>` — search agent history by description, project, or files"
+            if hasattr(leon, 'agent_index'):
+                results = leon.agent_index.search(arg, limit=10)
+                if not results:
+                    return f"No results for `{arg}`."
+                lines = [f"**Search results for `{arg}`:**\n"]
+                for r in results:
+                    status_icon = "+" if r.get("status") == "completed" else "x"
+                    ts = (r.get("completed_at") or r.get("spawned_at") or "")[:16]
+                    dur = r.get("duration_seconds")
+                    dur_str = f" ({dur:.0f}s)" if dur else ""
+                    desc = r.get("description", "N/A")[:50]
+                    lines.append(f"[{status_icon}] {ts}{dur_str} — {desc} ({r.get('project', '?')})")
+                return "\n".join(lines)
+            return "Agent index not available."
+
+        elif cmd == "/stats":
+            if hasattr(leon, 'agent_index'):
+                stats = leon.agent_index.get_stats()
+                lines = [
+                    "**Agent Stats:**\n",
+                    f"- Total runs: {stats['total_runs']}",
+                    f"- Completed: {stats['completed']}",
+                    f"- Failed: {stats['failed']}",
+                    f"- Running: {stats['running']}",
+                    f"- Success rate: {stats['success_rate']}",
+                    "\n**By project:**",
+                ]
+                for proj, count in sorted(stats['projects'].items(), key=lambda x: -x[1]):
+                    lines.append(f"- {proj}: {count} runs")
+                return "\n".join(lines)
+            return "Agent index not available."
+
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -369,6 +419,9 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/queue` — show queued tasks\n"
                 "- `/retry <id>` — retry a failed agent\n"
                 "- `/history` — recent completed tasks\n"
+                "- `/search <query>` — search agent history\n"
+                "- `/stats` — agent run statistics\n"
+                "- `/schedule` — view scheduled tasks\n"
                 "- `/bridge` — Right Brain connection status\n"
                 "- `/setkey <key>` — store API key in vault\n"
                 "- `/vault list` — show stored vault keys\n"
