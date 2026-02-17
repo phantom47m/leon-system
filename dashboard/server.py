@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,9 @@ STATIC_DIR = DASHBOARD_DIR / "static"
 # Connected WebSocket clients
 ws_clients: set[web.WebSocketResponse] = set()
 
+# Startup time for uptime tracking
+_start_time = time.monotonic()
+
 
 # ── Routes ───────────────────────────────────────────────
 
@@ -34,6 +38,18 @@ async def index(request):
     """Serve the main brain dashboard page."""
     html = (TEMPLATES_DIR / "index.html").read_text()
     return web.Response(text=html, content_type="text/html")
+
+
+async def health(request):
+    """Health check endpoint."""
+    uptime = int(time.monotonic() - _start_time)
+    leon = request.app.get("leon_core")
+    return web.json_response({
+        "status": "ok",
+        "uptime": uptime,
+        "clients": len(ws_clients),
+        "leon_core": leon is not None,
+    })
 
 
 async def websocket_handler(request):
@@ -53,11 +69,37 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                # Handle commands from dashboard (future: voice input, etc.)
+                try:
+                    data = json.loads(msg.data)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Received malformed JSON on WebSocket")
+                    continue
+                # Handle commands from dashboard
                 if data.get("command") == "status":
                     if leon:
                         await ws.send_json(_build_state(leon))
+                elif data.get("command") == "input":
+                    user_msg = data.get("message", "")
+                    if leon and hasattr(leon, "process_user_input"):
+                        try:
+                            response = await leon.process_user_input(user_msg)
+                            await ws.send_json({
+                                "type": "input_response",
+                                "message": str(response),
+                                "timestamp": datetime.now().strftime("%H:%M"),
+                            })
+                        except Exception as e:
+                            await ws.send_json({
+                                "type": "input_response",
+                                "message": f"Error: {e}",
+                                "timestamp": datetime.now().strftime("%H:%M"),
+                            })
+                    else:
+                        await ws.send_json({
+                            "type": "input_response",
+                            "message": f"[Demo] Received: {user_msg}",
+                            "timestamp": datetime.now().strftime("%H:%M"),
+                        })
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"WebSocket error: {ws.exception()}")
     finally:
@@ -86,11 +128,24 @@ async def broadcast_state(app):
 
 def _build_state(leon) -> dict:
     """Build the brain state dict from Leon core."""
+    uptime_seconds = int(time.monotonic() - _start_time)
     try:
         status = leon.get_status()
         tasks = status.get("tasks", {})
-        active_tasks = tasks.get("active_tasks", [])
+        raw_tasks = tasks.get("active_tasks", [])
         active_count = tasks.get("active", 0)
+        queued_count = tasks.get("queued", 0)
+        completed_count = tasks.get("completed", 0)
+        max_concurrent = tasks.get("max_concurrent", 5)
+
+        # Normalize active tasks for dashboard (ensure startedAt exists)
+        active_tasks = []
+        for t in raw_tasks:
+            agent = dict(t)
+            # Map created_at/started_at → startedAt for dashboard JS
+            if "startedAt" not in agent:
+                agent["startedAt"] = agent.get("started_at") or agent.get("created_at", "")
+            active_tasks.append(agent)
 
         # Build activity feed
         feed = []
@@ -119,7 +174,11 @@ def _build_state(leon) -> dict:
             "bridgeActive": bridge_active,
             "activeAgents": active_tasks,
             "agentCount": active_count,
-            "taskCount": tasks.get("queued", 0) + active_count,
+            "taskCount": queued_count + active_count,
+            "completedCount": completed_count,
+            "queuedCount": queued_count,
+            "maxConcurrent": max_concurrent,
+            "uptime": uptime_seconds,
             "taskFeed": feed,
             "signal": signal,
             "timestamp": now,
@@ -131,6 +190,12 @@ def _build_state(leon) -> dict:
             "rightActive": False,
             "bridgeActive": False,
             "activeAgents": [],
+            "agentCount": 0,
+            "taskCount": 0,
+            "completedCount": 0,
+            "queuedCount": 0,
+            "maxConcurrent": 5,
+            "uptime": uptime_seconds,
             "taskFeed": [{"time": datetime.now().strftime("%H:%M"), "message": f"Error: {e}"}],
         }
 
@@ -144,6 +209,7 @@ def create_app(leon_core=None) -> web.Application:
 
     # Routes
     app.router.add_get("/", index)
+    app.router.add_get("/health", health)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
 

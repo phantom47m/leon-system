@@ -33,7 +33,8 @@ class CRM:
     def _load(self) -> dict:
         if self.data_file.exists():
             try:
-                return json.load(open(self.data_file))
+                with open(self.data_file) as f:
+                    return json.load(f)
             except json.JSONDecodeError:
                 pass
         return {

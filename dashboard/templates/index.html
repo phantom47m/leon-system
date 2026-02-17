@@ -20,6 +20,20 @@
                 <span class="logo-text">LEON</span>
                 <span class="logo-sub">NEURAL INTERFACE v2.0</span>
             </div>
+            <div class="top-stats">
+                <div class="top-stat">
+                    <span class="top-stat-label">UPTIME</span>
+                    <span class="top-stat-value" id="stat-uptime">00:00:00</span>
+                </div>
+                <div class="top-stat">
+                    <span class="top-stat-label">COMPLETED</span>
+                    <span class="top-stat-value" id="stat-completed">0</span>
+                </div>
+                <div class="top-stat">
+                    <span class="top-stat-label">QUEUED</span>
+                    <span class="top-stat-value" id="stat-queued">0</span>
+                </div>
+            </div>
             <div class="top-right">
                 <div class="indicator">
                     <span class="dot pulse"></span>
@@ -76,7 +90,7 @@
                 </div>
                 <div class="stat">
                     <span class="stat-label">Load</span>
-                    <div class="stat-bar"><div class="stat-fill right-fill" style="width: 45%"></div></div>
+                    <div class="stat-bar"><div id="load-fill" class="stat-fill right-fill" style="width: 0%"></div></div>
                 </div>
             </div>
             <div class="panel-detail">
@@ -84,6 +98,22 @@
                 <div>🔧 Agents: Ready</div>
                 <div>🌐 Web Control: Standby</div>
             </div>
+        </div>
+
+        <!-- Active Agents Panel -->
+        <div id="agents-panel">
+            <div class="panel-header">
+                <span class="panel-icon">⚙</span>
+                ACTIVE AGENTS
+            </div>
+            <div id="agents-list"></div>
+        </div>
+
+        <!-- Command Input Bar -->
+        <div id="command-bar">
+            <span class="command-prefix">LEON &gt;</span>
+            <input type="text" id="command-input" placeholder="Enter command..." autocomplete="off" spellcheck="false">
+            <button id="command-send">SEND</button>
         </div>
 
         <!-- Bottom Panel — Neural Bridge + Activity -->
@@ -111,14 +141,6 @@
                     <div class="feed-item"><span class="feed-time">--:--</span> System initialized. Awaiting input.</div>
                 </div>
             </div>
-        </div>
-
-        <!-- Voice Input Indicator -->
-        <div id="voice-indicator">
-            <div class="voice-ring"></div>
-            <div class="voice-ring ring-2"></div>
-            <div class="voice-ring ring-3"></div>
-            <div class="voice-text">🎤 "Hey Leon"</div>
         </div>
 
         <!-- Corner Decorations (TRON style) -->

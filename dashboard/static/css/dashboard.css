@@ -14,6 +14,7 @@
     --text-dim:   #5a6380;
     --glow-cyan:  0 0 10px rgba(79, 195, 247, 0.3);
     --glow-orange: 0 0 10px rgba(255, 112, 67, 0.3);
+    --glow-green: 0 0 10px rgba(118, 255, 3, 0.3);
 }
 
 * {
@@ -102,6 +103,37 @@ body {
     color: var(--text-dim);
     letter-spacing: 3px;
     text-transform: uppercase;
+}
+
+/* ── Top Stats ────────────────────────────────────────── */
+.top-stats {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+}
+
+.top-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.top-stat-label {
+    font-family: 'Orbitron', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+}
+
+.top-stat-value {
+    font-family: 'Orbitron', monospace;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--cyan);
+    text-shadow: var(--glow-cyan);
 }
 
 .top-right {
@@ -285,7 +317,7 @@ body {
     right: 24px;
     display: flex;
     gap: 20px;
-    height: 160px;
+    height: 140px;
 }
 
 .bottom-left {
@@ -370,7 +402,7 @@ body {
 
 /* ── Activity Feed ─────────────────────────────────────── */
 #activity-feed {
-    max-height: 110px;
+    max-height: 95px;
     overflow-y: auto;
 }
 
@@ -379,6 +411,10 @@ body {
     padding: 3px 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     animation: feedFadeIn 0.3s ease;
+}
+
+.feed-item.feed-local {
+    color: var(--cyan);
 }
 
 @keyframes feedFadeIn {
@@ -393,41 +429,166 @@ body {
     margin-right: 8px;
 }
 
-/* ── Voice Indicator ───────────────────────────────────── */
-#voice-indicator {
+/* ── Active Agents Panel ──────────────────────────────── */
+#agents-panel {
     position: absolute;
-    bottom: 200px;
+    bottom: 210px;
     left: 50%;
     transform: translateX(-50%);
-    text-align: center;
+    width: 600px;
+    max-width: calc(100vw - 600px);
+    padding: 12px 16px;
+    background: var(--panel-bg);
+    border: 1px solid rgba(118, 255, 3, 0.15);
+    border-radius: 4px;
+    backdrop-filter: blur(10px);
+    border-top: 2px solid var(--green);
 }
 
-.voice-ring {
-    position: absolute;
-    width: 60px;
-    height: 60px;
-    border: 1px solid rgba(79, 195, 247, 0.15);
+#agents-panel .panel-header {
+    color: var(--green);
+    margin-bottom: 8px;
+}
+
+#agents-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.agents-empty {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+}
+
+.agent-card {
+    flex: 1 1 calc(50% - 8px);
+    min-width: 200px;
+    padding: 8px 10px;
+    background: rgba(118, 255, 3, 0.04);
+    border: 1px solid rgba(118, 255, 3, 0.12);
+    border-radius: 3px;
+    border-left: 2px solid var(--green);
+}
+
+.agent-card-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.agent-status-dot {
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    animation: voiceRipple 3s ease-out infinite;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: dotPulse 2s ease-in-out infinite;
 }
 
-.ring-2 { animation-delay: 1s; }
-.ring-3 { animation-delay: 2s; }
-
-@keyframes voiceRipple {
-    0%   { width: 40px; height: 40px; opacity: 0.6; }
-    100% { width: 120px; height: 120px; opacity: 0; }
+.agent-desc {
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-.voice-text {
+.agent-card-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.agent-project {
+    font-family: 'Orbitron', monospace;
+    font-size: 9px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.agent-elapsed {
     font-family: 'Orbitron', monospace;
     font-size: 10px;
-    color: var(--text-dim);
+    color: var(--green);
+    letter-spacing: 1px;
+}
+
+/* ── Command Bar ──────────────────────────────────────── */
+#command-bar {
+    position: absolute;
+    bottom: 168px;
+    left: 24px;
+    right: 24px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    backdrop-filter: blur(10px);
+}
+
+.command-prefix {
+    font-family: 'Orbitron', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--cyan);
     letter-spacing: 2px;
-    margin-top: 40px;
+    text-shadow: var(--glow-cyan);
+    white-space: nowrap;
+}
+
+#command-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    caret-color: var(--cyan);
+}
+
+#command-input::placeholder {
+    color: var(--text-dim);
+    opacity: 0.5;
+}
+
+#command-input:focus {
+    text-shadow: 0 0 4px rgba(79, 195, 247, 0.15);
+}
+
+#command-send {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--cyan);
+    font-family: 'Orbitron', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+#command-send:hover {
+    background: rgba(79, 195, 247, 0.1);
+    border-color: var(--cyan);
+    box-shadow: var(--glow-cyan);
+}
+
+/* ── Voice Indicator (hidden — replaced by command bar) ── */
+#voice-indicator {
+    display: none;
 }
 
 /* ── Corner Decorations ────────────────────────────────── */
@@ -503,4 +664,24 @@ body {
     .panel { width: 200px; }
     #bottom-panel { flex-direction: column; height: auto; }
     .bottom-left { width: 100%; }
+    .top-stats { gap: 12px; }
+    .top-stat-label { font-size: 8px; }
+    .top-stat-value { font-size: 11px; }
+    #agents-panel {
+        width: calc(100vw - 48px);
+        max-width: none;
+        left: 24px;
+        transform: none;
+    }
+    #command-bar {
+        bottom: 168px;
+    }
+}
+
+@media (max-width: 600px) {
+    .logo-sub { display: none; }
+    .top-stats { gap: 8px; }
+    .panel { width: 160px; padding: 10px; }
+    #agents-panel { bottom: 170px; }
+    .agent-card { flex: 1 1 100%; min-width: 0; }
 }

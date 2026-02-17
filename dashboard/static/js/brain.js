@@ -48,8 +48,30 @@ let brainState = {
     rightActive: false,
     bridgeActive: false,
     activeAgents: [],
+    agentCount: 0,
+    taskCount: 0,
+    completedCount: 0,
+    queuedCount: 0,
+    maxConcurrent: 5,
+    uptime: 0,
     taskFeed: [],
 };
+
+// Module-level WebSocket reference for command sending
+let wsConnection = null;
+
+// Local feed items (commands + responses) merged with server items
+let localFeedItems = [];
+
+// Demo mode uptime counter
+let demoUptimeStart = Date.now();
+
+// WebSocket reconnect backoff
+let wsReconnectDelay = 1000; // starts at 1s, grows exponentially
+const WS_MAX_RECONNECT_DELAY = 30000;
+
+// Max command input length
+const MAX_INPUT_LENGTH = 2000;
 
 // ── INIT ────────────────────────────────────────────────
 function init() {
@@ -112,6 +134,9 @@ function init() {
     // WebSocket for live brain data
     connectWebSocket();
 
+    // Initialize command bar
+    initCommandBar();
+
     // Start
     animate();
 }
@@ -136,7 +161,7 @@ function createHemisphere(side) {
         const r = CFG.HEMISPHERE_RADIUS * (0.5 + 0.5 * Math.random());
 
         // Ellipsoid scaling (wider than tall, flatter on bridge side)
-        const scaleX = side === 'left' ? 0.9 : 0.9;
+        const scaleX = 0.9;
         const scaleY = 1.1;
         const scaleZ = 1.0;
 
@@ -504,7 +529,6 @@ function animate() {
             continue;
         }
         // Curved path
-        const mid = new THREE.Vector3(0, 0.5 * Math.sin(s.t * Math.PI), 0);
         s.mesh.position.lerpVectors(s.start, s.end, s.t);
         s.mesh.position.y += 0.5 * Math.sin(s.t * Math.PI);
         s.mesh.material.opacity = 1 - s.t * 0.5;
@@ -533,34 +557,106 @@ function animate() {
 function connectWebSocket() {
     try {
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
+        wsConnection = ws;
+
+        ws.onopen = () => {
+            wsReconnectDelay = 1000; // Reset backoff on successful connect
+            // Stop demo mode if it was running
+            if (demoInterval) {
+                clearInterval(demoInterval);
+                demoInterval = null;
+            }
+        };
 
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
+            let data;
+            try {
+                data = JSON.parse(event.data);
+            } catch (e) {
+                return; // Ignore malformed messages
+            }
+            // Handle input responses separately
+            if (data.type === 'input_response') {
+                appendToFeed(data.timestamp || nowTime(), `Leon: ${escapeHtml(data.message)}`);
+                return;
+            }
             updateBrainState(data);
         };
 
         ws.onclose = () => {
-            // Reconnect after 3 seconds
-            setTimeout(connectWebSocket, 3000);
+            wsConnection = null;
+            // Reconnect with exponential backoff
+            setTimeout(connectWebSocket, wsReconnectDelay);
+            wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
         };
 
         ws.onerror = () => {
+            wsConnection = null;
             // Run in demo mode if no server
-            setInterval(() => {
-                // Simulate activity
-                brainState.leftActive = true;
-                brainState.rightActive = Math.random() > 0.3;
-                brainState.bridgeActive = brainState.rightActive;
-
-                updateUI();
-            }, 2000);
+            startDemoMode();
         };
     } catch (e) {
         // Demo mode
-        brainState.leftActive = true;
-        brainState.bridgeActive = true;
-        brainState.rightActive = true;
+        startDemoMode();
     }
+}
+
+// ── DEMO MODE ───────────────────────────────────────────
+let demoInterval = null;
+let demoCompletedCount = 0;
+
+const demoAgentPool = [
+    { description: 'Scanning project dependencies', project: 'leon-system', type: 'scanner' },
+    { description: 'Running test suite', project: 'openclaw', type: 'tester' },
+    { description: 'Analyzing code patterns', project: 'leon-system', type: 'analyzer' },
+    { description: 'Deploying service update', project: 'dashboard', type: 'deployer' },
+    { description: 'Monitoring system health', project: 'infra', type: 'monitor' },
+    { description: 'Indexing documentation', project: 'docs', type: 'indexer' },
+];
+
+function startDemoMode() {
+    if (demoInterval) return; // Already running
+
+    let demoAgents = [];
+    let demoQueued = 2;
+
+    demoInterval = setInterval(() => {
+        // Randomly add/remove agents
+        if (Math.random() > 0.5 && demoAgents.length < 4) {
+            const pool = demoAgentPool.filter(a => !demoAgents.some(d => d.description === a.description));
+            if (pool.length > 0) {
+                const agent = { ...pool[Math.floor(Math.random() * pool.length)] };
+                agent.startedAt = new Date(Date.now() - Math.floor(Math.random() * 120000)).toISOString();
+                demoAgents.push(agent);
+            }
+        } else if (demoAgents.length > 0 && Math.random() > 0.6) {
+            demoAgents.pop();
+            demoCompletedCount++;
+        }
+
+        demoQueued = Math.floor(Math.random() * 5);
+        const uptimeSeconds = Math.floor((Date.now() - demoUptimeStart) / 1000);
+
+        brainState.leftActive = true;
+        brainState.rightActive = demoAgents.length > 0 || Math.random() > 0.3;
+        brainState.bridgeActive = brainState.rightActive;
+        brainState.activeAgents = demoAgents;
+        brainState.agentCount = demoAgents.length;
+        brainState.taskCount = demoAgents.length + demoQueued;
+        brainState.completedCount = demoCompletedCount;
+        brainState.queuedCount = demoQueued;
+        brainState.maxConcurrent = 5;
+        brainState.uptime = uptimeSeconds;
+
+        // Generate demo feed items from server perspective
+        const now = nowTime();
+        brainState.taskFeed = demoAgents.map(a => ({
+            time: now,
+            message: `⚡ Agent working: ${a.description}`
+        }));
+
+        updateUI();
+    }, 2000);
 }
 
 function updateBrainState(data) {
@@ -571,6 +667,25 @@ function updateBrainState(data) {
     }
 
     updateUI();
+}
+
+// ── HELPERS ─────────────────────────────────────────────
+function nowTime() {
+    const d = new Date();
+    return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+}
+
+function formatUptime(totalSeconds) {
+    const h = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
+    const m = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
+    const s = (totalSeconds % 60).toString().padStart(2, '0');
+    return `${h}:${m}:${s}`;
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
 }
 
 // ── UI UPDATES ──────────────────────────────────────────
@@ -596,21 +711,165 @@ function updateUI() {
         bridgeStatus.className = brainState.bridgeActive ? 'status synced' : 'status idle';
     }
 
-    // Task feed
-    const feed = document.getElementById('activity-feed');
-    if (feed && brainState.taskFeed) {
-        feed.innerHTML = brainState.taskFeed
-            .slice(-8)
-            .reverse()
-            .map(t => `<div class="feed-item"><span class="feed-time">${t.time}</span> ${t.message}</div>`)
-            .join('');
-    }
-
-    // Agent count
+    // Agent count (use agentCount from state, not activeAgents.length)
     const agentCount = document.getElementById('agent-count');
     if (agentCount) {
-        agentCount.textContent = brainState.activeAgents?.length || 0;
+        agentCount.textContent = brainState.agentCount || 0;
     }
+
+    // Task count
+    const taskCount = document.getElementById('task-count');
+    if (taskCount) {
+        taskCount.textContent = brainState.taskCount || 0;
+    }
+
+    // Load bar (active / maxConcurrent)
+    const loadFill = document.getElementById('load-fill');
+    if (loadFill) {
+        const max = brainState.maxConcurrent || 5;
+        const active = brainState.agentCount || 0;
+        const pct = Math.min(100, Math.round((active / max) * 100));
+        loadFill.style.width = pct + '%';
+    }
+
+    // System stats (top bar)
+    updateSystemStats();
+
+    // Active agents panel
+    updateAgentsPanel();
+
+    // Activity feed — merge server + local items
+    updateActivityFeed();
+}
+
+function updateSystemStats() {
+    const uptimeEl = document.getElementById('stat-uptime');
+    if (uptimeEl) {
+        uptimeEl.textContent = formatUptime(brainState.uptime || 0);
+    }
+
+    const completedEl = document.getElementById('stat-completed');
+    if (completedEl) {
+        completedEl.textContent = brainState.completedCount || 0;
+    }
+
+    const queuedEl = document.getElementById('stat-queued');
+    if (queuedEl) {
+        queuedEl.textContent = brainState.queuedCount || 0;
+    }
+}
+
+function updateAgentsPanel() {
+    const agentsList = document.getElementById('agents-list');
+    if (!agentsList) return;
+
+    const agents = brainState.activeAgents || [];
+
+    if (agents.length === 0) {
+        agentsList.innerHTML = '<div class="agents-empty">No active agents</div>';
+        return;
+    }
+
+    agentsList.innerHTML = agents.map(agent => {
+        // Calculate elapsed time
+        let elapsed = '';
+        if (agent.startedAt) {
+            const startMs = new Date(agent.startedAt).getTime();
+            const elapsedSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+            const min = Math.floor(elapsedSec / 60);
+            const sec = elapsedSec % 60;
+            elapsed = `${min}m ${sec.toString().padStart(2, '0')}s`;
+        }
+
+        const desc = escapeHtml(agent.description || 'Working...');
+        const project = escapeHtml(agent.project || '');
+
+        return `<div class="agent-card">
+            <div class="agent-card-top">
+                <span class="agent-status-dot"></span>
+                <span class="agent-desc">${desc}</span>
+            </div>
+            <div class="agent-card-bottom">
+                ${project ? `<span class="agent-project">${project}</span>` : ''}
+                ${elapsed ? `<span class="agent-elapsed">${elapsed}</span>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function updateActivityFeed() {
+    const feed = document.getElementById('activity-feed');
+    if (!feed) return;
+
+    // Merge server feed items with local items
+    const serverItems = (brainState.taskFeed || []).map(t =>
+        `<div class="feed-item"><span class="feed-time">${escapeHtml(t.time)}</span> ${escapeHtml(t.message)}</div>`
+    );
+
+    const localItems = localFeedItems.slice(-8).map(t =>
+        `<div class="feed-item feed-local"><span class="feed-time">${escapeHtml(t.time)}</span> ${escapeHtml(t.message)}</div>`
+    );
+
+    // Show local items first (most recent), then server items
+    const combined = [...localItems.reverse(), ...serverItems].slice(0, 10);
+
+    if (combined.length > 0) {
+        feed.innerHTML = combined.join('');
+    }
+}
+
+// ── COMMAND BAR ─────────────────────────────────────────
+function initCommandBar() {
+    const input = document.getElementById('command-input');
+    const sendBtn = document.getElementById('command-send');
+
+    if (!input || !sendBtn) return;
+
+    function sendCommand() {
+        const text = input.value.trim();
+        if (!text) return;
+        if (text.length > MAX_INPUT_LENGTH) {
+            appendToFeed(nowTime(), `System: Input too long (max ${MAX_INPUT_LENGTH} chars)`);
+            return;
+        }
+
+        const time = nowTime();
+
+        // Add command to local feed
+        appendToFeed(time, `> ${text}`);
+
+        // Send via WebSocket
+        if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+            wsConnection.send(JSON.stringify({ command: 'input', message: text }));
+        } else {
+            // Demo mode response
+            setTimeout(() => {
+                appendToFeed(nowTime(), `Leon: [Demo] Received: ${text}`);
+            }, 500 + Math.random() * 1000);
+        }
+
+        input.value = '';
+        input.focus();
+    }
+
+    sendBtn.addEventListener('click', sendCommand);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            sendCommand();
+        }
+    });
+}
+
+function appendToFeed(time, message) {
+    localFeedItems.push({ time, message });
+
+    // Keep local feed bounded
+    if (localFeedItems.length > 50) {
+        localFeedItems = localFeedItems.slice(-30);
+    }
+
+    // Immediate UI update for the feed
+    updateActivityFeed();
 }
 
 // ── RESIZE ──────────────────────────────────────────────

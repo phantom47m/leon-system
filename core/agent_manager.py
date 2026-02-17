@@ -47,23 +47,16 @@ class AgentManager:
         error_file = self.output_dir / f"{agent_id}.err"
 
         # Read the brief content
-        brief_content = Path(brief_path).read_text()
-
-        # Build the Claude Code command
-        # Uses --print for non-interactive mode, pipes output to log file
-        cmd = (
-            f'cd "{project_path}" && '
-            f'claude --print "{brief_content[:4000]}" '
-            f'> "{output_file}" 2> "{error_file}" &'
-        )
+        brief_content = Path(brief_path).read_text()[:4000]
 
         logger.info(f"Spawning agent {agent_id} in {project_path}")
 
+        # Use stdin to pass the brief content safely (avoids shell injection)
         process = subprocess.Popen(
-            ["bash", "-c", cmd],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            ["claude", "--print", brief_content],
+            stdout=open(output_file, "w"),
+            stderr=open(error_file, "w"),
+            cwd=project_path,
         )
 
         self.active_agents[agent_id] = {
@@ -73,9 +66,9 @@ class AgentManager:
             "project_path": project_path,
             "output_file": str(output_file),
             "error_file": str(error_file),
-            "started_at": datetime.now(),
+            "started_at": datetime.now().isoformat(),
             "status": "running",
-            "last_check": datetime.now(),
+            "last_check": datetime.now().isoformat(),
             "retries": 0,
         }
 
@@ -98,14 +91,15 @@ class AgentManager:
         failed = (not is_running) and not completed
 
         # Timeout check
-        elapsed = (datetime.now() - agent["started_at"]).total_seconds()
+        started = datetime.fromisoformat(agent["started_at"])
+        elapsed = (datetime.now() - started).total_seconds()
         if is_running and elapsed > self.timeout:
             logger.warning(f"Agent {agent_id} timed out after {elapsed:.0f}s")
             await self.terminate_agent(agent_id)
             failed = True
 
         agent["status"] = "running" if is_running else ("completed" if completed else "failed")
-        agent["last_check"] = datetime.now()
+        agent["last_check"] = datetime.now().isoformat()
 
         return {
             "running": is_running,
@@ -131,7 +125,7 @@ class AgentManager:
             "success": agent["status"] == "completed",
             "output": output,
             "errors": errors,
-            "duration_seconds": (datetime.now() - agent["started_at"]).total_seconds(),
+            "duration_seconds": (datetime.now() - datetime.fromisoformat(agent["started_at"])).total_seconds(),
         }
 
     async def terminate_agent(self, agent_id: str):

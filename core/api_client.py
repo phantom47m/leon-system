@@ -14,8 +14,14 @@ class AnthropicAPI:
 
     def __init__(self, config: dict):
         import anthropic
+        import os
 
-        self.client = anthropic.Anthropic()
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            self.client = anthropic.AsyncAnthropic(api_key=api_key)
+        else:
+            self.client = anthropic.AsyncAnthropic()
+            logger.warning("ANTHROPIC_API_KEY not set — API calls will fail until configured")
         self.model = config.get("model", "claude-sonnet-4-5-20250929")
         self.max_tokens = config.get("max_tokens", 8000)
         self.temperature = config.get("temperature", 0.7)
@@ -24,7 +30,7 @@ class AnthropicAPI:
     async def create_message(self, system: str, messages: list) -> str:
         """Full conversation-style request"""
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
@@ -39,7 +45,7 @@ class AnthropicAPI:
     async def quick_request(self, prompt: str) -> str:
         """Single-turn quick request (task analysis, brief generation, etc.)"""
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=self.max_tokens,
                 messages=[{"role": "user", "content": prompt}],

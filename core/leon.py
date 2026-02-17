@@ -30,8 +30,15 @@ class Leon:
     def __init__(self, config_path: str = "config/settings.yaml"):
         logger.info("Initializing Leon...")
 
-        with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+        try:
+            with open(config_path, "r") as f:
+                self.config = yaml.safe_load(f)
+        except FileNotFoundError:
+            logger.critical(f"Config file not found: {config_path}")
+            raise SystemExit(f"Missing config: {config_path}")
+        except yaml.YAMLError as e:
+            logger.critical(f"Invalid YAML in {config_path}: {e}")
+            raise SystemExit(f"Bad config: {e}")
 
         # Core components
         self.memory = MemorySystem(self.config["leon"]["memory_file"])
@@ -41,48 +48,74 @@ class Leon:
         self.api = AnthropicAPI(self.config["api"])
 
         # Load personality
-        with open(self.config["leon"]["personality_file"], "r") as f:
-            personality = yaml.safe_load(f)
-        self.system_prompt = personality["system_prompt"]
+        personality_file = self.config["leon"]["personality_file"]
+        try:
+            with open(personality_file, "r") as f:
+                personality = yaml.safe_load(f)
+            self.system_prompt = personality["system_prompt"]
+        except FileNotFoundError:
+            logger.warning(f"Personality file not found: {personality_file}, using default")
+            self.system_prompt = "You are Leon, a helpful AI assistant and orchestrator."
 
         # Load projects
         projects_file = self.config.get("leon", {}).get("projects_file", "config/projects.yaml")
         if Path(projects_file).exists():
-            with open(projects_file, "r") as f:
-                self.projects_config = yaml.safe_load(f) or {}
+            try:
+                with open(projects_file, "r") as f:
+                    self.projects_config = yaml.safe_load(f) or {}
+            except (yaml.YAMLError, json.JSONDecodeError):
+                self.projects_config = {"projects": []}
         else:
             self.projects_config = {"projects": []}
 
         # Security system
-        from security.vault import SecureVault, OwnerAuth, AuditLog, PermissionSystem
-        self.audit_log = AuditLog("data/audit.log")
-        self.vault = SecureVault("data/.vault.enc")
-        self.owner_auth = OwnerAuth("data/.auth.json")
-        self.permissions = PermissionSystem(self.audit_log)
+        try:
+            from security.vault import SecureVault, OwnerAuth, AuditLog, PermissionSystem
+            self.audit_log = AuditLog("data/audit.log")
+            self.vault = SecureVault("data/.vault.enc")
+            self.owner_auth = OwnerAuth("data/.auth.json")
+            self.permissions = PermissionSystem(self.audit_log)
+        except Exception as e:
+            logger.error(f"Security module failed to load: {e}")
+            self.audit_log = self.vault = self.owner_auth = self.permissions = None
 
         # Hardware — 3D printing
-        from hardware.printing import PrinterManager
-        printer_config = "config/printers.yaml"
-        self.printer = PrinterManager(printer_config, self.api) if Path(printer_config).exists() else None
+        try:
+            from hardware.printing import PrinterManager, STLSearcher
+            printer_config = "config/printers.yaml"
+            self.printer = PrinterManager(printer_config) if Path(printer_config).exists() else None
+            self.stl_searcher = STLSearcher()
+        except Exception as e:
+            logger.warning(f"3D printing module not available: {e}")
+            self.printer = None
+            self.stl_searcher = None
 
         # Vision system
-        from vision.vision import VisionSystem
-        self.vision = VisionSystem(api_client=self.api, analysis_interval=3.0)
+        try:
+            from vision.vision import VisionSystem
+            self.vision = VisionSystem(api_client=self.api, analysis_interval=3.0)
+        except Exception as e:
+            logger.warning(f"Vision module not available: {e}")
+            self.vision = None
 
         # Business modules
-        from business.leads import LeadGenerator
-        from business.crm import CRM
-        from business.finance import FinanceTracker
-        from business.comms import CommsHub
-        from business.assistant import PersonalAssistant
-        self.leads = LeadGenerator()
-        self.crm = CRM()
-        self.finance = FinanceTracker()
-        self.comms = CommsHub()
-        self.assistant = PersonalAssistant(
-            crm=self.crm, finance=self.finance, comms=self.comms,
-            memory=self.memory, api_client=self.api,
-        )
+        try:
+            from business.crm import CRM
+            from business.finance import FinanceTracker
+            from business.comms import CommsHub
+            from business.leads import LeadGenerator
+            from business.assistant import PersonalAssistant
+            self.crm = CRM()
+            self.finance = FinanceTracker()
+            self.comms = CommsHub()
+            self.leads = LeadGenerator(crm=self.crm, api_client=self.api)
+            self.assistant = PersonalAssistant(
+                crm=self.crm, finance=self.finance, comms=self.comms,
+                memory=self.memory, api_client=self.api,
+            )
+        except Exception as e:
+            logger.error(f"Business modules failed to load: {e}")
+            self.crm = self.finance = self.comms = self.leads = self.assistant = None
 
         self.running = False
         self._awareness_task = None
@@ -99,14 +132,16 @@ class Leon:
         self._awareness_task = asyncio.create_task(self._awareness_loop())
 
         # Start vision if camera available
-        try:
-            self.vision.start()
-            self._vision_task = asyncio.create_task(self.vision.run_analysis_loop())
-            logger.info("Vision system active")
-        except Exception as e:
-            logger.warning(f"Vision system not started: {e}")
+        if self.vision:
+            try:
+                self.vision.start()
+                self._vision_task = asyncio.create_task(self.vision.run_analysis_loop())
+                logger.info("Vision system active")
+            except Exception as e:
+                logger.warning(f"Vision system not started: {e}")
 
-        self.audit_log.log("system_start", "Leon started", "info")
+        if self.audit_log:
+            self.audit_log.log("system_start", "Leon started", "info")
         logger.info("Leon is now running — all systems active")
 
     async def stop(self):
@@ -116,9 +151,12 @@ class Leon:
             self._awareness_task.cancel()
         if self._vision_task:
             self._vision_task.cancel()
-        self.vision.stop()
-        self.vault.lock()
-        self.audit_log.log("system_stop", "Leon stopped", "info")
+        if self.vision:
+            self.vision.stop()
+        if self.vault:
+            self.vault.lock()
+        if self.audit_log:
+            self.audit_log.log("system_stop", "Leon stopped", "info")
         self.memory.save()
         logger.info("Leon stopped")
 
@@ -160,45 +198,53 @@ class Leon:
         msg = message.lower()
 
         # 3D Printing
-        if self.printer and any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti"]):
-            if "find" in msg or "search" in msg or "stl" in msg:
-                query = message  # Let the printer manager parse it
-                results = await self.printer.search_stl(query)
+        if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti"]):
+            if ("find" in msg or "search" in msg or "stl" in msg) and self.stl_searcher:
+                results = await self.stl_searcher.search(message)
                 if results:
                     lines = ["Found some STL files:\n"]
                     for i, r in enumerate(results[:5], 1):
                         lines.append(f"{i}. **{r.get('name', 'Untitled')}** — {r.get('url', 'N/A')}")
                     return "\n".join(lines)
                 return "Couldn't find any matching STL files. Try different keywords."
-            if "status" in msg:
-                statuses = self.printer.get_all_status()
-                if not statuses:
+            if "status" in msg and self.printer:
+                printers = self.printer.list_printers()
+                if not printers:
                     return "No printers configured. Update config/printers.yaml with your printer details."
                 lines = ["Printer status:\n"]
-                for name, s in statuses.items():
-                    lines.append(f"**{name}**: {s.get('state', 'unknown')} — {s.get('progress', 0)}%")
+                for p in printers:
+                    s = p.get_status()
+                    lines.append(f"**{p.name}**: {s.get('state', 'unknown')} — {s.get('progress', 0)}%")
                 return "\n".join(lines)
 
         # Vision
         if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around"]):
+            if not self.vision:
+                return "Vision system is not available."
             return self.vision.describe_scene()
 
         # Business — leads
         if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect"]):
-            self.audit_log.log("lead_hunt", message, "info")
+            if self.audit_log:
+                self.audit_log.log("lead_hunt", message, "info")
             return "Starting lead hunt... I'll search for businesses that need websites and score them. Check back shortly."
 
         # Business — finance
         if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings"]):
-            summary = self.finance.get_daily_summary()
-            return summary
+            if not self.finance:
+                return "Finance module is not available."
+            return self.finance.get_daily_summary()
 
         # Business — briefing
         if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief"]):
-            return await self.assistant.daily_briefing()
+            if not self.assistant:
+                return "Personal assistant module is not available."
+            return await self.assistant.generate_daily_briefing()
 
         # Security
         if "audit log" in msg:
+            if not self.audit_log:
+                return "Audit log is not available."
             entries = self.audit_log.get_recent(10)
             if not entries:
                 return "Audit log is clean — no entries yet."
@@ -258,7 +304,7 @@ Rules:
         projects = self.memory.list_projects()
 
         # Inject memory context into system prompt
-        vision_desc = self.vision.describe_scene() if self.vision._running else "Vision inactive"
+        vision_desc = self.vision.describe_scene() if self.vision and self.vision._running else "Vision inactive"
 
         context_block = f"""
 ## Current State
@@ -470,16 +516,20 @@ spawned_by: Leon v1.0
 
     def get_status(self) -> dict:
         """Get full system status for UI."""
+        security = {}
+        if self.vault and self.owner_auth and self.audit_log:
+            security = {
+                "vault_unlocked": self.vault._unlocked,
+                "authenticated": self.owner_auth.is_authenticated(),
+                "audit_integrity": self.audit_log.verify_integrity(),
+            }
+
         return {
             "tasks": self.task_queue.get_status_summary(),
             "projects": self.memory.list_projects(),
             "active_agents": len(self.agent_manager.active_agents),
-            "vision": self.vision.get_status(),
-            "security": {
-                "vault_unlocked": self.vault._unlocked,
-                "authenticated": self.owner_auth.is_authenticated(),
-                "audit_integrity": self.audit_log.verify_integrity(),
-            },
+            "vision": self.vision.get_status() if self.vision else {},
+            "security": security,
             "printer": self.printer is not None,
             "crm_pipeline": self.crm.get_pipeline_summary() if self.crm else {},
         }

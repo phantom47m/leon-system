@@ -70,6 +70,7 @@ class TaskQueue:
             "active": len(self.active_tasks),
             "queued": len(self.queue),
             "completed": len(self.completed),
+            "max_concurrent": self.max_concurrent,
             "active_tasks": list(self.active_tasks.values()),
             "queued_tasks": list(self.queue),
         }

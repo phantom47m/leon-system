@@ -2,24 +2,15 @@
 # Add your projects here so Leon knows where to work
 
 projects:
-  # Example project - replace with your actual projects:
-  #
-  # - name: "MotoRev API"
-  #   path: "/home/phantom47/projects/motorev-api"
-  #   type: "backend"
-  #   tech_stack:
-  #     - "Node.js"
-  #     - "Express"
-  #     - "PostgreSQL"
-  #
-  # - name: "RingZero"
-  #   path: "/home/phantom47/projects/ringzero"
-  #   type: "frontend"
-  #   tech_stack:
-  #     - "React"
-  #     - "TypeScript"
-
-  []  # Empty list - add projects above
+  - name: "leon-system"
+    path: "/home/deansabr/leon-system"
+    type: "fullstack"
+    tech_stack:
+      - "Python"
+      - "aiohttp"
+      - "Three.js"
+      - "JavaScript"
+      - "HTML/CSS"
 
 default_preferences:
   coding_style: "clean, well-commented"
