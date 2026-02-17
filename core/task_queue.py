@@ -65,6 +65,13 @@ class TaskQueue:
             self.completed.append(task)
             logger.warning(f"Task failed: {task['description'][:50]} - {reason}")
 
+        # Promote next queued task (same as complete_task — was missing here)
+        if self.queue and len(self.active_tasks) < self.max_concurrent:
+            next_task = self.queue.pop(0)
+            next_task["status"] = "active"
+            self.active_tasks[next_task["agent_id"]] = next_task
+            logger.info(f"Promoted queued task: {next_task['description'][:50]}")
+
     def get_status_summary(self) -> dict:
         return {
             "active": len(self.active_tasks),

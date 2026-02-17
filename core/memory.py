@@ -128,6 +128,16 @@ class MemorySystem:
     # Tasks
     # ------------------------------------------------------------------
 
+    def get_active_task(self, agent_id: str) -> Optional[dict]:
+        return self.memory["active_tasks"].get(agent_id)
+
+    def remove_active_task(self, agent_id: str):
+        self.memory["active_tasks"].pop(agent_id, None)
+
+    def update_active_task(self, agent_id: str, task: dict):
+        if agent_id in self.memory["active_tasks"]:
+            self.memory["active_tasks"][agent_id].update(task)
+
     def add_active_task(self, agent_id: str, task: dict):
         self.memory["active_tasks"][agent_id] = {
             "task_id": task.get("id", agent_id),

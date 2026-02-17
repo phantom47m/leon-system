@@ -79,8 +79,17 @@ async def websocket_handler(request):
                     if leon:
                         await ws.send_json(_build_state(leon))
                 elif data.get("command") == "input":
-                    user_msg = data.get("message", "")
-                    if leon and hasattr(leon, "process_user_input"):
+                    user_msg = data.get("message", "").strip()
+
+                    # Slash commands — handled directly, no API call
+                    if user_msg.startswith("/") and leon:
+                        slash_response = _handle_slash_command(user_msg, leon)
+                        await ws.send_json({
+                            "type": "input_response",
+                            "message": slash_response,
+                            "timestamp": datetime.now().strftime("%H:%M"),
+                        })
+                    elif leon and hasattr(leon, "process_user_input"):
                         try:
                             response = await leon.process_user_input(user_msg)
                             await ws.send_json({
@@ -124,6 +133,144 @@ async def broadcast_state(app):
             ws_clients -= dead
 
         await asyncio.sleep(2)  # Update every 2 seconds
+
+
+def _handle_slash_command(command: str, leon) -> str:
+    """Handle dashboard slash commands directly — no API call needed."""
+    parts = command.strip().split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        if cmd == "/agents":
+            agents = leon.agent_manager.active_agents
+            if not agents:
+                return "No active agents."
+            lines = [f"**Active Agents ({len(agents)}):**\n"]
+            for aid, info in agents.items():
+                status = info.get("status", "unknown")
+                elapsed = ""
+                try:
+                    started = datetime.fromisoformat(info.get("started_at", ""))
+                    secs = int((datetime.now() - started).total_seconds())
+                    elapsed = f" ({secs // 60}m {secs % 60}s)"
+                except Exception:
+                    pass
+                lines.append(f"- `{aid}` [{status}]{elapsed} — {info.get('brief_path', 'N/A')}")
+            return "\n".join(lines)
+
+        elif cmd == "/status":
+            status = leon.get_status()
+            tasks = status.get("tasks", {})
+            uptime_s = int(time.monotonic() - _start_time)
+            h, m, s = uptime_s // 3600, (uptime_s % 3600) // 60, uptime_s % 60
+            lines = [
+                "**System Status:**\n",
+                f"- Uptime: {h:02d}:{m:02d}:{s:02d}",
+                f"- Brain role: {status.get('brain_role', 'unified')}",
+                f"- Active agents: {tasks.get('active', 0)}",
+                f"- Queued tasks: {tasks.get('queued', 0)}",
+                f"- Completed: {tasks.get('completed', 0)}",
+                f"- Max concurrent: {tasks.get('max_concurrent', 5)}",
+            ]
+            if status.get("brain_role") == "left":
+                lines.append(f"- Bridge connected: {status.get('bridge_connected', False)}")
+                lines.append(f"- Right Brain online: {status.get('right_brain_online', False)}")
+            return "\n".join(lines)
+
+        elif cmd == "/kill":
+            if not arg:
+                return "Usage: `/kill <agent_id>`"
+            agents = leon.agent_manager.active_agents
+            # Match partial agent ID
+            match = None
+            for aid in agents:
+                if arg in aid:
+                    match = aid
+                    break
+            if not match:
+                return f"Agent not found: `{arg}`"
+            import asyncio
+            asyncio.create_task(leon.agent_manager.terminate_agent(match))
+            return f"Terminating agent `{match}`..."
+
+        elif cmd == "/queue":
+            summary = leon.task_queue.get_status_summary()
+            queued = summary.get("queued_tasks", [])
+            if not queued:
+                return "Queue is empty."
+            lines = [f"**Queued Tasks ({len(queued)}):**\n"]
+            for i, t in enumerate(queued, 1):
+                lines.append(f"{i}. {t.get('description', 'N/A')[:60]} (project: {t.get('project', 'unknown')})")
+            return "\n".join(lines)
+
+        elif cmd == "/retry":
+            if not arg:
+                return "Usage: `/retry <agent_id>`"
+            # Find the agent in completed/failed tasks
+            agents = leon.agent_manager.active_agents
+            match = None
+            for aid in agents:
+                if arg in aid:
+                    match = aid
+                    break
+            if match:
+                agent = agents[match]
+                import asyncio
+                asyncio.create_task(leon.agent_manager._retry_agent(match))
+                return f"Retrying agent `{match}`..."
+            return f"Agent not found: `{arg}`. Use `/agents` to see active agents."
+
+        elif cmd == "/history":
+            completed = leon.task_queue.completed[-10:]
+            if not completed:
+                return "No completed tasks yet."
+            lines = ["**Recent Completed Tasks:**\n"]
+            for t in reversed(completed):
+                status_icon = "+" if t.get("status") == "completed" else "x"
+                ts = t.get("completed_at") or t.get("failed_at") or ""
+                if ts:
+                    try:
+                        ts = datetime.fromisoformat(ts).strftime("%H:%M")
+                    except Exception:
+                        pass
+                desc = t.get("description", "N/A")[:50]
+                lines.append(f"[{status_icon}] {ts} — {desc}")
+            return "\n".join(lines)
+
+        elif cmd == "/bridge":
+            if leon.brain_role != "left":
+                return "Bridge info only available in Left Brain mode."
+            connected = leon.bridge.connected if leon.bridge else False
+            rb_status = leon._right_brain_status
+            lines = [
+                "**Neural Bridge Status:**\n",
+                f"- Connected: {connected}",
+                f"- Right Brain agents: {rb_status.get('active_agents', 0)}",
+                f"- Right Brain queued: {rb_status.get('queued', 0)}",
+                f"- Right Brain completed: {rb_status.get('completed', 0)}",
+            ]
+            return "\n".join(lines)
+
+        elif cmd == "/help":
+            return (
+                "**Dashboard Commands:**\n\n"
+                "- `/agents` — list active agents with status\n"
+                "- `/status` — system overview\n"
+                "- `/kill <id>` — terminate an agent\n"
+                "- `/queue` — show queued tasks\n"
+                "- `/retry <id>` — retry a failed agent\n"
+                "- `/history` — recent completed tasks\n"
+                "- `/bridge` — Right Brain connection status\n"
+                "- `/help` — this message"
+            )
+
+        else:
+            return f"Unknown command: `{cmd}`. Type `/help` for available commands."
+
+    except Exception as e:
+        logger.error(f"Slash command error ({command}): {e}")
+        return f"Error executing `{cmd}`: {e}"
 
 
 def _build_state(leon) -> dict:

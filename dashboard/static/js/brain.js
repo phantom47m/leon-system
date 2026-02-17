@@ -14,15 +14,15 @@ import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/exam
 
 // ── CONFIG ──────────────────────────────────────────────
 const CFG = {
-    // Brain shape
-    LEFT_CENTER:  new THREE.Vector3(-1.8, 0, 0),
-    RIGHT_CENTER: new THREE.Vector3( 1.8, 0, 0),
-    HEMISPHERE_RADIUS: 1.6,
+    // Brain shape — wider gap so hemispheres never overlap
+    LEFT_CENTER:  new THREE.Vector3(-2.3, 0, 0),
+    RIGHT_CENTER: new THREE.Vector3( 2.3, 0, 0),
+    HEMISPHERE_RADIUS: 1.4,
 
     // Particles
-    NODE_COUNT: 220,          // nodes per hemisphere
-    BRIDGE_PARTICLE_COUNT: 80,
-    AMBIENT_PARTICLE_COUNT: 600,
+    NODE_COUNT: 350,          // nodes per hemisphere
+    BRIDGE_PARTICLE_COUNT: 50,
+    AMBIENT_PARTICLE_COUNT: 300,
 
     // Colors
     LEFT_COLOR:   new THREE.Color(0x4fc3f7),  // cyan/blue
@@ -42,6 +42,10 @@ let scene, camera, renderer, composer, controls;
 let leftNodes = [], rightNodes = [], bridgeParticles = [];
 let connections = [], signals = [];
 let ambientParticles;
+let connectionMaterials = [];  // store connection line materials for state animation
+let brainActivity = 0;         // 0=idle, 1=max — derived from agentCount
+let neuronFireState = { left: [], right: [] };  // neuron firing tracking
+let frameCount = 0;
 let clock = new THREE.Clock();
 let brainState = {
     leftActive: true,
@@ -78,11 +82,10 @@ function init() {
     // Scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color(CFG.BG_COLOR);
-    scene.fog = new THREE.FogExp2(CFG.BG_COLOR, 0.04);
 
     // Camera
     camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 2, 7);
+    camera.position.set(0, 1.5, 9);
     camera.lookAt(0, 0, 0);
 
     // Renderer
@@ -90,7 +93,7 @@ function init() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ReinhardToneMapping;
-    renderer.toneMappingExposure = 1.5;
+    renderer.toneMappingExposure = 1.0;
     document.getElementById('brain-container').appendChild(renderer.domElement);
 
     // Post-processing (bloom glow)
@@ -99,20 +102,26 @@ function init() {
 
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        1.5,   // strength
-        0.4,   // radius
-        0.85   // threshold
+        0.3,   // strength
+        0.3,   // radius
+        0.8    // threshold
     );
     composer.addPass(bloomPass);
 
-    // Controls
+    // Controls — locked angles so hemispheres always stay side-by-side
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.5;
-    controls.minDistance = 3;
-    controls.maxDistance = 15;
+    controls.autoRotateSpeed = 0.3;
+    controls.minDistance = 5;
+    controls.maxDistance = 12;
+    // Lock vertical angle (stay near eye level, slight tilt allowed)
+    controls.minPolarAngle = Math.PI * 0.35;  // ~63° from top
+    controls.maxPolarAngle = Math.PI * 0.65;  // ~117° from top
+    // Lock horizontal angle — gentle sway only, never see from side
+    controls.minAzimuthAngle = -Math.PI * 0.15;  // ±27°
+    controls.maxAzimuthAngle =  Math.PI * 0.15;
 
     // Build the brain
     createHemisphere('left');
@@ -155,20 +164,24 @@ function createHemisphere(side) {
     const phases = new Float32Array(CFG.NODE_COUNT); // for individual pulse timing
 
     for (let i = 0; i < CFG.NODE_COUNT; i++) {
-        // Brain-shaped distribution (ellipsoid with wrinkle noise)
+        // Brain-shaped distribution (half-ellipsoid, flat on medial side)
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const r = CFG.HEMISPHERE_RADIUS * (0.5 + 0.5 * Math.random());
+        const r = CFG.HEMISPHERE_RADIUS * (0.4 + 0.6 * Math.random());
 
-        // Ellipsoid scaling (wider than tall, flatter on bridge side)
-        const scaleX = 0.9;
-        const scaleY = 1.1;
+        // Ellipsoid scaling — taller than wide, flat on bridge side
+        const scaleY = 1.15;  // taller
         const scaleZ = 1.0;
 
-        // Add organic noise for brain wrinkle effect
-        const noise = 0.15 * Math.sin(theta * 5) * Math.cos(phi * 3);
+        // Flatten the medial (inner) side to look like a brain half
+        let rawX = (r) * Math.sin(phi) * Math.cos(theta);
+        if (side === 'left' && rawX > 0) rawX *= 0.3;   // flatten right side of left hemisphere
+        if (side === 'right' && rawX < 0) rawX *= 0.3;   // flatten left side of right hemisphere
 
-        const x = center.x + (r + noise) * Math.sin(phi) * Math.cos(theta) * scaleX;
+        // Add cortical folds — organic noise for brain wrinkle effect
+        const noise = 0.12 * Math.sin(theta * 6) * Math.cos(phi * 4);
+
+        const x = center.x + rawX + noise * 0.5;
         const y = center.y + (r + noise) * Math.sin(phi) * Math.sin(theta) * scaleY;
         const z = center.z + (r + noise) * Math.cos(phi) * scaleZ;
 
@@ -180,7 +193,7 @@ function createHemisphere(side) {
         colors[i * 3 + 1] = color.g;
         colors[i * 3 + 2] = color.b;
 
-        sizes[i] = 2 + Math.random() * 4;
+        sizes[i] = 1 + Math.random() * 2;
         phases[i] = Math.random() * Math.PI * 2;
 
         nodes.push({
@@ -199,6 +212,7 @@ function createHemisphere(side) {
     const material = new THREE.ShaderMaterial({
         uniforms: {
             uTime: { value: 0 },
+            uActivity: { value: 0 },
             uActiveColor: { value: CFG.ACTIVE_COLOR },
         },
         vertexShader: `
@@ -206,32 +220,37 @@ function createHemisphere(side) {
             attribute vec3 color;
             varying vec3 vColor;
             uniform float uTime;
+            uniform float uActivity;
 
             void main() {
                 vColor = color;
                 vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                float pulse = 1.0 + 0.3 * sin(uTime * 2.0 + position.x * 3.0);
-                gl_PointSize = size * pulse * (200.0 / -mvPosition.z);
+                float speed = mix(0.8, 3.5, uActivity);
+                float pulse = 1.0 + 0.3 * sin(uTime * speed + position.x * 3.0);
+                gl_PointSize = size * pulse * (120.0 / -mvPosition.z);
                 gl_Position = projectionMatrix * mvPosition;
             }
         `,
         fragmentShader: `
             varying vec3 vColor;
+            uniform float uActivity;
 
             void main() {
                 float dist = length(gl_PointCoord - vec2(0.5));
-                if (dist > 0.5) discard;
+                if (dist > 0.45) discard;
 
-                // Soft glow
-                float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
-                float glow = exp(-dist * 4.0);
+                // Sharp bright center with subtle falloff
+                float core = 1.0 - smoothstep(0.0, 0.15, dist);
+                float halo = 1.0 - smoothstep(0.0, 0.45, dist);
 
-                vec3 finalColor = vColor * (0.8 + glow * 0.5);
-                gl_FragColor = vec4(finalColor, alpha * 0.85);
+                float brightness = mix(0.6, 1.2, uActivity);
+                vec3 finalColor = vColor * brightness;
+                float alpha = mix(halo * 0.4, core * 0.9 + halo * 0.3, 0.5);
+                gl_FragColor = vec4(finalColor, alpha);
             }
         `,
         transparent: true,
-        blending: THREE.AdditiveBlending,
+        blending: THREE.NormalBlending,
         depthWrite: false,
     });
 
@@ -263,7 +282,7 @@ function createNeuralBridge() {
         colors[i * 3 + 1] = CFG.BRIDGE_COLOR.g;
         colors[i * 3 + 2] = CFG.BRIDGE_COLOR.b;
 
-        sizes[i] = 1.5 + Math.random() * 3;
+        sizes[i] = 0.8 + Math.random() * 1.2;
 
         bridgeParticles.push({
             index: i,
@@ -279,20 +298,25 @@ function createNeuralBridge() {
     geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
 
     const material = new THREE.ShaderMaterial({
-        uniforms: { uTime: { value: 0 } },
+        uniforms: {
+            uTime: { value: 0 },
+            uActivity: { value: 0 },
+        },
         vertexShader: `
             attribute float size;
             attribute vec3 color;
             varying vec3 vColor;
             varying float vAlpha;
             uniform float uTime;
+            uniform float uActivity;
 
             void main() {
                 vColor = color;
                 vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-                float pulse = 1.0 + 0.5 * sin(uTime * 3.0 + position.x * 5.0);
-                gl_PointSize = size * pulse * (200.0 / -mvPosition.z);
-                vAlpha = 0.4 + 0.4 * sin(uTime * 2.0 + position.x * 8.0);
+                float speed = mix(1.5, 3.0, uActivity);
+                float pulse = 1.0 + 0.5 * sin(uTime * speed + position.x * 5.0);
+                gl_PointSize = size * pulse * (120.0 / -mvPosition.z);
+                vAlpha = 0.3 + 0.3 * sin(uTime * 2.0 + position.x * 8.0);
                 gl_Position = projectionMatrix * mvPosition;
             }
         `,
@@ -321,14 +345,14 @@ function createNeuralBridge() {
 function createConnections(side) {
     const nodes = side === 'left' ? leftNodes : rightNodes;
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
-    const maxDist = 0.8;
+    const maxDist = 0.7;
 
     const linePositions = [];
 
     for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
             const dist = nodes[i].position.distanceTo(nodes[j].position);
-            if (dist < maxDist && Math.random() < 0.3) {
+            if (dist < maxDist && Math.random() < 0.4) {
                 linePositions.push(
                     nodes[i].position.x, nodes[i].position.y, nodes[i].position.z,
                     nodes[j].position.x, nodes[j].position.y, nodes[j].position.z
@@ -344,13 +368,16 @@ function createConnections(side) {
     const material = new THREE.LineBasicMaterial({
         color: color,
         transparent: true,
-        opacity: 0.08,
-        blending: THREE.AdditiveBlending,
+        opacity: 0.2,
+        blending: THREE.NormalBlending,
     });
 
     const lines = new THREE.LineSegments(geometry, material);
     lines.userData = { side };
     scene.add(lines);
+
+    // Store material ref for state-driven opacity animation
+    connectionMaterials.push(material);
 }
 
 // ── CORE GLOW (center of each hemisphere) ───────────────
@@ -358,12 +385,12 @@ function createCoreGlow(side) {
     const center = side === 'left' ? CFG.LEFT_CENTER : CFG.RIGHT_CENTER;
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
 
-    // Inner sphere
-    const coreGeo = new THREE.SphereGeometry(0.15, 16, 16);
+    // Inner sphere — small and subtle
+    const coreGeo = new THREE.SphereGeometry(0.08, 16, 16);
     const coreMat = new THREE.MeshBasicMaterial({
         color: color,
         transparent: true,
-        opacity: 0.6,
+        opacity: 0.15,
     });
     const core = new THREE.Mesh(coreGeo, coreMat);
     core.position.copy(center);
@@ -375,7 +402,7 @@ function createCoreGlow(side) {
     const glowMat = new THREE.MeshBasicMaterial({
         color: color,
         transparent: true,
-        opacity: 0.1,
+        opacity: 0.04,
         side: THREE.BackSide,
     });
     const glow = new THREE.Mesh(glowGeo, glowMat);
@@ -383,9 +410,10 @@ function createCoreGlow(side) {
     glow.userData = { side, type: 'coreGlow' };
     scene.add(glow);
 
-    // Point light
-    const light = new THREE.PointLight(color, 0.5, 4);
+    // Point light — dim
+    const light = new THREE.PointLight(color, 0.15, 4);
     light.position.copy(center);
+    light.userData = { side, type: 'coreLight' };
     scene.add(light);
 }
 
@@ -399,7 +427,7 @@ function createAmbientParticles() {
         positions[i * 3]     = (Math.random() - 0.5) * 20;
         positions[i * 3 + 1] = (Math.random() - 0.5) * 12;
         positions[i * 3 + 2] = (Math.random() - 0.5) * 12;
-        sizes[i] = 0.5 + Math.random() * 1.5;
+        sizes[i] = 0.3 + Math.random() * 0.8;
     }
 
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -414,12 +442,12 @@ function createAmbientParticles() {
 
             void main() {
                 vec3 pos = position;
-                pos.y += sin(uTime * 0.5 + position.x) * 0.1;
-                pos.x += cos(uTime * 0.3 + position.z) * 0.05;
+                pos.y += sin(uTime * 0.3 + position.x) * 0.05;
+                pos.x += cos(uTime * 0.2 + position.z) * 0.03;
 
                 vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-                gl_PointSize = size * (150.0 / -mvPosition.z);
-                vAlpha = 0.1 + 0.1 * sin(uTime + position.x * 2.0);
+                gl_PointSize = size * (80.0 / -mvPosition.z);
+                vAlpha = 0.04 + 0.04 * sin(uTime + position.x * 2.0);
                 gl_Position = projectionMatrix * mvPosition;
             }
         `,
@@ -433,7 +461,7 @@ function createAmbientParticles() {
             }
         `,
         transparent: true,
-        blending: THREE.AdditiveBlending,
+        blending: THREE.NormalBlending,
         depthWrite: false,
     });
 
@@ -475,34 +503,64 @@ function animate() {
     requestAnimationFrame(animate);
 
     const time = clock.getElapsedTime();
+    frameCount++;
 
-    // Update all shader uniforms
+    // ── State-driven activity lerp ──
+    const target = Math.min(1, (brainState.agentCount || 0) / 3);
+    brainActivity += (target - brainActivity) * 0.02;
+
+    // Derived values from activity
+    const connOpacity = THREE.MathUtils.lerp(0.15, 0.45, brainActivity);
+    const bridgeSpeedMult = THREE.MathUtils.lerp(0.3, 1.5, brainActivity);
+    const signalChance = THREE.MathUtils.lerp(0.0, 0.05, brainActivity);
+    const coreOpacity = THREE.MathUtils.lerp(0.05, 0.15, brainActivity);
+    const corePulseSpeed = THREE.MathUtils.lerp(0.8, 3.0, brainActivity);
+    const corePulseAmp = THREE.MathUtils.lerp(0.02, 0.12, brainActivity);
+    const autoRotateSpeed = THREE.MathUtils.lerp(0.2, 0.6, brainActivity);
+
+    controls.autoRotateSpeed = autoRotateSpeed;
+
+    // ── Update connection opacities ──
+    for (const mat of connectionMaterials) {
+        mat.opacity = connOpacity;
+    }
+
+    // ── Update all shader uniforms ──
     scene.traverse((obj) => {
         if (obj.userData?.material?.uniforms?.uTime) {
             obj.userData.material.uniforms.uTime.value = time;
         }
+        if (obj.userData?.material?.uniforms?.uActivity) {
+            obj.userData.material.uniforms.uActivity.value = brainActivity;
+        }
         if (obj.isPoints && obj.material?.uniforms?.uTime) {
             obj.material.uniforms.uTime.value = time;
         }
+        if (obj.isPoints && obj.material?.uniforms?.uActivity) {
+            obj.material.uniforms.uActivity.value = brainActivity;
+        }
 
-        // Pulse core glows
+        // Pulse core glows — subtle, activity-driven
         if (obj.userData?.type === 'core') {
-            const pulse = 0.5 + 0.3 * Math.sin(time * 2 + (obj.userData.side === 'left' ? 0 : Math.PI));
+            const pulse = coreOpacity + corePulseAmp * Math.sin(time * corePulseSpeed + (obj.userData.side === 'left' ? 0 : Math.PI));
             obj.material.opacity = pulse;
-            obj.scale.setScalar(0.8 + 0.4 * Math.sin(time * 1.5));
+            obj.scale.setScalar(0.9 + corePulseAmp * Math.sin(time * corePulseSpeed * 0.8));
         }
         if (obj.userData?.type === 'coreGlow') {
-            obj.scale.setScalar(1 + 0.3 * Math.sin(time * 1.2));
+            obj.scale.setScalar(1 + 0.15 * Math.sin(time * corePulseSpeed * 0.6));
+        }
+        if (obj.userData?.type === 'coreLight') {
+            obj.intensity = THREE.MathUtils.lerp(0.05, 0.15, brainActivity);
         }
     });
 
-    // Animate bridge particles flowing
+    // ── Animate bridge particles — speed driven by activity ──
     scene.traverse((obj) => {
         if (obj.userData?.type === 'bridge' && obj.isPoints) {
             const positions = obj.geometry.attributes.position.array;
             for (let i = 0; i < bridgeParticles.length; i++) {
                 const p = bridgeParticles[i];
-                p.t += p.speed;
+                p.t += p.speed * bridgeSpeedMult;
                 if (p.t > 1) p.t = 0;
                 if (p.t < 0) p.t = 1;
 
@@ -519,7 +577,7 @@ function animate() {
         }
     });
 
-    // Animate signals traveling along bridge
+    // ── Animate signals traveling along bridge ──
     for (let i = signals.length - 1; i >= 0; i--) {
         const s = signals[i];
         s.t += s.speed;
@@ -528,29 +586,79 @@ function animate() {
             signals.splice(i, 1);
             continue;
         }
-        // Curved path
         s.mesh.position.lerpVectors(s.start, s.end, s.t);
         s.mesh.position.y += 0.5 * Math.sin(s.t * Math.PI);
         s.mesh.material.opacity = 1 - s.t * 0.5;
     }
 
-    // Ambient particle drift
+    // ── Ambient particle drift ──
     if (ambientParticles) {
         ambientParticles.material.uniforms.uTime.value = time;
     }
 
-    // Randomly fire signals across bridge
-    if (Math.random() < 0.01 && brainState.bridgeActive) {
+    // ── Signal firing — activity-driven ──
+    if (brainActivity > 0.1 && Math.random() < signalChance) {
         fireSignal(Math.random() > 0.5 ? 'left-to-right' : 'right-to-left');
     }
 
-    // Auto-fire when active
-    if (brainState.leftActive && brainState.rightActive && Math.random() < 0.03) {
-        fireSignal(Math.random() > 0.5 ? 'left-to-right' : 'right-to-left');
+    // ── Neuron firing effect (working only) ──
+    if (brainActivity > 0.3 && frameCount % 15 === 0) {
+        fireNeurons('left', leftNodes);
+        fireNeurons('right', rightNodes);
     }
+    updateNeuronFiring(time);
 
     controls.update();
     composer.render();
+}
+
+// ── NEURON FIRING ────────────────────────────────────────
+function fireNeurons(side, nodes) {
+    const count = 3 + Math.floor(Math.random() * 3); // 3-5 neurons
+    const state = neuronFireState[side];
+    for (let n = 0; n < count; n++) {
+        const idx = Math.floor(Math.random() * nodes.length);
+        // Don't double-fire
+        if (!state.some(f => f.index === idx)) {
+            state.push({ index: idx, framesLeft: 10 });
+        }
+    }
+}
+
+function updateNeuronFiring(time) {
+    // Process each hemisphere
+    scene.traverse((obj) => {
+        if (!obj.isPoints || !obj.userData?.side) return;
+        const side = obj.userData.side;
+        const state = neuronFireState[side];
+        if (!state || state.length === 0) return;
+
+        const colors = obj.geometry.attributes.color;
+        if (!colors) return;
+
+        const baseColor = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
+
+        for (let i = state.length - 1; i >= 0; i--) {
+            const fire = state[i];
+            fire.framesLeft--;
+
+            const idx = fire.index;
+            if (fire.framesLeft > 0) {
+                // Blend toward green ACTIVE_COLOR
+                const t = fire.framesLeft / 10;
+                colors.array[idx * 3]     = THREE.MathUtils.lerp(baseColor.r, CFG.ACTIVE_COLOR.r, t);
+                colors.array[idx * 3 + 1] = THREE.MathUtils.lerp(baseColor.g, CFG.ACTIVE_COLOR.g, t);
+                colors.array[idx * 3 + 2] = THREE.MathUtils.lerp(baseColor.b, CFG.ACTIVE_COLOR.b, t);
+            } else {
+                // Restore base color
+                colors.array[idx * 3]     = baseColor.r;
+                colors.array[idx * 3 + 1] = baseColor.g;
+                colors.array[idx * 3 + 2] = baseColor.b;
+                state.splice(i, 1);
+            }
+        }
+        colors.needsUpdate = true;
+    });
 }
 
 // ── WEBSOCKET ───────────────────────────────────────────
@@ -842,12 +950,99 @@ function updateActivityFeed() {
     }
 }
 
+// ── SLASH COMMANDS ───────────────────────────────────────
+const SLASH_COMMANDS = [
+    { cmd: '/agents',  desc: 'List active agents' },
+    { cmd: '/status',  desc: 'System overview' },
+    { cmd: '/kill',    desc: 'Terminate an agent' },
+    { cmd: '/queue',   desc: 'Show queued tasks' },
+    { cmd: '/retry',   desc: 'Retry a failed agent' },
+    { cmd: '/history', desc: 'Recent completed tasks' },
+    { cmd: '/bridge',  desc: 'Right Brain connection' },
+    { cmd: '/help',    desc: 'Show all commands' },
+];
+
 // ── COMMAND BAR ─────────────────────────────────────────
 function initCommandBar() {
     const input = document.getElementById('command-input');
     const sendBtn = document.getElementById('command-send');
 
     if (!input || !sendBtn) return;
+
+    // Create autocomplete dropdown
+    const autocomplete = document.createElement('div');
+    autocomplete.id = 'command-autocomplete';
+    autocomplete.style.cssText = `
+        display: none;
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        right: 0;
+        background: rgba(10, 10, 26, 0.95);
+        border: 1px solid rgba(79, 195, 247, 0.3);
+        border-radius: 8px;
+        padding: 6px 0;
+        margin-bottom: 4px;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 0.8rem;
+        z-index: 100;
+        max-height: 260px;
+        overflow-y: auto;
+        backdrop-filter: blur(10px);
+    `;
+    // Insert above the command bar
+    const commandBar = input.closest('.command-bar') || input.parentElement;
+    commandBar.style.position = 'relative';
+    commandBar.appendChild(autocomplete);
+
+    function updateAutocomplete() {
+        const val = input.value;
+        if (!val.startsWith('/')) {
+            autocomplete.style.display = 'none';
+            return;
+        }
+
+        const query = val.toLowerCase();
+        const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(query));
+
+        if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === query)) {
+            autocomplete.style.display = 'none';
+            return;
+        }
+
+        autocomplete.innerHTML = matches.map(c => `
+            <div class="autocomplete-item" data-cmd="${c.cmd}" style="
+                padding: 6px 12px;
+                cursor: pointer;
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+                transition: background 0.15s;
+            ">
+                <span style="color: #4fc3f7; font-weight: 600;">${escapeHtml(c.cmd)}</span>
+                <span style="color: rgba(255,255,255,0.4);">${escapeHtml(c.desc)}</span>
+            </div>
+        `).join('');
+
+        // Click handlers
+        autocomplete.querySelectorAll('.autocomplete-item').forEach(el => {
+            el.addEventListener('mouseenter', () => {
+                el.style.background = 'rgba(79, 195, 247, 0.1)';
+            });
+            el.addEventListener('mouseleave', () => {
+                el.style.background = 'transparent';
+            });
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                const cmd = el.dataset.cmd;
+                input.value = cmd + ' ';
+                input.focus();
+                autocomplete.style.display = 'none';
+            });
+        });
+
+        autocomplete.style.display = 'block';
+    }
 
     function sendCommand() {
         const text = input.value.trim();
@@ -856,6 +1051,8 @@ function initCommandBar() {
             appendToFeed(nowTime(), `System: Input too long (max ${MAX_INPUT_LENGTH} chars)`);
             return;
         }
+
+        autocomplete.style.display = 'none';
 
         const time = nowTime();
 
@@ -881,6 +1078,23 @@ function initCommandBar() {
         if (e.key === 'Enter') {
             sendCommand();
         }
+        if (e.key === 'Escape') {
+            autocomplete.style.display = 'none';
+        }
+        // Tab completion
+        if (e.key === 'Tab' && autocomplete.style.display === 'block') {
+            e.preventDefault();
+            const first = autocomplete.querySelector('.autocomplete-item');
+            if (first) {
+                input.value = first.dataset.cmd + ' ';
+                autocomplete.style.display = 'none';
+            }
+        }
+    });
+    input.addEventListener('input', updateAutocomplete);
+    input.addEventListener('blur', () => {
+        // Small delay so click on autocomplete item fires first
+        setTimeout(() => { autocomplete.style.display = 'none'; }, 150);
     });
 }
 

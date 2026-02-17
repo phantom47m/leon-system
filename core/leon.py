@@ -170,6 +170,10 @@ class Leon:
 
         if self.audit_log:
             self.audit_log.log("system_start", "Leon started", "info")
+
+        # Auto-trigger daily briefing on startup
+        asyncio.create_task(self._auto_daily_briefing())
+
         logger.info("Leon is now running — all systems active")
 
     async def stop(self):
@@ -189,6 +193,22 @@ class Leon:
             self.audit_log.log("system_stop", "Leon stopped", "info")
         self.memory.save()
         logger.info("Leon stopped")
+
+    async def _auto_daily_briefing(self):
+        """Run daily briefing on startup and push to dashboard feed."""
+        try:
+            if not self.assistant:
+                return
+            briefing = await self.assistant.generate_daily_briefing()
+            if briefing:
+                logger.info("Auto daily briefing generated")
+                await self._broadcast_to_dashboard({
+                    "type": "input_response",
+                    "message": f"Daily Briefing:\n{briefing}",
+                    "timestamp": datetime.now().strftime("%H:%M"),
+                })
+        except Exception as e:
+            logger.warning(f"Auto daily briefing failed: {e}")
 
     # ------------------------------------------------------------------
     # Main input handler
@@ -227,8 +247,12 @@ class Leon:
         """Route messages to specialized modules when keywords match."""
         msg = message.lower()
 
+        # Help command — list available modules
+        if msg.strip() in ("help", "what can you do", "commands", "modules"):
+            return self._build_help_text()
+
         # 3D Printing
-        if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti"]):
+        if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti", "print job", "print queue"]):
             if ("find" in msg or "search" in msg or "stl" in msg) and self.stl_searcher:
                 results = await self.stl_searcher.search(message)
                 if results:
@@ -248,31 +272,49 @@ class Leon:
                 return "\n".join(lines)
 
         # Vision
-        if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around"]):
+        if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around", "describe the room", "camera"]):
             if not self.vision:
                 return "Vision system is not available."
             return self.vision.describe_scene()
 
+        # Business — CRM
+        if any(w in msg for w in ["crm", "pipeline", "clients", "contacts", "deals", "customer list"]):
+            if not self.crm:
+                return "CRM module is not available."
+            return json.dumps(self.crm.get_pipeline_summary(), indent=2, default=str)
+
         # Business — leads
-        if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect"]):
+        if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect", "generate leads", "new leads", "lead search"]):
             if self.audit_log:
                 self.audit_log.log("lead_hunt", message, "info")
             return "Starting lead hunt... I'll search for businesses that need websites and score them. Check back shortly."
 
         # Business — finance
-        if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings"]):
+        if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings", "profit", "expenses", "income", "billing"]):
             if not self.finance:
                 return "Finance module is not available."
             return self.finance.get_daily_summary()
 
+        # Business — communications
+        if any(w in msg for w in ["send email", "check email", "inbox", "messages", "unread", "compose"]):
+            if not self.comms:
+                return "Communications module is not available."
+            return "Comms hub active. What would you like to do — check inbox, send an email, or review messages?"
+
         # Business — briefing
-        if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief"]):
+        if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief", "daily briefing", "what's happening", "catch me up", "daily summary"]):
+            if not self.assistant:
+                return "Personal assistant module is not available."
+            return await self.assistant.generate_daily_briefing()
+
+        # Business — schedule/calendar
+        if any(w in msg for w in ["schedule", "calendar", "appointments", "meetings today", "what's on my calendar"]):
             if not self.assistant:
                 return "Personal assistant module is not available."
             return await self.assistant.generate_daily_briefing()
 
         # Security
-        if "audit log" in msg:
+        if any(w in msg for w in ["audit log", "security log", "audit trail", "recent actions"]):
             if not self.audit_log:
                 return "Audit log is not available."
             entries = self.audit_log.get_recent(10)
@@ -284,6 +326,30 @@ class Leon:
             return "\n".join(lines)
 
         return None
+
+    def _build_help_text(self) -> str:
+        """Build a help text listing all available modules and commands."""
+        modules = []
+        modules.append("**Available Modules:**\n")
+        modules.append("- **Daily Briefing** — \"daily briefing\", \"brief me\", \"catch me up\"")
+        modules.append("- **CRM** — \"pipeline\", \"clients\", \"deals\"")
+        modules.append("- **Finance** — \"revenue\", \"invoice\", \"earnings\"")
+        modules.append("- **Leads** — \"find leads\", \"prospect\", \"generate leads\"")
+        modules.append("- **Comms** — \"check email\", \"inbox\", \"send email\"")
+        if self.printer:
+            modules.append("- **3D Printing** — \"printer status\", \"find stl\"")
+        if self.vision:
+            modules.append("- **Vision** — \"what do you see\", \"look at\"")
+        modules.append("- **Security** — \"audit log\", \"security log\"")
+        modules.append("\n**Dashboard Commands** (type / in command bar):")
+        modules.append("- `/agents` — list active agents")
+        modules.append("- `/status` — system overview")
+        modules.append("- `/queue` — queued tasks")
+        modules.append("- `/kill <id>` — terminate agent")
+        modules.append("- `/retry <id>` — retry failed agent")
+        modules.append("- `/history` — recent completed tasks")
+        modules.append("- `/bridge` — Right Brain connection status")
+        return "\n".join(modules)
 
     # ------------------------------------------------------------------
     # Request analysis
@@ -434,6 +500,9 @@ Vision: {vision_desc}
                     self.memory.add_active_task(agent_id, task_obj)
                     spawned.append((agent_id, task_desc, project["name"], "Right Brain"))
                 else:
+                    # Log rejection reason if applicable
+                    if resp and resp.payload.get("status") == "rejected":
+                        logger.warning(f"Right Brain rejected task: {resp.payload.get('reason', 'unknown')}")
                     # Fallback to local
                     agent_id = await self.agent_manager.spawn_agent(
                         brief_path=brief_path, project_path=project["path"],
@@ -562,12 +631,35 @@ spawned_by: Leon v1.0
                 for agent_id in agent_ids:
                     status = await self.agent_manager.check_status(agent_id)
 
-                    if status.get("completed"):
+                    if status.get("retrying"):
+                        # Agent is being retried — update memory with new agent ID
+                        new_id = status.get("new_agent_id")
+                        if new_id:
+                            old_task = self.memory.get_active_task(agent_id)
+                            if old_task:
+                                self.memory.remove_active_task(agent_id)
+                                old_task["id"] = new_id
+                                self.memory.add_active_task(new_id, old_task)
+                            # Update task queue mapping
+                            task = self.task_queue.active_tasks.pop(agent_id, None)
+                            if task:
+                                task["agent_id"] = new_id
+                                self.task_queue.active_tasks[new_id] = task
+                        logger.info(f"Agent {agent_id} retrying as {new_id}")
+
+                    elif status.get("completed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
                         self.memory.complete_task(agent_id, results)
                         self.task_queue.complete_task(agent_id)
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
+
+                        # Push completion to dashboard WebSocket
+                        await self._broadcast_to_dashboard({
+                            "type": "agent_completed",
+                            "agent_id": agent_id,
+                            "summary": results.get("summary", "")[:200],
+                        })
 
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
@@ -578,6 +670,13 @@ spawned_by: Leon v1.0
                         self.task_queue.fail_task(agent_id, results.get("errors", ""))
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")
+
+                        # Push failure to dashboard WebSocket
+                        await self._broadcast_to_dashboard({
+                            "type": "agent_failed",
+                            "agent_id": agent_id,
+                            "error": results.get("errors", "")[:200],
+                        })
 
                 # Poll Right Brain status if Left Brain
                 if self.brain_role == "left" and self.bridge and self.bridge.connected:
@@ -668,8 +767,13 @@ spawned_by: Leon v1.0
                 f"Running on homelab. I'll update you when it's done."
             )
 
-        # Fallback to local execution
-        logger.warning("Right Brain dispatch failed — falling back to local")
+        # Handle explicit rejection (backpressure)
+        if resp and resp.payload.get("status") == "rejected":
+            reason = resp.payload.get("reason", "unknown")
+            logger.warning(f"Right Brain rejected task — reason: {reason}, falling back to local")
+        else:
+            # Fallback to local execution
+            logger.warning("Right Brain dispatch failed — falling back to local")
         agent_id = await self.agent_manager.spawn_agent(
             brief_path=brief_path,
             project_path=project["path"],
@@ -688,12 +792,44 @@ spawned_by: Leon v1.0
             f"I'll update you when it's done."
         )
 
+    async def _broadcast_to_dashboard(self, data: dict):
+        """Push a notification to all connected dashboard WebSocket clients."""
+        try:
+            from dashboard.server import ws_clients
+            import json as _json
+            dead = set()
+            for ws in ws_clients:
+                try:
+                    await ws.send_json(data)
+                except Exception:
+                    dead.add(ws)
+            ws_clients -= dead
+        except Exception:
+            pass  # Dashboard may not be running
+
     async def _handle_remote_task_status(self, msg: BridgeMessage):
         """Handle task status updates from Right Brain."""
         payload = msg.payload
         task_id = payload.get("task_id", "")
+        agent_id = payload.get("agent_id", task_id)
         status = payload.get("status", "")
         logger.info(f"Remote task {task_id} status: {status}")
+
+        # Update task state in memory
+        active_task = self.memory.get_active_task(agent_id)
+        if active_task:
+            active_task["remote_status"] = status
+            if payload.get("error"):
+                active_task["remote_error"] = payload["error"]
+            self.memory.update_active_task(agent_id, active_task)
+        elif status == "spawned" and agent_id:
+            # Track newly spawned remote agent
+            self.memory.add_active_task(agent_id, {
+                "id": agent_id,
+                "description": payload.get("description", "remote task"),
+                "remote": True,
+                "remote_status": status,
+            })
 
     async def _handle_remote_task_result(self, msg: BridgeMessage):
         """Handle completed/failed task results from Right Brain."""

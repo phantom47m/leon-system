@@ -5,7 +5,7 @@ Real-time streaming speech recognition with wake word detection
 and natural voice responses.
 
 Flow:
-  Microphone → Deepgram Nova-2 (streaming STT) → Leon Brain → ElevenLabs (TTS) → Speaker
+  Microphone -> Deepgram Nova-2 (streaming STT) -> Leon Brain -> ElevenLabs (TTS) -> Speaker
 """
 
 import asyncio
@@ -14,10 +14,23 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 from typing import Callable, Optional
 
 logger = logging.getLogger("leon.voice")
+
+# Common mishears for "hey leon"
+WAKE_PATTERNS = [
+    re.compile(r"^hey\s+leon\b", re.IGNORECASE),
+    re.compile(r"^hey\s+leo\b", re.IGNORECASE),
+    re.compile(r"^a\s+leon\b", re.IGNORECASE),
+    re.compile(r"^hey\s+le+on\b", re.IGNORECASE),
+]
+
+DEEPGRAM_MAX_RECONNECTS = 5
+DEEPGRAM_RECONNECT_DELAY = 2.0
+SLEEP_TIMEOUT_SECONDS = 30.0
 
 
 class VoiceSystem:
@@ -40,6 +53,7 @@ class VoiceSystem:
         self.is_listening = False
         self.is_awake = False  # True after wake word detected, waiting for command
         self._audio_queue = queue.Queue()
+        self._sleep_timer: Optional[asyncio.Task] = None
 
         # Deepgram config
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
@@ -56,9 +70,9 @@ class VoiceSystem:
 
         logger.info("Voice system initialized")
 
-    # ══════════════════════════════════════════════════════
+    # ================================================================
     # MAIN LOOP
-    # ══════════════════════════════════════════════════════
+    # ================================================================
 
     async def start(self):
         """Start the full voice pipeline — always listening."""
@@ -66,24 +80,25 @@ class VoiceSystem:
             logger.warning("DEEPGRAM_API_KEY not set — voice system disabled")
             return
 
-        logger.info("🎤 Voice system starting — say 'Hey Leon' to activate")
+        logger.info("Voice system starting — say 'Hey Leon' to activate")
         self.is_listening = True
 
         # Start microphone capture in background thread
         mic_thread = threading.Thread(target=self._capture_microphone, daemon=True)
         mic_thread.start()
 
-        # Start Deepgram streaming
-        await self._stream_to_deepgram()
+        # Start Deepgram streaming with reconnection
+        await self._stream_to_deepgram_with_reconnect()
 
     async def stop(self):
         """Stop the voice system."""
         self.is_listening = False
+        self._cancel_sleep_timer()
         logger.info("Voice system stopped")
 
-    # ══════════════════════════════════════════════════════
+    # ================================================================
     # MICROPHONE CAPTURE
-    # ══════════════════════════════════════════════════════
+    # ================================================================
 
     def _capture_microphone(self):
         """Capture audio from microphone in a background thread."""
@@ -118,9 +133,26 @@ class VoiceSystem:
         except Exception as e:
             logger.error(f"Microphone error: {e}")
 
-    # ══════════════════════════════════════════════════════
-    # DEEPGRAM STREAMING STT
-    # ══════════════════════════════════════════════════════
+    # ================================================================
+    # DEEPGRAM STREAMING STT (with reconnection)
+    # ================================================================
+
+    async def _stream_to_deepgram_with_reconnect(self):
+        """Wrapper that reconnects to Deepgram on connection failures."""
+        reconnect_count = 0
+        while self.is_listening and reconnect_count < DEEPGRAM_MAX_RECONNECTS:
+            try:
+                await self._stream_to_deepgram()
+                # If we get here, streaming ended normally (is_listening=False)
+                break
+            except Exception as e:
+                reconnect_count += 1
+                if reconnect_count >= DEEPGRAM_MAX_RECONNECTS:
+                    logger.error(f"Deepgram: max reconnect attempts reached ({DEEPGRAM_MAX_RECONNECTS}), giving up")
+                    break
+                logger.warning(f"Deepgram connection error (attempt {reconnect_count}): {e}")
+                logger.info(f"Reconnecting to Deepgram in {DEEPGRAM_RECONNECT_DELAY}s...")
+                await asyncio.sleep(DEEPGRAM_RECONNECT_DELAY)
 
     async def _stream_to_deepgram(self):
         """Stream audio to Deepgram Nova-2 for real-time transcription."""
@@ -130,96 +162,111 @@ class VoiceSystem:
                 LiveTranscriptionEvents,
                 LiveOptions,
             )
-
-            deepgram = DeepgramClient(self.deepgram_api_key)
-
-            connection = deepgram.listen.asynclive.v("1")
-
-            # Handle transcription results
-            async def on_message(self_dg, result, **kwargs):
-                transcript = result.channel.alternatives[0].transcript
-                if not transcript.strip():
-                    return
-
-                is_final = result.is_final
-                speech_final = result.speech_final
-
-                if is_final:
-                    await self._handle_transcription(transcript.strip())
-
-            async def on_error(self_dg, error, **kwargs):
-                logger.error(f"Deepgram error: {error}")
-
-            connection.on(LiveTranscriptionEvents.Transcript, on_message)
-            connection.on(LiveTranscriptionEvents.Error, on_error)
-
-            # Configure Deepgram
-            options = LiveOptions(
-                model="nova-2",
-                language="en-US",
-                smart_format=True,
-                interim_results=True,
-                utterance_end_ms=1500,
-                vad_events=True,
-                encoding="linear16",
-                sample_rate=self.sample_rate,
-                channels=self.channels,
-                # Keyword boosting for wake word
-                keywords=[f"{self.wake_word}:2.0"],
-            )
-
-            if await connection.start(options) is False:
-                logger.error("Failed to connect to Deepgram")
-                return
-
-            logger.info("Connected to Deepgram Nova-2 — streaming audio")
-
-            # Send audio chunks to Deepgram
-            while self.is_listening:
-                try:
-                    data = self._audio_queue.get(timeout=0.1)
-                    await connection.send(data)
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"Send error: {e}")
-                    break
-
-            await connection.finish()
-
         except ImportError:
             logger.error("deepgram-sdk not installed — run: pip install deepgram-sdk")
-        except Exception as e:
-            logger.error(f"Deepgram streaming error: {e}")
+            return
 
-    # ══════════════════════════════════════════════════════
+        deepgram = DeepgramClient(self.deepgram_api_key)
+
+        connection = deepgram.listen.asynclive.v("1")
+
+        # Handle transcription results
+        async def on_message(self_dg, result, **kwargs):
+            transcript = result.channel.alternatives[0].transcript
+            if not transcript.strip():
+                return
+
+            is_final = result.is_final
+
+            if is_final:
+                await self._handle_transcription(transcript.strip())
+
+        async def on_error(self_dg, error, **kwargs):
+            logger.error(f"Deepgram error: {error}")
+
+        connection.on(LiveTranscriptionEvents.Transcript, on_message)
+        connection.on(LiveTranscriptionEvents.Error, on_error)
+
+        # Configure Deepgram
+        options = LiveOptions(
+            model="nova-2",
+            language="en-US",
+            smart_format=True,
+            interim_results=True,
+            utterance_end_ms=1500,
+            vad_events=True,
+            encoding="linear16",
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            # Keyword boosting for wake word
+            keywords=[f"{self.wake_word}:2.0"],
+        )
+
+        if await connection.start(options) is False:
+            logger.error("Failed to connect to Deepgram")
+            return
+
+        logger.info("Connected to Deepgram Nova-2 — streaming audio")
+
+        # Send audio chunks to Deepgram
+        while self.is_listening:
+            try:
+                data = self._audio_queue.get(timeout=0.1)
+                await connection.send(data)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Send error: {e}")
+                raise  # Let reconnect wrapper handle it
+
+        await connection.finish()
+
+    # ================================================================
     # TRANSCRIPTION HANDLING
-    # ══════════════════════════════════════════════════════
+    # ================================================================
 
     async def _handle_transcription(self, text: str):
         """Process transcribed text — check for wake word or command."""
-        text_lower = text.lower()
+        text_lower = text.lower().strip()
         logger.debug(f"Heard: {text}")
 
         if not self.is_awake:
-            # Check for wake word
-            if self.wake_word in text_lower:
+            # Check for wake word using fuzzy matching
+            if self._matches_wake_word(text_lower):
                 self.is_awake = True
-                logger.info("🟢 Wake word detected!")
+                self._start_sleep_timer()
+                logger.info("Wake word detected!")
                 await self.speak("Yeah?")
 
                 # Extract any command that came after the wake word
-                after_wake = text_lower.split(self.wake_word, 1)[-1].strip()
+                after_wake = self._strip_wake_word(text_lower)
                 if after_wake and len(after_wake) > 3:
                     await self._process_command(after_wake)
         else:
-            # We're awake — this is the command
+            # We're awake — reset sleep timer and process command
+            self._start_sleep_timer()
             await self._process_command(text)
+
+    def _matches_wake_word(self, text_lower: str) -> bool:
+        """Check if text starts with a wake word variant."""
+        for pattern in WAKE_PATTERNS:
+            if pattern.search(text_lower):
+                return True
+        return False
+
+    def _strip_wake_word(self, text_lower: str) -> str:
+        """Remove the wake word from the beginning of text."""
+        for pattern in WAKE_PATTERNS:
+            match = pattern.search(text_lower)
+            if match:
+                return text_lower[match.end():].strip()
+        return text_lower
 
     async def _process_command(self, command: str):
         """Process a voice command through Leon's brain."""
-        logger.info(f"📝 Command: {command}")
+        logger.info(f"Command: {command}")
         self.is_awake = False  # Go back to listening for wake word after processing
+        self._cancel_sleep_timer()
 
         if self.on_command:
             # Send to Leon's brain and get response
@@ -229,9 +276,34 @@ class VoiceSystem:
         else:
             logger.warning("No command handler registered")
 
-    # ══════════════════════════════════════════════════════
+    # ================================================================
+    # SLEEP TIMEOUT
+    # ================================================================
+
+    def _start_sleep_timer(self):
+        """Start/reset the inactivity timer. Goes back to sleep after timeout."""
+        self._cancel_sleep_timer()
+        self._sleep_timer = asyncio.ensure_future(self._sleep_after_timeout())
+
+    def _cancel_sleep_timer(self):
+        """Cancel the current sleep timer if running."""
+        if self._sleep_timer and not self._sleep_timer.done():
+            self._sleep_timer.cancel()
+            self._sleep_timer = None
+
+    async def _sleep_after_timeout(self):
+        """Wait for inactivity timeout then go back to sleep."""
+        try:
+            await asyncio.sleep(SLEEP_TIMEOUT_SECONDS)
+            if self.is_awake:
+                self.is_awake = False
+                logger.info(f"No speech for {SLEEP_TIMEOUT_SECONDS}s — going back to sleep")
+        except asyncio.CancelledError:
+            pass
+
+    # ================================================================
     # ELEVENLABS TTS
-    # ══════════════════════════════════════════════════════
+    # ================================================================
 
     async def speak(self, text: str):
         """
@@ -241,7 +313,7 @@ class VoiceSystem:
         if not text.strip():
             return
 
-        logger.info(f"🔊 Speaking: {text[:60]}...")
+        logger.info(f"Speaking: {text[:60]}...")
 
         if self.elevenlabs_api_key:
             await self._speak_elevenlabs(text)
@@ -314,14 +386,14 @@ class VoiceSystem:
 
         except ImportError:
             logger.warning("pyttsx3 not installed — printing instead")
-            print(f"\n🔊 Leon: {text}\n")
+            print(f"\nLeon: {text}\n")
         except Exception as e:
             logger.error(f"Local TTS error: {e}")
-            print(f"\n🔊 Leon: {text}\n")
+            print(f"\nLeon: {text}\n")
 
-    # ══════════════════════════════════════════════════════
+    # ================================================================
     # UTILITIES
-    # ══════════════════════════════════════════════════════
+    # ================================================================
 
     def set_wake_word(self, word: str):
         """Change the wake word."""

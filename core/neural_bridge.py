@@ -126,19 +126,26 @@ class BridgeServer:
             logger.error(f"Bridge send error: {e}")
             self._connected = False
 
-    async def send_and_wait(self, msg: BridgeMessage, timeout: float = 30.0) -> Optional[BridgeMessage]:
-        """Send a message and wait for a response with matching id."""
-        if not self.connected:
-            return None
-        future = asyncio.get_event_loop().create_future()
-        self._pending[msg.id] = future
-        await self.send(msg)
-        try:
-            return await asyncio.wait_for(future, timeout)
-        except asyncio.TimeoutError:
-            logger.warning(f"Bridge request timed out: {msg.type} ({msg.id})")
-            self._pending.pop(msg.id, None)
-            return None
+    async def send_and_wait(self, msg: BridgeMessage, timeout: float = 30.0, retries: int = 2) -> Optional[BridgeMessage]:
+        """Send a message and wait for a response with matching id. Retries on timeout."""
+        for attempt in range(1, retries + 1):
+            if not self.connected:
+                return None
+            # Use a fresh future each attempt but keep the same msg.id
+            future = asyncio.get_event_loop().create_future()
+            self._pending[msg.id] = future
+            await self.send(msg)
+            try:
+                # Increase timeout on each retry
+                attempt_timeout = timeout * attempt
+                return await asyncio.wait_for(future, attempt_timeout)
+            except asyncio.TimeoutError:
+                self._pending.pop(msg.id, None)
+                if attempt < retries:
+                    logger.warning(f"Bridge request timed out (attempt {attempt}/{retries}): {msg.type} ({msg.id})")
+                else:
+                    logger.warning(f"Bridge request timed out after {retries} attempts: {msg.type} ({msg.id})")
+        return None
 
     # ── Internal ─────────────────────────────────────────
 
@@ -290,19 +297,24 @@ class BridgeClient:
             logger.error(f"Bridge client send error: {e}")
             self._connected = False
 
-    async def send_and_wait(self, msg: BridgeMessage, timeout: float = 30.0) -> Optional[BridgeMessage]:
-        """Send and wait for response with matching id."""
-        if not self.connected:
-            return None
-        future = asyncio.get_event_loop().create_future()
-        self._pending[msg.id] = future
-        await self.send(msg)
-        try:
-            return await asyncio.wait_for(future, timeout)
-        except asyncio.TimeoutError:
-            logger.warning(f"Bridge client request timed out: {msg.type} ({msg.id})")
-            self._pending.pop(msg.id, None)
-            return None
+    async def send_and_wait(self, msg: BridgeMessage, timeout: float = 30.0, retries: int = 2) -> Optional[BridgeMessage]:
+        """Send and wait for response with matching id. Retries on timeout."""
+        for attempt in range(1, retries + 1):
+            if not self.connected:
+                return None
+            future = asyncio.get_event_loop().create_future()
+            self._pending[msg.id] = future
+            await self.send(msg)
+            try:
+                attempt_timeout = timeout * attempt
+                return await asyncio.wait_for(future, attempt_timeout)
+            except asyncio.TimeoutError:
+                self._pending.pop(msg.id, None)
+                if attempt < retries:
+                    logger.warning(f"Bridge client request timed out (attempt {attempt}/{retries}): {msg.type} ({msg.id})")
+                else:
+                    logger.warning(f"Bridge client request timed out after {retries} attempts: {msg.type} ({msg.id})")
+        return None
 
     # ── Internal ─────────────────────────────────────────
 

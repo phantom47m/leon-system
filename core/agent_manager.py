@@ -46,18 +46,27 @@ class AgentManager:
         output_file = self.output_dir / f"{agent_id}.log"
         error_file = self.output_dir / f"{agent_id}.err"
 
-        # Read the brief content
-        brief_content = Path(brief_path).read_text()[:4000]
+        # Read the full brief content (no truncation)
+        brief_content = Path(brief_path).read_text()
 
         logger.info(f"Spawning agent {agent_id} in {project_path}")
 
-        # Use stdin to pass the brief content safely (avoids shell injection)
+        # Open files properly so we can track and close them
+        stdout_fh = open(output_file, "w")
+        stderr_fh = open(error_file, "w")
+
+        # Pipe brief via stdin to avoid argument length limits and shell injection
         process = subprocess.Popen(
-            ["claude", "--print", brief_content],
-            stdout=open(output_file, "w"),
-            stderr=open(error_file, "w"),
+            ["claude", "--print", "-"],
+            stdin=subprocess.PIPE,
+            stdout=stdout_fh,
+            stderr=stderr_fh,
             cwd=project_path,
         )
+
+        # Write the full brief to stdin and close it so the process can run
+        process.stdin.write(brief_content.encode())
+        process.stdin.close()
 
         self.active_agents[agent_id] = {
             "process": process,
@@ -70,6 +79,7 @@ class AgentManager:
             "status": "running",
             "last_check": datetime.now().isoformat(),
             "retries": 0,
+            "_file_handles": [stdout_fh, stderr_fh],
         }
 
         logger.info(f"Agent {agent_id} spawned (PID {process.pid})")
@@ -87,8 +97,16 @@ class AgentManager:
         output = self._read_output(agent["output_file"])
         errors = self._read_output(agent["error_file"])
 
-        completed = (not is_running) and self._detect_completion(output)
-        failed = (not is_running) and not completed
+        # Proper completion detection: check return code + output
+        completed = (
+            (not is_running)
+            and (process.returncode == 0)
+            and bool(output.strip())
+        )
+        failed = (
+            (not is_running)
+            and (process.returncode != 0 or not output.strip())
+        )
 
         # Timeout check
         started = datetime.fromisoformat(agent["started_at"])
@@ -97,6 +115,26 @@ class AgentManager:
             logger.warning(f"Agent {agent_id} timed out after {elapsed:.0f}s")
             await self.terminate_agent(agent_id)
             failed = True
+            completed = False
+
+        # Auto-retry on failure
+        if failed and self.auto_retry and agent["retries"] < self.retry_attempts:
+            logger.info(
+                f"Agent {agent_id} failed (attempt {agent['retries'] + 1}/{self.retry_attempts}), retrying..."
+            )
+            new_id = await self._retry_agent(agent_id)
+            agent["status"] = "retrying"
+            agent["last_check"] = datetime.now().isoformat()
+            return {
+                "running": False,
+                "completed": False,
+                "failed": False,
+                "retrying": True,
+                "new_agent_id": new_id,
+                "output_preview": output[-500:] if output else "",
+                "errors": errors[-500:] if errors else "",
+                "duration_seconds": elapsed,
+            }
 
         agent["status"] = "running" if is_running else ("completed" if completed else "failed")
         agent["last_check"] = datetime.now().isoformat()
@@ -105,10 +143,34 @@ class AgentManager:
             "running": is_running,
             "completed": completed,
             "failed": failed,
+            "retrying": False,
             "output_preview": output[-500:] if output else "",
             "errors": errors[-500:] if errors else "",
             "duration_seconds": elapsed,
         }
+
+    async def _retry_agent(self, agent_id: str) -> str:
+        """Re-spawn a failed agent with the same brief and project."""
+        agent = self.active_agents[agent_id]
+        retry_count = agent["retries"] + 1
+
+        # Close old file handles
+        self._close_file_handles(agent_id)
+
+        # Spawn a new agent with the same parameters
+        new_id = await self.spawn_agent(
+            brief_path=agent["brief_path"],
+            project_path=agent["project_path"],
+        )
+
+        # Carry over retry count
+        self.active_agents[new_id]["retries"] = retry_count
+
+        # Remove old agent from tracking
+        self.active_agents.pop(agent_id, None)
+
+        logger.info(f"Retried agent {agent_id} -> {new_id} (attempt {retry_count + 1})")
+        return new_id
 
     async def get_agent_results(self, agent_id: str) -> dict:
         """Extract structured results from a completed agent."""
@@ -140,15 +202,29 @@ class AgentManager:
         except subprocess.TimeoutExpired:
             process.kill()
         agent["status"] = "terminated"
+        self._close_file_handles(agent_id)
         logger.info(f"Agent {agent_id} terminated")
 
     def cleanup_agent(self, agent_id: str):
         """Remove agent from active tracking (call after results are collected)."""
+        self._close_file_handles(agent_id)
         self.active_agents.pop(agent_id, None)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _close_file_handles(self, agent_id: str):
+        """Close any open file handles for an agent."""
+        agent = self.active_agents.get(agent_id)
+        if not agent:
+            return
+        for fh in agent.pop("_file_handles", []):
+            try:
+                if not fh.closed:
+                    fh.close()
+            except Exception:
+                pass
 
     def _read_output(self, filepath: str) -> str:
         try:
@@ -157,19 +233,27 @@ class AgentManager:
             return ""
 
     def _detect_completion(self, output: str) -> bool:
+        """Legacy helper — completion now checked via returncode in check_status."""
         if not output.strip():
             return False
-        # Claude Code typically outputs its full response; a non-empty output
-        # with no errors usually means it finished.
         return True
 
     def _extract_summary(self, output: str) -> str:
         lines = output.strip().split("\n")
         if not lines:
             return "No output"
-        # Take last meaningful lines as summary
-        tail = [l for l in lines[-10:] if l.strip()]
-        return " ".join(tail[-3:]) if tail else "Task completed"
+
+        # Look for structured markers first
+        marker_prefixes = ("summary:", "result:", "done:", "completed:", "output:")
+        for line in reversed(lines):
+            stripped = line.strip().lower()
+            for prefix in marker_prefixes:
+                if stripped.startswith(prefix):
+                    return line.strip()
+
+        # Fall back to last 5 non-empty lines
+        tail = [l for l in lines[-15:] if l.strip()]
+        return "\n".join(tail[-5:]) if tail else "Task completed"
 
     def _extract_files(self, output: str) -> list:
         patterns = [

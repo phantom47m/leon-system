@@ -154,6 +154,21 @@
         <div class="scanlines"></div>
     </div>
 
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
     <script type="module" src="/static/js/brain.js"></script>
+    <script>
+        // Show any JS errors on screen for debugging
+        window.onerror = function(msg, url, line) {
+            var el = document.getElementById('brain-container');
+            if (el) el.innerHTML = '<div style="color:#ff4444;padding:40px;font-family:monospace;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5"><h2>WebGL Error</h2><p>' + msg + '</p><p>' + url + ':' + line + '</p></div>';
+        };
+    </script>
 </body>
 </html>

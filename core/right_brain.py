@@ -7,8 +7,10 @@ Agents keep running even if the bridge disconnects.
 """
 
 import asyncio
+import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +26,9 @@ from .task_queue import TaskQueue
 from .openclaw_interface import OpenClawInterface
 
 logger = logging.getLogger("leon.right_brain")
+
+REMOTE_TASKS_FILE = Path("data/remote_tasks.json")
+MAX_QUEUED_TASKS = 10
 
 
 class RightBrain:
@@ -57,6 +62,7 @@ class RightBrain:
 
         # Local tracking for tasks dispatched from Left Brain
         self._remote_tasks: dict[str, dict] = {}
+        self._load_remote_tasks()
 
         # Cached memory context pushed from Left Brain (read-only)
         self._memory_cache: dict = {}
@@ -65,6 +71,36 @@ class RightBrain:
         self._monitor_task: Optional[asyncio.Task] = None
 
         logger.info("Right Brain initialized")
+
+    # ── Persistence ───────────────────────────────────────
+
+    def _load_remote_tasks(self):
+        """Load persisted remote tasks from disk, prune old completed ones."""
+        try:
+            if REMOTE_TASKS_FILE.exists():
+                data = json.loads(REMOTE_TASKS_FILE.read_text())
+                now = datetime.now()
+                for task_id, task in data.items():
+                    # Prune completed tasks older than 24h
+                    completed_at = task.get("completed_at")
+                    if completed_at:
+                        age = (now - datetime.fromisoformat(completed_at)).total_seconds()
+                        if age > 86400:
+                            continue
+                    self._remote_tasks[task_id] = task
+                logger.info(f"Loaded {len(self._remote_tasks)} remote tasks from disk")
+        except Exception as e:
+            logger.warning(f"Could not load remote tasks: {e}")
+
+    def _save_remote_tasks(self):
+        """Persist remote tasks dict to disk."""
+        try:
+            REMOTE_TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            REMOTE_TASKS_FILE.write_text(json.dumps(self._remote_tasks, default=str, indent=2))
+        except Exception as e:
+            logger.warning(f"Could not save remote tasks: {e}")
+
+    # ── Lifecycle ─────────────────────────────────────────
 
     async def start(self):
         """Start the Right Brain: connect to Left Brain + monitor agents."""
@@ -85,6 +121,7 @@ class RightBrain:
         for agent_id in list(self.agent_manager.active_agents.keys()):
             await self.agent_manager.terminate_agent(agent_id)
 
+        self._save_remote_tasks()
         logger.info("Right Brain stopped")
 
     # ── Message Handlers ─────────────────────────────────
@@ -99,29 +136,45 @@ class RightBrain:
 
         logger.info(f"Received task from Left Brain: {task_desc[:60]}")
 
-        # Verify paths exist (they should be on NFS)
-        if not Path(brief_path).exists():
-            logger.error(f"Brief not found (NFS issue?): {brief_path}")
+        # Backpressure: reject if queue is full
+        active_count = len(self.agent_manager.active_agents)
+        queued_count = len(self.task_queue.queue)
+        if active_count >= self.task_queue.max_concurrent and queued_count >= MAX_QUEUED_TASKS:
+            logger.warning(f"Rejecting task — queue full ({active_count} active, {queued_count} queued)")
             await self.bridge.send(BridgeMessage(
                 type=MSG_TASK_STATUS,
                 id=msg.id,
                 payload={
                     "task_id": remote_task_id,
-                    "status": "failed",
-                    "error": f"Brief path not accessible: {brief_path}",
+                    "status": "rejected",
+                    "reason": "queue_full",
                 },
             ))
             return
 
-        if not Path(project_path).exists():
-            logger.error(f"Project path not found (NFS issue?): {project_path}")
+        # Verify paths exist with NFS retry (mount may be delayed)
+        if not await self._wait_for_path(brief_path):
+            logger.error(f"Brief not found after retries (NFS issue?): {brief_path}")
             await self.bridge.send(BridgeMessage(
                 type=MSG_TASK_STATUS,
                 id=msg.id,
                 payload={
                     "task_id": remote_task_id,
                     "status": "failed",
-                    "error": f"Project path not accessible: {project_path}",
+                    "error": f"Brief path not accessible after retries: {brief_path}",
+                },
+            ))
+            return
+
+        if not await self._wait_for_path(project_path):
+            logger.error(f"Project path not found after retries (NFS issue?): {project_path}")
+            await self.bridge.send(BridgeMessage(
+                type=MSG_TASK_STATUS,
+                id=msg.id,
+                payload={
+                    "task_id": remote_task_id,
+                    "status": "failed",
+                    "error": f"Project path not accessible after retries: {project_path}",
                 },
             ))
             return
@@ -141,6 +194,7 @@ class RightBrain:
         }
         self.task_queue.add_task(agent_id, task_obj)
         self._remote_tasks[agent_id] = task_obj
+        self._save_remote_tasks()
 
         # Acknowledge
         await self.bridge.send(BridgeMessage(
@@ -153,6 +207,16 @@ class RightBrain:
             },
         ))
         logger.info(f"Agent {agent_id} spawned for remote task {remote_task_id}")
+
+    async def _wait_for_path(self, path: str, retries: int = 3, delay: float = 2.0) -> bool:
+        """Wait for a path to become available (NFS mount delay)."""
+        for attempt in range(retries):
+            if Path(path).exists():
+                return True
+            if attempt < retries - 1:
+                logger.debug(f"Path not found, retrying in {delay}s: {path}")
+                await asyncio.sleep(delay)
+        return False
 
     async def _handle_status_request(self, msg: BridgeMessage):
         """Return current agent + task status to Left Brain."""
@@ -192,6 +256,16 @@ class RightBrain:
                 for agent_id in agent_ids:
                     status = await self.agent_manager.check_status(agent_id)
 
+                    # If agent is retrying, update our tracking
+                    if status.get("retrying"):
+                        new_id = status.get("new_agent_id")
+                        if new_id and agent_id in self._remote_tasks:
+                            task_info = self._remote_tasks.pop(agent_id)
+                            task_info["id"] = new_id
+                            self._remote_tasks[new_id] = task_info
+                            self._save_remote_tasks()
+                        continue
+
                     if status.get("completed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
                         self.task_queue.complete_task(agent_id)
@@ -199,6 +273,9 @@ class RightBrain:
 
                         # Report back to Left Brain
                         remote_info = self._remote_tasks.pop(agent_id, {})
+                        remote_info["completed_at"] = datetime.now().isoformat()
+                        self._save_remote_tasks()
+
                         await self.bridge.send(BridgeMessage(
                             type=MSG_TASK_RESULT,
                             payload={
@@ -221,6 +298,9 @@ class RightBrain:
                         self.agent_manager.cleanup_agent(agent_id)
 
                         remote_info = self._remote_tasks.pop(agent_id, {})
+                        remote_info["completed_at"] = datetime.now().isoformat()
+                        self._save_remote_tasks()
+
                         await self.bridge.send(BridgeMessage(
                             type=MSG_TASK_RESULT,
                             payload={
