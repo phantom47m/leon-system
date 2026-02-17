@@ -28,7 +28,7 @@ body {
     color: var(--text);
     font-family: 'Rajdhani', sans-serif;
     overflow: hidden;
-    cursor: crosshair;
+    cursor: default;
 }
 
 /* ── 3D Container ──────────────────────────────────────── */
@@ -39,6 +39,7 @@ body {
     width: 100vw;
     height: 100vh;
     z-index: 1;
+    cursor: crosshair;
 }
 
 /* ── HUD Overlay ───────────────────────────────────────── */
@@ -312,12 +313,12 @@ body {
 /* ── Bottom Panel ──────────────────────────────────────── */
 #bottom-panel {
     position: absolute;
-    bottom: 20px;
+    bottom: 82px;
     left: 24px;
     right: 24px;
     display: flex;
     gap: 20px;
-    height: 140px;
+    height: 130px;
 }
 
 .bottom-left {
@@ -432,7 +433,7 @@ body {
 /* ── Active Agents Panel ──────────────────────────────── */
 #agents-panel {
     position: absolute;
-    bottom: 210px;
+    bottom: 274px;
     left: 50%;
     transform: translateX(-50%);
     width: 600px;
@@ -520,19 +521,25 @@ body {
 
 /* ── Command Bar ──────────────────────────────────────── */
 #command-bar {
-    position: absolute;
-    bottom: 168px;
-    left: 24px;
-    right: 24px;
-    height: 36px;
+    position: fixed;
+    top: calc(100vh - 72px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 700px;
+    max-width: calc(100vw - 48px);
+    height: 52px;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 0 12px;
-    background: var(--panel-bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    backdrop-filter: blur(10px);
+    gap: 10px;
+    padding: 0 18px;
+    background: rgba(10, 15, 30, 0.98);
+    border: 2px solid var(--cyan);
+    border-radius: 8px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 0 25px rgba(79, 195, 247, 0.4), inset 0 0 15px rgba(79, 195, 247, 0.05);
+    z-index: 1000;
+    pointer-events: auto;
+    cursor: default;
 }
 
 .command-prefix {
@@ -550,11 +557,12 @@ body {
     background: transparent;
     border: none;
     outline: none;
-    color: var(--text);
+    color: #ffffff;
     font-family: 'Rajdhani', sans-serif;
-    font-size: 14px;
+    font-size: 16px;
     letter-spacing: 1px;
     caret-color: var(--cyan);
+    cursor: text;
 }
 
 #command-input::placeholder {
@@ -567,15 +575,15 @@ body {
 }
 
 #command-send {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 3px;
+    background: rgba(79, 195, 247, 0.15);
+    border: 1px solid var(--cyan);
+    border-radius: 4px;
     color: var(--cyan);
     font-family: 'Orbitron', monospace;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 2px;
-    padding: 4px 12px;
+    padding: 8px 16px;
     cursor: pointer;
     transition: all 0.2s ease;
 }
@@ -674,7 +682,7 @@ body {
         transform: none;
     }
     #command-bar {
-        bottom: 168px;
+        width: calc(100vw - 48px);
     }
 }
 

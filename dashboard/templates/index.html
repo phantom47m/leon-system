@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LEON — Brain Monitor</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=6">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -110,13 +110,6 @@
             <div id="agents-list"></div>
         </div>
 
-        <!-- Command Input Bar -->
-        <div id="command-bar">
-            <span class="command-prefix">LEON &gt;</span>
-            <input type="text" id="command-input" placeholder="Enter command..." autocomplete="off" spellcheck="false">
-            <button id="command-send">SEND</button>
-        </div>
-
         <!-- Bottom Panel — Neural Bridge + Activity -->
         <div id="bottom-panel">
             <div class="bottom-left">
@@ -154,6 +147,13 @@
         <div class="scanlines"></div>
     </div>
 
+    <!-- Command Input Bar (outside HUD so it's always clickable) -->
+    <div id="command-bar" class="command-bar">
+        <span class="command-prefix">LEON &gt;</span>
+        <input type="text" id="command-input" placeholder="Type a command or /help ..." autocomplete="off" spellcheck="false">
+        <button id="command-send">SEND</button>
+    </div>
+
     <script type="importmap">
     {
         "imports": {
@@ -162,7 +162,7 @@
         }
     }
     </script>
-    <script type="module" src="/static/js/brain.js"></script>
+    <script type="module" src="/static/js/brain.js?v=5"></script>
     <script>
         // Show any JS errors on screen for debugging
         window.onerror = function(msg, url, line) {
