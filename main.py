@@ -4,11 +4,13 @@ Leon - AI Orchestration System
 Entry point: launches core system, voice, dashboard, and UI
 
 Modes:
-    --cli         Terminal only (type commands)
-    --voice       Terminal + voice (Hey Leon wake word)
-    --dashboard   Terminal + brain dashboard (localhost:3000)
-    --full        Everything: voice + dashboard + GTK overlay
-    --gui         GTK4 desktop overlay only
+    --cli           Terminal only (type commands)
+    --voice         Terminal + voice (Hey Leon wake word)
+    --dashboard     Terminal + brain dashboard (localhost:3000)
+    --full          Everything: voice + dashboard + GTK overlay
+    --gui           GTK4 desktop overlay only
+    --left-brain    Left Brain mode (main PC — awareness + dispatch)
+    --right-brain   Right Brain mode (homelab PC — agent execution)
 """
 
 import sys
@@ -209,6 +211,39 @@ def run_gui():
 
 
 # ═════════════════════════════════════════════════════════
+# RIGHT BRAIN MODE
+# ═════════════════════════════════════════════════════════
+
+def run_right_brain():
+    """Right Brain mode — headless worker that connects to Left Brain."""
+    import os
+    os.environ["LEON_BRAIN_ROLE"] = "right"
+
+    from core.right_brain import RightBrain
+
+    right = RightBrain(str(ROOT / "config" / "settings.yaml"))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    print()
+    print("╔════════════════════════════════════════════╗")
+    print("║    Leon Right Brain — Homelab Worker       ║")
+    print("║    Connecting to Left Brain...             ║")
+    print("╚════════════════════════════════════════════╝")
+    print()
+
+    try:
+        loop.run_until_complete(right.start())
+        # Keep running until interrupted
+        loop.run_forever()
+    except KeyboardInterrupt:
+        print("\n")
+    finally:
+        loop.run_until_complete(right.stop())
+        print("Right Brain stopped.")
+
+
+# ═════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═════════════════════════════════════════════════════════
 
@@ -225,6 +260,8 @@ Examples:
   python3 main.py --cli --dashboard      # Terminal + brain viz
   python3 main.py --full                 # Everything
   python3 main.py --gui                  # GTK4 overlay + voice + brain
+  python3 main.py --left-brain           # Left Brain (main PC)
+  python3 main.py --right-brain          # Right Brain (homelab)
         """,
     )
     parser.add_argument("--cli", action="store_true", help="Terminal mode")
@@ -232,9 +269,17 @@ Examples:
     parser.add_argument("--voice", action="store_true", help="Enable voice (Hey Leon)")
     parser.add_argument("--dashboard", action="store_true", help="Enable brain dashboard (localhost:3000)")
     parser.add_argument("--full", action="store_true", help="Everything: CLI + voice + dashboard")
+    parser.add_argument("--left-brain", action="store_true", dest="left_brain", help="Left Brain mode (main PC)")
+    parser.add_argument("--right-brain", action="store_true", dest="right_brain", help="Right Brain mode (homelab)")
     args = parser.parse_args()
 
-    if args.full:
+    if args.right_brain:
+        run_right_brain()
+    elif args.left_brain:
+        import os
+        os.environ["LEON_BRAIN_ROLE"] = "left"
+        run_cli(enable_voice=args.voice, enable_dashboard=True)
+    elif args.full:
         run_cli(enable_voice=True, enable_dashboard=True)
     elif args.gui:
         run_gui()

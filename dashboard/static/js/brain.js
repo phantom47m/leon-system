@@ -704,11 +704,35 @@ function updateUI() {
         rightStatus.className = brainState.rightActive ? 'status active' : 'status idle';
     }
 
-    // Bridge status
+    // Bridge status — show real connection state in split mode
     const bridgeStatus = document.getElementById('bridge-status');
     if (bridgeStatus) {
-        bridgeStatus.textContent = brainState.bridgeActive ? '● SYNCED' : '○ Idle';
-        bridgeStatus.className = brainState.bridgeActive ? 'status synced' : 'status idle';
+        if (brainState.brainRole === 'left') {
+            if (brainState.bridgeConnected) {
+                bridgeStatus.textContent = '● CONNECTED';
+                bridgeStatus.className = 'status synced';
+            } else {
+                bridgeStatus.textContent = '○ DISCONNECTED';
+                bridgeStatus.className = 'status idle';
+            }
+        } else {
+            bridgeStatus.textContent = brainState.bridgeActive ? '● SYNCED' : '○ Idle';
+            bridgeStatus.className = brainState.bridgeActive ? 'status synced' : 'status idle';
+        }
+    }
+
+    // Right Brain location label
+    const rightLabel = document.getElementById('right-brain-location');
+    if (rightLabel) {
+        if (brainState.brainRole === 'left' && brainState.rightBrainOnline) {
+            rightLabel.textContent = 'HOMELAB';
+            rightLabel.style.display = '';
+        } else if (brainState.brainRole === 'left') {
+            rightLabel.textContent = 'OFFLINE';
+            rightLabel.style.display = '';
+        } else {
+            rightLabel.style.display = 'none';
+        }
     }
 
     // Agent count (use agentCount from state, not activeAgents.length)

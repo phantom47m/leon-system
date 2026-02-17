@@ -168,20 +168,41 @@ def _build_state(leon) -> dict:
         if right_active:
             signal = "left-to-right" if len(feed) % 2 == 0 else "right-to-left"
 
+        # Brain split status
+        brain_role = status.get("brain_role", "unified")
+        bridge_connected = status.get("bridge_connected", False)
+        right_brain_online = status.get("right_brain_online", False)
+        right_brain_status = status.get("right_brain_status", {})
+
+        # If Left Brain with Right Brain connected, merge agent counts
+        remote_active = right_brain_status.get("active_agents", 0)
+        remote_queued = right_brain_status.get("queued", 0)
+        total_agents = active_count + remote_active
+
+        # Override bridge_active with real bridge state when in split mode
+        if brain_role == "left":
+            bridge_active = bridge_connected
+            right_active = right_brain_online or active_count > 0
+
         return {
             "leftActive": left_active,
             "rightActive": right_active,
             "bridgeActive": bridge_active,
             "activeAgents": active_tasks,
-            "agentCount": active_count,
-            "taskCount": queued_count + active_count,
+            "agentCount": total_agents,
+            "taskCount": queued_count + active_count + remote_active + remote_queued,
             "completedCount": completed_count,
-            "queuedCount": queued_count,
+            "queuedCount": queued_count + remote_queued,
             "maxConcurrent": max_concurrent,
             "uptime": uptime_seconds,
             "taskFeed": feed,
             "signal": signal,
             "timestamp": now,
+            "brainRole": brain_role,
+            "bridgeConnected": bridge_connected,
+            "rightBrainOnline": right_brain_online,
+            "remoteAgents": remote_active,
+            "rightBrainTasks": right_brain_status.get("active_tasks", []),
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")
@@ -197,6 +218,11 @@ def _build_state(leon) -> dict:
             "maxConcurrent": 5,
             "uptime": uptime_seconds,
             "taskFeed": [{"time": datetime.now().strftime("%H:%M"), "message": f"Error: {e}"}],
+            "brainRole": "unified",
+            "bridgeConnected": False,
+            "rightBrainOnline": False,
+            "remoteAgents": 0,
+            "rightBrainTasks": [],
         }
 
 

@@ -4,6 +4,15 @@ leon:
   personality_file: "config/personality.yaml"
   memory_file: "data/leon_memory.json"
   projects_file: "config/projects.yaml"
+  brain_role: "unified"  # "unified" (single PC), "left" (main PC), or "right" (homelab)
+
+bridge:
+  host: "0.0.0.0"
+  port: 9100
+  token: "01d12989921d1baa07e91567d71c6175e005b122638c98ce41038be78b19b702"
+  cert_path: "config/bridge_cert.pem"
+  key_path: "config/bridge_key.pem"
+  server_url: "wss://192.168.68.81:9100/bridge"  # Left Brain address (used by Right Brain)
 
 api:
   provider: "anthropic"

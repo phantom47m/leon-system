@@ -8,6 +8,7 @@ Claude Code agents, monitors tasks, and maintains persistent memory.
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,11 @@ from .agent_manager import AgentManager
 from .task_queue import TaskQueue
 from .openclaw_interface import OpenClawInterface
 from .api_client import AnthropicAPI
+from .neural_bridge import (
+    BridgeServer, BridgeMessage,
+    MSG_TASK_DISPATCH, MSG_TASK_STATUS, MSG_TASK_RESULT,
+    MSG_STATUS_REQUEST, MSG_STATUS_RESPONSE, MSG_MEMORY_SYNC,
+)
 
 logger = logging.getLogger("leon")
 
@@ -117,11 +123,27 @@ class Leon:
             logger.error(f"Business modules failed to load: {e}")
             self.crm = self.finance = self.comms = self.leads = self.assistant = None
 
+        # Brain role: unified (single PC), left (main PC), right (homelab)
+        self.brain_role = (
+            os.environ.get("LEON_BRAIN_ROLE")
+            or self.config.get("leon", {}).get("brain_role", "unified")
+        )
+
+        # Neural bridge (Left Brain only)
+        self.bridge: Optional[BridgeServer] = None
+        self._bridge_connected = False
+        self._right_brain_status: dict = {}
+        if self.brain_role == "left":
+            bridge_config = self.config.get("bridge", {})
+            self.bridge = BridgeServer(bridge_config)
+            self.bridge.on(MSG_TASK_STATUS, self._handle_remote_task_status)
+            self.bridge.on(MSG_TASK_RESULT, self._handle_remote_task_result)
+
         self.running = False
         self._awareness_task = None
         self._vision_task = None
 
-        logger.info("Leon initialized — all systems loaded")
+        logger.info(f"Leon initialized — brain_role={self.brain_role}")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -129,6 +151,12 @@ class Leon:
 
     async def start(self):
         self.running = True
+
+        # Start bridge server if Left Brain
+        if self.bridge:
+            await self.bridge.start()
+            logger.info("Neural bridge server started (Left Brain mode)")
+
         self._awareness_task = asyncio.create_task(self._awareness_loop())
 
         # Start vision if camera available
@@ -153,6 +181,8 @@ class Leon:
             self._vision_task.cancel()
         if self.vision:
             self.vision.stop()
+        if self.bridge:
+            await self.bridge.stop()
         if self.vault:
             self.vault.lock()
         if self.audit_log:
@@ -334,6 +364,11 @@ Vision: {vision_desc}
             )
 
         brief_path = await self._create_task_brief(task_desc, project)
+
+        # Dispatch to Right Brain if connected, otherwise run locally
+        if self.brain_role == "left" and self.bridge and self.bridge.connected:
+            return await self._dispatch_to_right_brain(task_desc, brief_path, project)
+
         agent_id = await self.agent_manager.spawn_agent(
             brief_path=brief_path,
             project_path=project["path"],
@@ -348,9 +383,10 @@ Vision: {vision_desc}
         self.task_queue.add_task(agent_id, task_obj)
         self.memory.add_active_task(agent_id, task_obj)
 
+        location = " (local fallback)" if self.brain_role == "left" else ""
         return (
             f"On it. Spawned Agent #{agent_id[-8:]} to handle:\n"
-            f"**{task_desc}** (project: {project['name']})\n\n"
+            f"**{task_desc}** (project: {project['name']}){location}\n\n"
             f"I'll update you when it's done."
         )
 
@@ -359,36 +395,78 @@ Vision: {vision_desc}
         tasks = analysis.get("tasks", [])
         project_names = analysis.get("projects", [])
         spawned = []
+        use_right_brain = (
+            self.brain_role == "left" and self.bridge and self.bridge.connected
+        )
 
         for i, task_desc in enumerate(tasks):
             proj_name = project_names[i] if i < len(project_names) else "unknown"
             project = self._resolve_project(proj_name, task_desc)
 
             if not project:
-                spawned.append((None, task_desc, "⚠️ No project matched"))
+                spawned.append((None, task_desc, "No project matched", ""))
                 continue
 
             brief_path = await self._create_task_brief(task_desc, project)
-            agent_id = await self.agent_manager.spawn_agent(
-                brief_path=brief_path,
-                project_path=project["path"],
-            )
 
-            task_obj = {
-                "id": agent_id,
-                "description": task_desc,
-                "project_name": project["name"],
-                "brief_path": brief_path,
-            }
-            self.task_queue.add_task(agent_id, task_obj)
-            self.memory.add_active_task(agent_id, task_obj)
-            spawned.append((agent_id, task_desc, project["name"]))
+            if use_right_brain:
+                # Dispatch to Right Brain
+                dispatch_msg = BridgeMessage(
+                    type=MSG_TASK_DISPATCH,
+                    payload={
+                        "brief_path": brief_path,
+                        "project_path": project["path"],
+                        "description": task_desc,
+                        "project_name": project["name"],
+                        "task_id": uuid.uuid4().hex[:8],
+                    },
+                )
+                resp = await self.bridge.send_and_wait(dispatch_msg, timeout=15)
+                if resp and resp.payload.get("status") == "spawned":
+                    agent_id = resp.payload.get("agent_id", "remote")
+                    task_obj = {
+                        "id": agent_id,
+                        "description": task_desc,
+                        "project_name": project["name"],
+                        "brief_path": brief_path,
+                        "remote": True,
+                    }
+                    self.memory.add_active_task(agent_id, task_obj)
+                    spawned.append((agent_id, task_desc, project["name"], "Right Brain"))
+                else:
+                    # Fallback to local
+                    agent_id = await self.agent_manager.spawn_agent(
+                        brief_path=brief_path, project_path=project["path"],
+                    )
+                    task_obj = {"id": agent_id, "description": task_desc,
+                                "project_name": project["name"], "brief_path": brief_path}
+                    self.task_queue.add_task(agent_id, task_obj)
+                    self.memory.add_active_task(agent_id, task_obj)
+                    spawned.append((agent_id, task_desc, project["name"], "local fallback"))
+            else:
+                agent_id = await self.agent_manager.spawn_agent(
+                    brief_path=brief_path,
+                    project_path=project["path"],
+                )
+                task_obj = {
+                    "id": agent_id,
+                    "description": task_desc,
+                    "project_name": project["name"],
+                    "brief_path": brief_path,
+                }
+                self.task_queue.add_task(agent_id, task_obj)
+                self.memory.add_active_task(agent_id, task_obj)
+                spawned.append((agent_id, task_desc, project["name"], "local"))
 
         # Build response
         lines = [f"On it. I've broken this into {len(spawned)} tasks:\n"]
-        for idx, (aid, desc, proj) in enumerate(spawned, 1):
-            tag = f"Agent #{aid[-8:]}" if aid else "⚠️ Needs project"
-            lines.append(f"{idx}. **{desc}** → {tag} ({proj})")
+        for idx, (aid, desc, proj, loc) in enumerate(spawned, 1):
+            if aid:
+                tag = f"Agent #{aid[-8:]}"
+                where = f" [{loc}]" if loc and self.brain_role == "left" else ""
+                lines.append(f"{idx}. **{desc}** → {tag} ({proj}){where}")
+            else:
+                lines.append(f"{idx}. **{desc}** → Needs project")
         lines.append("\nI'm monitoring all of them and will update you on progress.")
 
         return "\n".join(lines)
@@ -479,6 +557,7 @@ spawned_by: Leon v1.0
         logger.info("Awareness loop started")
         while self.running:
             try:
+                # Monitor local agents
                 agent_ids = list(self.agent_manager.active_agents.keys())
                 for agent_id in agent_ids:
                     status = await self.agent_manager.check_status(agent_id)
@@ -499,6 +578,20 @@ spawned_by: Leon v1.0
                         self.task_queue.fail_task(agent_id, results.get("errors", ""))
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")
+
+                # Poll Right Brain status if Left Brain
+                if self.brain_role == "left" and self.bridge and self.bridge.connected:
+                    resp = await self.bridge.send_and_wait(
+                        BridgeMessage(type=MSG_STATUS_REQUEST), timeout=5
+                    )
+                    if resp:
+                        self._right_brain_status = resp.payload
+                        self._bridge_connected = True
+                    else:
+                        self._bridge_connected = self.bridge.connected
+                elif self.brain_role == "left":
+                    self._bridge_connected = False
+                    self._right_brain_status = {}
 
                 # Periodic save
                 self.memory.save()
@@ -524,7 +617,7 @@ spawned_by: Leon v1.0
                 "audit_integrity": self.audit_log.verify_integrity(),
             }
 
-        return {
+        status = {
             "tasks": self.task_queue.get_status_summary(),
             "projects": self.memory.list_projects(),
             "active_agents": len(self.agent_manager.active_agents),
@@ -532,4 +625,90 @@ spawned_by: Leon v1.0
             "security": security,
             "printer": self.printer is not None,
             "crm_pipeline": self.crm.get_pipeline_summary() if self.crm else {},
+            "brain_role": self.brain_role,
+            "bridge_connected": (self.bridge.connected if self.bridge else self._bridge_connected) if self.brain_role == "left" else False,
+            "right_brain_online": (self.bridge.connected if self.bridge else bool(self._right_brain_status)) if self.brain_role == "left" else False,
+            "right_brain_status": self._right_brain_status if self.brain_role == "left" else {},
         }
+        return status
+
+    # ------------------------------------------------------------------
+    # Bridge dispatch + remote task handling (Left Brain)
+    # ------------------------------------------------------------------
+
+    async def _dispatch_to_right_brain(self, task_desc: str, brief_path: str, project: dict) -> str:
+        """Send a single task to the Right Brain for execution."""
+        task_id = uuid.uuid4().hex[:8]
+        dispatch_msg = BridgeMessage(
+            type=MSG_TASK_DISPATCH,
+            payload={
+                "brief_path": brief_path,
+                "project_path": project["path"],
+                "description": task_desc,
+                "project_name": project["name"],
+                "task_id": task_id,
+            },
+        )
+
+        resp = await self.bridge.send_and_wait(dispatch_msg, timeout=15)
+
+        if resp and resp.payload.get("status") == "spawned":
+            agent_id = resp.payload.get("agent_id", f"remote_{task_id}")
+            task_obj = {
+                "id": agent_id,
+                "description": task_desc,
+                "project_name": project["name"],
+                "brief_path": brief_path,
+                "remote": True,
+            }
+            self.memory.add_active_task(agent_id, task_obj)
+            return (
+                f"On it. Dispatched to Right Brain — Agent #{agent_id[-8:]}:\n"
+                f"**{task_desc}** (project: {project['name']})\n\n"
+                f"Running on homelab. I'll update you when it's done."
+            )
+
+        # Fallback to local execution
+        logger.warning("Right Brain dispatch failed — falling back to local")
+        agent_id = await self.agent_manager.spawn_agent(
+            brief_path=brief_path,
+            project_path=project["path"],
+        )
+        task_obj = {
+            "id": agent_id,
+            "description": task_desc,
+            "project_name": project["name"],
+            "brief_path": brief_path,
+        }
+        self.task_queue.add_task(agent_id, task_obj)
+        self.memory.add_active_task(agent_id, task_obj)
+        return (
+            f"Right Brain unavailable — running locally. Agent #{agent_id[-8:]}:\n"
+            f"**{task_desc}** (project: {project['name']})\n\n"
+            f"I'll update you when it's done."
+        )
+
+    async def _handle_remote_task_status(self, msg: BridgeMessage):
+        """Handle task status updates from Right Brain."""
+        payload = msg.payload
+        task_id = payload.get("task_id", "")
+        status = payload.get("status", "")
+        logger.info(f"Remote task {task_id} status: {status}")
+
+    async def _handle_remote_task_result(self, msg: BridgeMessage):
+        """Handle completed/failed task results from Right Brain."""
+        payload = msg.payload
+        task_id = payload.get("task_id", "")
+        agent_id = payload.get("agent_id", task_id)
+        status = payload.get("status", "")
+        results = payload.get("results", {})
+
+        if status == "completed":
+            self.memory.complete_task(agent_id, results)
+            logger.info(f"Remote agent {agent_id} completed: {results.get('summary', '')[:80]}")
+        elif status == "failed":
+            self.memory.complete_task(agent_id, {
+                "summary": results.get("summary", "Remote task failed"),
+                "files_modified": [],
+            })
+            logger.warning(f"Remote agent {agent_id} failed")
