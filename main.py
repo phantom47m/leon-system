@@ -220,21 +220,13 @@ def run_headless():
     os.environ["LEON_BRAIN_ROLE"] = "left"
 
     from core.leon import Leon
+    from dashboard.server import create_app
+    from aiohttp import web
 
     leon = Leon(str(ROOT / "config" / "settings.yaml"))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(leon.start())
-
-    # Start dashboard
-    def start_dashboard():
-        from dashboard.server import create_app
-        from aiohttp import web
-        app = create_app(leon_core=leon)
-        web.run_app(app, host="0.0.0.0", port=3000, print=lambda _: None)
-
-    dash_thread = threading.Thread(target=start_dashboard, daemon=True)
-    dash_thread.start()
 
     print()
     print("╔════════════════════════════════════════════╗")
@@ -245,11 +237,20 @@ def run_headless():
     print("╚════════════════════════════════════════════╝")
     print()
 
+    # Run dashboard in the main event loop (avoids set_wakeup_fd thread error)
+    app = create_app(leon_core=leon)
+    runner = web.AppRunner(app)
+    loop.run_until_complete(runner.setup())
+    site = web.TCPSite(runner, "0.0.0.0", 3000)
+    loop.run_until_complete(site.start())
+    logger.info("Dashboard running on http://localhost:3000")
+
     try:
         loop.run_forever()
     except KeyboardInterrupt:
         print("\n")
     finally:
+        loop.run_until_complete(runner.cleanup())
         loop.run_until_complete(leon.stop())
         print("Left Brain stopped.")
 
