@@ -1,0 +1,17 @@
+[Unit]
+Description=Leon Left Brain — Awareness + Bridge Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deansabr
+WorkingDirectory=/home/deansabr/leon-system
+Environment=LEON_BRAIN_ROLE=left
+Environment=LEON_BRIDGE_TOKEN=01d12989921d1baa07e91567d71c6175e005b122638c98ce41038be78b19b702
+ExecStart=/usr/bin/python3 main.py --left-brain
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
