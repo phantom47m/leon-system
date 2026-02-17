@@ -211,6 +211,50 @@ def run_gui():
 
 
 # ═════════════════════════════════════════════════════════
+# HEADLESS MODE (Left Brain daemon — no REPL)
+# ═════════════════════════════════════════════════════════
+
+def run_headless():
+    """Left Brain headless mode — bridge + dashboard, no terminal input."""
+    import os
+    os.environ["LEON_BRAIN_ROLE"] = "left"
+
+    from core.leon import Leon
+
+    leon = Leon(str(ROOT / "config" / "settings.yaml"))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(leon.start())
+
+    # Start dashboard
+    def start_dashboard():
+        from dashboard.server import create_app
+        from aiohttp import web
+        app = create_app(leon_core=leon)
+        web.run_app(app, host="0.0.0.0", port=3000, print=lambda _: None)
+
+    dash_thread = threading.Thread(target=start_dashboard, daemon=True)
+    dash_thread.start()
+
+    print()
+    print("╔════════════════════════════════════════════╗")
+    print("║    Leon Left Brain — Headless Daemon       ║")
+    print("║    Bridge: wss://0.0.0.0:9100/bridge       ║")
+    print("║    Dashboard: http://localhost:3000         ║")
+    print("║    Ctrl+C to stop                          ║")
+    print("╚════════════════════════════════════════════╝")
+    print()
+
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        print("\n")
+    finally:
+        loop.run_until_complete(leon.stop())
+        print("Left Brain stopped.")
+
+
+# ═════════════════════════════════════════════════════════
 # RIGHT BRAIN MODE
 # ═════════════════════════════════════════════════════════
 
@@ -276,9 +320,7 @@ Examples:
     if args.right_brain:
         run_right_brain()
     elif args.left_brain:
-        import os
-        os.environ["LEON_BRAIN_ROLE"] = "left"
-        run_cli(enable_voice=args.voice, enable_dashboard=True)
+        run_headless()
     elif args.full:
         run_cli(enable_voice=True, enable_dashboard=True)
     elif args.gui:
