@@ -12,6 +12,7 @@ import json
 import logging
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("leon.api")
@@ -69,10 +70,15 @@ class AnthropicAPI:
     # ------------------------------------------------------------------
 
     async def _claude_cli_request(self, prompt: str) -> str:
-        """Send a prompt through claude --print and return the response."""
+        """Send a prompt through claude --print and return the response.
+        Uses Leon's separate Claude auth to avoid burning the main account."""
         try:
             import os
             env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            # Point claude CLI at Leon's own credentials (backup account)
+            leon_auth_dir = Path(__file__).parent.parent / "config" / "claude-auth"
+            if (leon_auth_dir / ".claude" / ".credentials.json").exists():
+                env["HOME"] = str(leon_auth_dir)
             proc = await asyncio.create_subprocess_exec(
                 "claude", "--print", "-p", prompt,
                 stdout=asyncio.subprocess.PIPE,

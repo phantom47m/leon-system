@@ -6,6 +6,14 @@ data/agent_outputs/*
 data/task_briefs/*
 logs/*
 .env
+config/claude-auth/
+data/task_queue.json
+data/agent_index.json
+data/scheduler_state.json
+data/audit.log
+data/.vault.enc
+data/.vault.salt
+data/.auth.json
 !data/agent_outputs/.gitkeep
 !data/task_briefs/.gitkeep
 !logs/.gitkeep
