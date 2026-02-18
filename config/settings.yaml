@@ -52,6 +52,13 @@ scheduler:
       interval_hours: 6
       enabled: false
 
+whatsapp:
+  enabled: true
+  allowed_numbers:
+    - "17275427167"
+  auto_start: false  # Set to true to auto-launch bridge with Leon
+  bridge_dir: "integrations/whatsapp"
+
 system:
   auto_start: true
   hotkey: "Super+L"

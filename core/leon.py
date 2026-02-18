@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -171,6 +172,7 @@ class Leon:
         self.running = False
         self._awareness_task = None
         self._vision_task = None
+        self._whatsapp_process = None
 
         logger.info(f"Leon initialized — brain_role={self.brain_role}")
 
@@ -221,6 +223,11 @@ class Leon:
 
         # Auto-trigger daily briefing on startup
         asyncio.create_task(self._auto_daily_briefing())
+
+        # Auto-start WhatsApp bridge if configured
+        wa_config = self.config.get("whatsapp", {})
+        if wa_config.get("enabled") and wa_config.get("auto_start"):
+            self._start_whatsapp_bridge(wa_config)
 
         logger.info("Leon is now running — all systems active")
 
@@ -298,6 +305,14 @@ class Leon:
             self._vision_task.cancel()
         if self.vision:
             self.vision.stop()
+        if self._whatsapp_process:
+            logger.info("Stopping WhatsApp bridge...")
+            self._whatsapp_process.terminate()
+            try:
+                self._whatsapp_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._whatsapp_process.kill()
+            self._whatsapp_process = None
         if self.bridge:
             await self.bridge.stop()
         if self.vault:
@@ -322,6 +337,48 @@ class Leon:
                 })
         except Exception as e:
             logger.warning(f"Auto daily briefing failed: {e}")
+
+    def _start_whatsapp_bridge(self, wa_config: dict):
+        """Spawn the WhatsApp bridge as a subprocess."""
+        bridge_dir = Path(wa_config.get("bridge_dir", "integrations/whatsapp"))
+        bridge_script = bridge_dir / "bridge.js"
+
+        if not bridge_script.exists():
+            logger.warning(f"WhatsApp bridge script not found: {bridge_script}")
+            return
+
+        # Build env vars for the bridge
+        env = os.environ.copy()
+        env["LEON_API_URL"] = "http://127.0.0.1:3000"
+
+        # Get API token from vault or env
+        api_token = os.environ.get("LEON_API_TOKEN", "")
+        if not api_token and self.vault and self.vault._unlocked:
+            api_token = self.vault.retrieve("LEON_API_TOKEN") or ""
+        env["LEON_API_TOKEN"] = api_token
+
+        # Set allowed numbers from config
+        allowed = wa_config.get("allowed_numbers", [])
+        env["LEON_WHATSAPP_ALLOWED"] = ",".join(allowed)
+
+        if not api_token:
+            logger.warning("WhatsApp bridge: no API token available, skipping auto-start")
+            return
+
+        try:
+            self._whatsapp_process = subprocess.Popen(
+                ["node", "bridge.js"],
+                cwd=str(bridge_dir),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            logger.info(f"WhatsApp bridge started (PID {self._whatsapp_process.pid})")
+            if self.audit_log:
+                self.audit_log.log("whatsapp_bridge_start", f"PID {self._whatsapp_process.pid}", "info")
+        except Exception as e:
+            logger.error(f"Failed to start WhatsApp bridge: {e}")
+            self._whatsapp_process = None
 
     # ------------------------------------------------------------------
     # Main input handler

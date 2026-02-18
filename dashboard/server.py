@@ -59,6 +59,93 @@ async def health(request):
     })
 
 
+async def api_message(request):
+    """
+    POST /api/message — HTTP API for external integrations (WhatsApp bridge, etc.)
+
+    Expects JSON: {"message": "user text"}
+    Requires: Authorization: Bearer <token>
+    Returns JSON: {"response": "leon's reply", "timestamp": "HH:MM"}
+    """
+    # ── Auth check ──
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return web.json_response({"error": "Missing Bearer token"}, status=401)
+
+    token = auth_header[7:]
+    session_token = request.app.get("session_token", "")
+    api_token = request.app.get("api_token", "")
+
+    if token != session_token and token != api_token:
+        return web.json_response({"error": "Invalid token"}, status=403)
+
+    # ── Parse body ──
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    message = body.get("message", "").strip()
+    if not message:
+        return web.json_response({"error": "Empty message"}, status=400)
+
+    source = body.get("source", "api")
+    leon = request.app.get("leon_core")
+
+    # ── Audit log ──
+    if leon and leon.audit_log:
+        leon.audit_log.log(
+            "api_message",
+            f"[{source}] {message[:120]}",
+            "info",
+        )
+
+    # ── Broadcast incoming message to dashboard ──
+    timestamp = datetime.now().strftime("%H:%M")
+    await _broadcast_ws(request.app, {
+        "type": "input_response",
+        "message": f"[{source}] {message}",
+        "timestamp": timestamp,
+        "source": source,
+        "direction": "incoming",
+    })
+
+    # ── Process through Leon ──
+    if leon and hasattr(leon, "process_user_input"):
+        try:
+            response = await leon.process_user_input(message)
+        except Exception as e:
+            logger.error(f"API message processing error: {e}")
+            response = f"Error processing message: {e}"
+    else:
+        response = f"[Demo] Received: {message}"
+
+    # ── Broadcast response to dashboard ──
+    await _broadcast_ws(request.app, {
+        "type": "input_response",
+        "message": response,
+        "timestamp": datetime.now().strftime("%H:%M"),
+        "source": source,
+        "direction": "outgoing",
+    })
+
+    return web.json_response({
+        "response": response,
+        "timestamp": datetime.now().strftime("%H:%M"),
+    })
+
+
+async def _broadcast_ws(app, data: dict):
+    """Push a message to all authenticated WebSocket clients."""
+    dead = set()
+    for ws in ws_authenticated:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.add(ws)
+    ws_authenticated.difference_update(dead)
+
+
 async def websocket_handler(request):
     """WebSocket endpoint for real-time brain state updates."""
     ws = web.WebSocketResponse()
@@ -551,9 +638,24 @@ def create_app(leon_core=None) -> web.Application:
     print(f"\n  Dashboard session token: {token}\n", flush=True)
     logger.info(f"Dashboard session token: {token}")
 
+    # Persistent API token (survives restarts via vault)
+    api_token = None
+    if leon_core and hasattr(leon_core, "vault") and leon_core.vault and leon_core.vault._unlocked:
+        api_token = leon_core.vault.retrieve("LEON_API_TOKEN")
+        if not api_token:
+            api_token = secrets.token_hex(24)
+            leon_core.vault.store("LEON_API_TOKEN", api_token)
+            logger.info("Generated new persistent API token and stored in vault")
+    if not api_token:
+        api_token = os.environ.get("LEON_API_TOKEN", secrets.token_hex(24))
+    app["api_token"] = api_token
+    print(f"  API token (for WhatsApp bridge): {api_token}\n", flush=True)
+    logger.info(f"API token: {api_token}")
+
     # Routes
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_post("/api/message", api_message)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
 

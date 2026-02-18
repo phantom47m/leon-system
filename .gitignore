@@ -17,3 +17,5 @@ data/.auth.json
 !data/agent_outputs/.gitkeep
 !data/task_briefs/.gitkeep
 !logs/.gitkeep
+integrations/whatsapp/node_modules/
+integrations/whatsapp/.wwebjs_auth/

@@ -74,11 +74,8 @@ class AnthropicAPI:
         Uses Leon's separate Claude auth to avoid burning the main account."""
         try:
             import os
-            env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-            # Point claude CLI at Leon's own credentials (backup account)
-            leon_auth_dir = Path(__file__).parent.parent / "config" / "claude-auth"
-            if (leon_auth_dir / ".claude" / ".credentials.json").exists():
-                env["HOME"] = str(leon_auth_dir)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
             proc = await asyncio.create_subprocess_exec(
                 "claude", "--print", "-p", prompt,
                 stdout=asyncio.subprocess.PIPE,
