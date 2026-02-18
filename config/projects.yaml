@@ -12,6 +12,24 @@ projects:
       - "JavaScript"
       - "HTML/CSS"
 
+  - name: "vape-shop"
+    path: "/home/deansabr/vape-shop"
+    type: "fullstack"
+    tech_stack:
+      - "Next.js 14"
+      - "TypeScript"
+      - "Prisma"
+      - "PostgreSQL"
+      - "Tailwind CSS"
+      - "Zustand"
+
+  - name: "terminal-rice"
+    path: "/home/deansabr/terminal-rice"
+    type: "config"
+    tech_stack:
+      - "Shell"
+      - "Dotfiles"
+
 default_preferences:
   coding_style: "clean, well-commented"
   commit_message_style: "conventional"

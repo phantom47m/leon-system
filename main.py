@@ -82,7 +82,9 @@ def run_cli(enable_voice=False, enable_dashboard=False):
             from core.voice import VoiceSystem
             vloop = asyncio.new_event_loop()
             asyncio.set_event_loop(vloop)
-            voice = VoiceSystem(on_command=voice_command_handler)
+            voice_cfg = leon.get_voice_config()
+            voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
+            leon.set_voice_system(voice)
             vloop.run_until_complete(voice.start())
 
         voice_thread = threading.Thread(target=start_voice, daemon=True)
@@ -210,7 +212,9 @@ def run_gui():
                         return await self.leon_core.process_user_input(text)
                     vloop = asyncio.new_event_loop()
                     asyncio.set_event_loop(vloop)
-                    voice = VoiceSystem(on_command=handler)
+                    voice_cfg = self.leon_core.get_voice_config()
+                    voice = VoiceSystem(on_command=handler, config=voice_cfg)
+                    self.leon_core.set_voice_system(voice)
                     vloop.run_until_complete(voice.start())
                 threading.Thread(target=start_voice, daemon=True).start()
                 logger.info("🎤 Voice active — say 'Hey Leon'")

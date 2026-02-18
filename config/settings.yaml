@@ -59,6 +59,17 @@ whatsapp:
   auto_start: false  # Set to true to auto-launch bridge with Leon
   bridge_dir: "integrations/whatsapp"
 
+voice:
+  stt_provider: "deepgram"
+  tts_provider: "elevenlabs"
+  voice_id: "onwK4e9ZLuTAKqWW03F9"  # Daniel (British male) — Jarvis feel
+  stability: 0.6
+  similarity_boost: 0.85
+  style: 0.2
+  wake_words_enabled: true
+  sleep_timeout: 30
+  push_to_talk_key: "scroll_lock"
+
 system:
   auto_start: true
   hotkey: "Super+L"

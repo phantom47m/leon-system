@@ -20,12 +20,48 @@ from typing import Callable, Optional
 
 logger = logging.getLogger("leon.voice")
 
-# Common mishears for "hey leon"
+# Wake word patterns — covers natural phrasings + common STT mishears
 WAKE_PATTERNS = [
-    re.compile(r"^hey\s+leon\b", re.IGNORECASE),
-    re.compile(r"^hey\s+leo\b", re.IGNORECASE),
-    re.compile(r"^a\s+leon\b", re.IGNORECASE),
-    re.compile(r"^hey\s+le+on\b", re.IGNORECASE),
+    # Standard greetings
+    re.compile(r"\bhey\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bhi\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bhello\s+leon\b", re.IGNORECASE),
+    re.compile(r"\byo\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bsup\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bwhat'?s?\s+up\s+leon\b", re.IGNORECASE),
+
+    # Polite / formal
+    re.compile(r"\bokay?\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bok\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bexcuse\s+me\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bpardon\s+(me\s+)?leon\b", re.IGNORECASE),
+
+    # Attention getters
+    re.compile(r"\blisten\s+leon\b", re.IGNORECASE),
+    re.compile(r"\btalk\s+to\s+me\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bwake\s+up\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bleon\s+wake\s+up\b", re.IGNORECASE),
+    re.compile(r"\bleon\s+you\s+(there|up|awake)\b", re.IGNORECASE),
+    re.compile(r"\bare\s+you\s+there\s+leon\b", re.IGNORECASE),
+
+    # Name only (start of sentence)
+    re.compile(r"^leon[\s,]", re.IGNORECASE),
+    re.compile(r"^leon$", re.IGNORECASE),
+
+    # Common Deepgram mishears
+    re.compile(r"\bhey\s+leo\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+liam\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+neon\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+lee[\s-]?on\b", re.IGNORECASE),
+    re.compile(r"\ba\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+le+on\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+leanne?\b", re.IGNORECASE),
+    re.compile(r"\bhey\s+lion\b", re.IGNORECASE),
+    re.compile(r"\bhay\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bhe\s+leon\b", re.IGNORECASE),
+
+    # With filler words
+    re.compile(r"\b(?:um|uh|like)\s+(?:hey\s+)?leon\b", re.IGNORECASE),
 ]
 
 DEEPGRAM_MAX_RECONNECTS = 5
@@ -42,11 +78,12 @@ class VoiceSystem:
     - TTS: ElevenLabs (natural custom voice)
     """
 
-    def __init__(self, on_command: Optional[Callable] = None):
+    def __init__(self, on_command: Optional[Callable] = None, config: Optional[dict] = None):
         """
         Args:
             on_command: Callback function when a voice command is received.
                         Signature: async def on_command(text: str) -> str
+            config: Voice config dict from settings.yaml (optional)
         """
         self.on_command = on_command
         self.wake_word = "hey leon"
@@ -55,20 +92,33 @@ class VoiceSystem:
         self._audio_queue = queue.Queue()
         self._sleep_timer: Optional[asyncio.Task] = None
 
+        voice_cfg = config or {}
+
         # Deepgram config
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
 
-        # ElevenLabs config
+        # ElevenLabs config — default to "Daniel" (British male) for Jarvis feel
         self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
-        self.voice_id = os.getenv("LEON_VOICE_ID", "pNInz6obpgDQGcFmaJgB")  # Default: Adam
+        self.voice_id = os.getenv(
+            "LEON_VOICE_ID",
+            voice_cfg.get("voice_id", "onwK4e9ZLuTAKqWW03F9"),  # Daniel (British)
+        )
         self.tts_model = "eleven_turbo_v2_5"
+
+        # Voice tuning for consistent Jarvis feel
+        self.tts_stability = voice_cfg.get("stability", 0.6)
+        self.tts_similarity_boost = voice_cfg.get("similarity_boost", 0.85)
+        self.tts_style = voice_cfg.get("style", 0.2)
+
+        # Wake word config
+        self.wake_words_enabled = voice_cfg.get("wake_words_enabled", True)
 
         # Audio config
         self.sample_rate = 16000
         self.channels = 1
         self.chunk_size = 4096
 
-        logger.info("Voice system initialized")
+        logger.info(f"Voice system initialized — voice_id={self.voice_id}")
 
     # ================================================================
     # MAIN LOOP
@@ -231,8 +281,8 @@ class VoiceSystem:
         logger.debug(f"Heard: {text}")
 
         if not self.is_awake:
-            # Check for wake word using fuzzy matching
-            if self._matches_wake_word(text_lower):
+            # Check for wake word using fuzzy matching (skip if wake words disabled)
+            if self.wake_words_enabled and self._matches_wake_word(text_lower):
                 self.is_awake = True
                 self._start_sleep_timer()
                 logger.info("Wake word detected!")
@@ -336,9 +386,9 @@ class VoiceSystem:
                 "text": text,
                 "model_id": self.tts_model,
                 "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.8,
-                    "style": 0.3,
+                    "stability": self.tts_stability,
+                    "similarity_boost": self.tts_similarity_boost,
+                    "style": self.tts_style,
                     "use_speaker_boost": True,
                 },
             }

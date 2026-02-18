@@ -19,3 +19,4 @@ data/.auth.json
 !logs/.gitkeep
 integrations/whatsapp/node_modules/
 integrations/whatsapp/.wwebjs_auth/
+integrations/whatsapp/.wwebjs_cache/

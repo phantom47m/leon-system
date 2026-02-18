@@ -29,6 +29,8 @@ from .neural_bridge import (
     MSG_TASK_DISPATCH, MSG_TASK_STATUS, MSG_TASK_RESULT,
     MSG_STATUS_REQUEST, MSG_STATUS_RESPONSE, MSG_MEMORY_SYNC,
 )
+from .system_skills import SystemSkills
+from .hotkey_listener import HotkeyListener
 
 logger = logging.getLogger("leon")
 
@@ -141,6 +143,14 @@ class Leon:
             logger.error(f"Business modules failed to load: {e}")
             self.crm = self.finance = self.comms = self.leads = self.assistant = None
 
+        # System skills — PC control (apps, media, desktop, files, etc.)
+        self.system_skills = SystemSkills()
+
+        # Hotkey listener — push-to-talk and voice toggle
+        voice_cfg = self.config.get("voice", {})
+        ptt_key = voice_cfg.get("push_to_talk_key", "scroll_lock")
+        self.hotkey_listener = HotkeyListener(ptt_key=ptt_key)
+
         # Brain role: unified (single PC), left (main PC), right (homelab)
         self.brain_role = (
             os.environ.get("LEON_BRAIN_ROLE")
@@ -220,6 +230,14 @@ class Leon:
                     os.chmod(p, 0o600)
                 except OSError:
                     pass
+
+        # Start hotkey listener (push-to-talk, voice toggle)
+        try:
+            loop = asyncio.get_event_loop()
+            self.hotkey_listener.start(loop)
+            logger.info("Hotkey listener active — push-to-talk ready")
+        except Exception as e:
+            logger.warning(f"Hotkey listener failed to start: {e}")
 
         # Auto-trigger daily briefing on startup
         asyncio.create_task(self._auto_daily_briefing())
@@ -313,6 +331,8 @@ class Leon:
             except subprocess.TimeoutExpired:
                 self._whatsapp_process.kill()
             self._whatsapp_process = None
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
         if self.bridge:
             await self.bridge.stop()
         if self.vault:
@@ -506,7 +526,72 @@ class Leon:
                 lines.append(f"[{e.get('timestamp', '?')}] **{e.get('action')}** — {e.get('details', '')} ({e.get('severity')})")
             return "\n".join(lines)
 
+        # System skills — AI-classified routing for PC control commands
+        # Instead of 100 keyword checks, send to AI for smart classification
+        system_hints = [
+            "open ", "close ", "launch ", "start ", "kill ", "switch to",
+            "cpu", "ram", "memory", "disk", "storage", "processes", "uptime",
+            "ip address", "battery", "temperature", "temp",
+            "play", "pause", "next track", "previous track", "volume", "mute",
+            "now playing", "what's playing", "music",
+            "screenshot", "clipboard", "notify", "notification", "lock screen",
+            "brightness", "find file", "recent files", "downloads", "trash",
+            "wifi", "network", "speed test", "ping",
+            "timer", "alarm", "set timer", "set alarm", "remind",
+            "search for", "google", "define", "weather",
+            "git status", "npm", "pip install", "port",
+            "what's eating", "what's hogging", "what's running",
+        ]
+        if any(hint in msg for hint in system_hints):
+            skill_result = await self._route_to_system_skill(message)
+            if skill_result:
+                return skill_result
+
         return None
+
+    async def _route_to_system_skill(self, message: str) -> Optional[str]:
+        """Use AI to classify a message into a system skill call, then execute it."""
+        skill_list = self.system_skills.get_skill_list()
+
+        prompt = f"""You are a skill router. Given the user's message, determine which system skill to call.
+
+User message: "{message}"
+
+{skill_list}
+
+Respond with ONLY valid JSON (no markdown fences):
+{{
+  "skill": "skill_name",
+  "args": {{"arg1": "value1"}},
+  "confidence": 0.0-1.0
+}}
+
+If NO skill matches, respond: {{"skill": null, "args": {{}}, "confidence": 0.0}}
+
+Examples:
+- "what's eating my RAM" -> {{"skill": "top_processes", "args": {{"n": 10}}, "confidence": 0.95}}
+- "open Firefox" -> {{"skill": "open_app", "args": {{"name": "firefox"}}, "confidence": 0.99}}
+- "pause the music" -> {{"skill": "play_pause", "args": {{}}, "confidence": 0.95}}
+- "how's the weather" -> {{"skill": "weather", "args": {{}}, "confidence": 0.9}}
+- "set a timer for 5 minutes" -> {{"skill": "set_timer", "args": {{"minutes": 5, "label": "Timer"}}, "confidence": 0.95}}
+- "take a screenshot" -> {{"skill": "screenshot", "args": {{}}, "confidence": 0.99}}
+- "what's my IP" -> {{"skill": "ip_address", "args": {{}}, "confidence": 0.95}}"""
+
+        result = await self.api.analyze_json(prompt)
+        if not result or not result.get("skill"):
+            return None
+
+        confidence = result.get("confidence", 0)
+        if confidence < 0.7:
+            return None
+
+        skill_name = result["skill"]
+        args = result.get("args", {})
+
+        logger.info(f"System skill: {skill_name}({args}) confidence={confidence}")
+
+        skill_result = await self.system_skills.execute(skill_name, args)
+        return skill_result
 
     def _check_sensitive_permissions(self, message: str) -> Optional[str]:
         """Check if the message requests a sensitive action that needs approval."""
@@ -543,6 +628,16 @@ class Leon:
         if self.vision:
             modules.append("- **Vision** — \"what do you see\", \"look at\"")
         modules.append("- **Security** — \"audit log\", \"security log\"")
+        modules.append("\n**System Skills** (natural language — AI-routed):")
+        modules.append("- **App Control** — \"open firefox\", \"close spotify\", \"switch to code\"")
+        modules.append("- **System Info** — \"CPU usage\", \"RAM\", \"disk space\", \"top processes\"")
+        modules.append("- **Media** — \"pause\", \"next track\", \"volume up\", \"now playing\"")
+        modules.append("- **Desktop** — \"screenshot\", \"lock screen\", \"brightness up\"")
+        modules.append("- **Files** — \"find file\", \"recent downloads\", \"trash\"")
+        modules.append("- **Network** — \"wifi status\", \"my IP\", \"ping google\"")
+        modules.append("- **Timers** — \"set timer 5 minutes\", \"set alarm 7:00\"")
+        modules.append("- **Web** — \"search for X\", \"weather\", \"define Y\"")
+        modules.append("- **Dev** — \"git status\", \"port check 3000\"")
         modules.append("\n**Dashboard Commands** (type / in command bar):")
         modules.append("- `/agents` — list active agents")
         modules.append("- `/status` — system overview")
@@ -935,6 +1030,15 @@ spawned_by: Leon v1.0
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+
+    def set_voice_system(self, voice_system):
+        """Wire the voice system into the hotkey listener for push-to-talk."""
+        self.hotkey_listener.voice_system = voice_system
+        logger.info("Voice system connected to hotkey listener")
+
+    def get_voice_config(self) -> dict:
+        """Return voice config from settings for VoiceSystem initialization."""
+        return self.config.get("voice", {})
 
     def get_status(self) -> dict:
         """Get full system status for UI."""
