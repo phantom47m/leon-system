@@ -1,0 +1,15 @@
+[Unit]
+Description=Leon AI Orchestrator — Dashboard + Awareness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/deansabr/leon-system
+ExecStart=/usr/bin/python3 main.py --left-brain
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

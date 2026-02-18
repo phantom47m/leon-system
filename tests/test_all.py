@@ -762,8 +762,306 @@ class TestPermissionGating(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# SYSTEM SKILLS
+# ══════════════════════════════════════════════════════════
+
+class TestSystemSkills(unittest.TestCase):
+    def setUp(self):
+        from core.system_skills import SystemSkills
+        self.skills = SystemSkills()
+
+    def test_skill_list_not_empty(self):
+        skill_list = self.skills.get_skill_list()
+        self.assertIn("open_app", skill_list)
+        self.assertIn("cpu_usage", skill_list)
+        self.assertIn("screenshot", skill_list)
+        self.assertIn("set_timer", skill_list)
+
+    def test_execute_unknown_skill(self):
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(self.skills.execute("nonexistent_skill", {}))
+        loop.close()
+        self.assertIn("Unknown skill", result)
+
+    def test_execute_wrong_args(self):
+        loop = asyncio.new_event_loop()
+        # open_app requires 'name' arg
+        result = loop.run_until_complete(self.skills.execute("open_app", {}))
+        loop.close()
+        self.assertIn("wrong arguments", result)
+
+    def test_uptime(self):
+        result = self.skills.uptime()
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_cpu_usage(self):
+        result = self.skills.cpu_usage()
+        self.assertIn("CPU", result)
+
+    def test_ram_usage(self):
+        result = self.skills.ram_usage()
+        self.assertIn("Mem", result)
+
+    def test_disk_usage(self):
+        result = self.skills.disk_usage()
+        self.assertIn("Disk", result)
+
+    def test_ip_address(self):
+        result = self.skills.ip_address()
+        self.assertIn("Local IP", result)
+
+    def test_list_downloads(self):
+        result = self.skills.list_downloads()
+        self.assertIsInstance(result, str)
+
+    def test_set_and_list_timer(self):
+        result = self.skills.set_timer(0.01, "Test timer")
+        self.assertIn("Timer set", result)
+        listing = self.skills.list_timers()
+        self.assertIn("Test timer", listing)
+
+    def test_cancel_timer(self):
+        self.skills.set_timer(999, "Cancel me")
+        tid = self.skills._timer_id
+        result = self.skills.cancel_timer(tid)
+        self.assertIn("Cancelled", result)
+
+    def test_cancel_nonexistent_timer(self):
+        result = self.skills.cancel_timer(99999)
+        self.assertIn("No active timer", result)
+
+    def test_define_word(self):
+        result = self.skills.define("hello")
+        self.assertIsInstance(result, str)
+
+    def test_weather(self):
+        result = self.skills.weather()
+        self.assertIsInstance(result, str)
+
+    def test_git_status(self):
+        result = self.skills.git_status(str(ROOT))
+        self.assertIsInstance(result, str)
+        # Should show git status since we're in a git repo
+        self.assertIn("leon-system", result.lower())
+
+    def test_port_check(self):
+        result = self.skills.port_check(99999)
+        self.assertIn("not in use", result)
+
+    def test_find_file(self):
+        result = self.skills.find_file("settings.yaml")
+        self.assertIsInstance(result, str)
+
+    def test_file_size_missing(self):
+        result = self.skills.file_size("/nonexistent/file.txt")
+        self.assertIn("not found", result)
+
+    def test_open_app_not_found(self):
+        result = self.skills.open_app("definitely_not_a_real_app_12345")
+        self.assertIn("not found", result)
+
+
+# ══════════════════════════════════════════════════════════
+# HOTKEY LISTENER
+# ══════════════════════════════════════════════════════════
+
+class TestHotkeyListener(unittest.TestCase):
+    def test_init_default(self):
+        from core.hotkey_listener import HotkeyListener
+        hl = HotkeyListener(ptt_key="scroll_lock")
+        self.assertEqual(hl.ptt_key_name, "scroll_lock")
+        self.assertTrue(hl._voice_enabled)
+        self.assertFalse(hl._ptt_active)
+        self.assertFalse(hl._running)
+
+    def test_init_custom_key(self):
+        from core.hotkey_listener import HotkeyListener
+        hl = HotkeyListener(ptt_key="F9")
+        self.assertEqual(hl.ptt_key_name, "f9")
+
+    def test_toggle_voice_no_system(self):
+        from core.hotkey_listener import HotkeyListener
+        hl = HotkeyListener()
+        # Should not crash without a voice system
+        hl.toggle_voice()
+        self.assertTrue(hl._voice_enabled)  # Toggled but no system to disable
+
+    def test_stop_without_start(self):
+        from core.hotkey_listener import HotkeyListener
+        hl = HotkeyListener()
+        # Should not crash
+        hl.stop()
+        self.assertFalse(hl._running)
+
+
+# ══════════════════════════════════════════════════════════
+# VOICE SYSTEM (no API needed — testing pattern matching)
+# ══════════════════════════════════════════════════════════
+
+class TestVoiceSystem(unittest.TestCase):
+    def setUp(self):
+        from core.voice import VoiceSystem
+        self.voice = VoiceSystem(on_command=None, config={})
+
+    def test_wake_word_hey_leon(self):
+        self.assertTrue(self.voice._matches_wake_word("hey leon"))
+
+    def test_wake_word_hi_leon(self):
+        self.assertTrue(self.voice._matches_wake_word("hi leon"))
+
+    def test_wake_word_yo_leon(self):
+        self.assertTrue(self.voice._matches_wake_word("yo leon"))
+
+    def test_wake_word_excuse_me(self):
+        self.assertTrue(self.voice._matches_wake_word("excuse me leon"))
+
+    def test_wake_word_mishear_leo(self):
+        self.assertTrue(self.voice._matches_wake_word("hey leo"))
+
+    def test_wake_word_mishear_lion(self):
+        self.assertTrue(self.voice._matches_wake_word("hey lion"))
+
+    def test_wake_word_just_leon(self):
+        self.assertTrue(self.voice._matches_wake_word("leon"))
+
+    def test_wake_word_with_filler(self):
+        self.assertTrue(self.voice._matches_wake_word("um hey leon"))
+
+    def test_no_wake_word(self):
+        self.assertFalse(self.voice._matches_wake_word("what is the weather"))
+
+    def test_no_wake_word_similar(self):
+        self.assertFalse(self.voice._matches_wake_word("hey john"))
+
+    def test_strip_wake_word(self):
+        result = self.voice._strip_wake_word("hey leon what time is it")
+        self.assertEqual(result, "what time is it")
+
+    def test_strip_wake_word_only(self):
+        result = self.voice._strip_wake_word("hey leon")
+        self.assertEqual(result, "")
+
+    def test_default_voice_id(self):
+        # Should default to Daniel (British)
+        self.assertEqual(self.voice.voice_id, "onwK4e9ZLuTAKqWW03F9")
+
+    def test_tts_stability(self):
+        self.assertEqual(self.voice.tts_stability, 0.6)
+
+    def test_tts_similarity(self):
+        self.assertEqual(self.voice.tts_similarity_boost, 0.85)
+
+
+# ══════════════════════════════════════════════════════════
+# SCREEN AWARENESS
+# ══════════════════════════════════════════════════════════
+
+class TestScreenAwareness(unittest.TestCase):
+    def test_init(self):
+        from core.screen_awareness import ScreenAwareness
+        sa = ScreenAwareness(api_client=None, interval=30)
+        self.assertFalse(sa._running)
+        self.assertEqual(sa.interval, 30)
+        self.assertEqual(sa.current_context["active_app"], "unknown")
+
+    def test_get_context(self):
+        from core.screen_awareness import ScreenAwareness
+        sa = ScreenAwareness()
+        ctx = sa.get_context()
+        self.assertIn("active_app", ctx)
+        self.assertIn("monitoring", ctx)
+        self.assertFalse(ctx["monitoring"])
+
+    def test_min_interval_enforced(self):
+        from core.screen_awareness import ScreenAwareness
+        sa = ScreenAwareness(interval=1)
+        self.assertEqual(sa.interval, 10)  # Min 10 seconds
+
+    def test_history_bounded(self):
+        from core.screen_awareness import ScreenAwareness
+        sa = ScreenAwareness()
+        for i in range(100):
+            sa.history.append({"activity": f"test_{i}"})
+        self.assertLessEqual(len(sa.history), 50)
+
+    def test_update_context(self):
+        from core.screen_awareness import ScreenAwareness
+        sa = ScreenAwareness()
+        sa._update_context({
+            "active_app": "Firefox",
+            "activity": "Browsing docs",
+            "category": "browsing",
+            "mood": "focused",
+        })
+        self.assertEqual(sa.current_context["active_app"], "Firefox")
+        self.assertEqual(len(sa.history), 1)
+
+
+# ══════════════════════════════════════════════════════════
+# NOTIFICATIONS
+# ══════════════════════════════════════════════════════════
+
+class TestNotifications(unittest.TestCase):
+    def test_push_and_stats(self):
+        from core.notifications import NotificationManager, Priority
+        nm = NotificationManager()
+        nm.push("Test", "Hello", Priority.NORMAL, "test")
+        self.assertEqual(len(nm.queue), 1)
+        stats = nm.get_stats()
+        self.assertEqual(stats["pending"], 1)
+
+    def test_push_agent_completed(self):
+        from core.notifications import NotificationManager
+        nm = NotificationManager()
+        nm.push_agent_completed("abc12345", "Fixed the bug")
+        self.assertEqual(len(nm.queue), 1)
+        notif = nm.queue[0]
+        self.assertIn("abc12345", notif.title)
+
+    def test_push_agent_failed(self):
+        from core.notifications import NotificationManager
+        nm = NotificationManager()
+        nm.push_agent_failed("xyz99999", "Timeout error")
+        notif = nm.queue[0]
+        self.assertTrue(notif.sound)
+
+    def test_rate_limiting(self):
+        from core.notifications import NotificationManager, Notification, Priority
+        nm = NotificationManager()
+        # Fill the rate limit window
+        nm._notify_count_window = [time.time()] * 10
+        low_notif = Notification("Test", "msg", Priority.LOW, "test")
+        self.assertFalse(nm._should_deliver(low_notif))
+        # Urgent should still pass
+        urgent_notif = Notification("Urgent", "msg", Priority.URGENT, "test")
+        self.assertTrue(nm._should_deliver(urgent_notif))
+
+    def test_history_bounded(self):
+        from core.notifications import NotificationManager, Priority
+        nm = NotificationManager()
+        for i in range(600):
+            nm.history.append(type("N", (), {
+                "title": f"t{i}", "message": "", "priority": Priority.LOW,
+                "source": "test", "timestamp": "", "delivered": True,
+            })())
+        self.assertLessEqual(len(nm.history), 500)
+
+    def test_get_recent(self):
+        from core.notifications import NotificationManager, Notification, Priority
+        nm = NotificationManager()
+        nm.history.append(Notification("T1", "M1", Priority.LOW))
+        nm.history.append(Notification("T2", "M2", Priority.HIGH))
+        recent = nm.get_recent(5)
+        self.assertEqual(len(recent), 2)
+        self.assertEqual(recent[0]["title"], "T1")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
+
+import asyncio
 
 if __name__ == "__main__":
     print("=" * 60)

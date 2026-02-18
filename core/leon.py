@@ -31,6 +31,8 @@ from .neural_bridge import (
 )
 from .system_skills import SystemSkills
 from .hotkey_listener import HotkeyListener
+from .screen_awareness import ScreenAwareness
+from .notifications import NotificationManager, Priority
 
 logger = logging.getLogger("leon")
 
@@ -151,6 +153,16 @@ class Leon:
         ptt_key = voice_cfg.get("push_to_talk_key", "scroll_lock")
         self.hotkey_listener = HotkeyListener(ptt_key=ptt_key)
 
+        # Notification manager — unified desktop alerts
+        self.notifications = NotificationManager()
+
+        # Screen awareness — monitor what user is doing
+        self.screen_awareness = ScreenAwareness(
+            api_client=self.api,
+            on_insight=self._handle_screen_insight,
+            interval=self.config.get("system", {}).get("screen_interval", 30),
+        )
+
         # Brain role: unified (single PC), left (main PC), right (homelab)
         self.brain_role = (
             os.environ.get("LEON_BRAIN_ROLE")
@@ -238,6 +250,16 @@ class Leon:
             logger.info("Hotkey listener active — push-to-talk ready")
         except Exception as e:
             logger.warning(f"Hotkey listener failed to start: {e}")
+
+        # Start notification manager
+        await self.notifications.start()
+
+        # Start screen awareness
+        try:
+            await self.screen_awareness.start()
+            logger.info("Screen awareness active")
+        except Exception as e:
+            logger.warning(f"Screen awareness failed to start: {e}")
 
         # Auto-trigger daily briefing on startup
         asyncio.create_task(self._auto_daily_briefing())
@@ -333,6 +355,10 @@ class Leon:
             self._whatsapp_process = None
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+        if self.screen_awareness:
+            await self.screen_awareness.stop()
+        if self.notifications:
+            await self.notifications.stop()
         if self.bridge:
             await self.bridge.stop()
         if self.vault:
@@ -961,12 +987,15 @@ spawned_by: Leon v1.0
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
 
-                        # Push completion to dashboard WebSocket
+                        # Push completion to dashboard WebSocket + desktop notification
                         await self._broadcast_to_dashboard({
                             "type": "agent_completed",
                             "agent_id": agent_id,
                             "summary": results.get("summary", "")[:200],
                         })
+                        self.notifications.push_agent_completed(
+                            agent_id, results.get("summary", "Task completed")
+                        )
 
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
@@ -983,12 +1012,15 @@ spawned_by: Leon v1.0
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")
 
-                        # Push failure to dashboard WebSocket
+                        # Push failure to dashboard WebSocket + desktop notification
                         await self._broadcast_to_dashboard({
                             "type": "agent_failed",
                             "agent_id": agent_id,
                             "error": results.get("errors", "")[:200],
                         })
+                        self.notifications.push_agent_failed(
+                            agent_id, results.get("errors", "Unknown error")
+                        )
 
                 # Poll Right Brain status if Left Brain
                 if self.brain_role == "left" and self.bridge and self.bridge.connected:
@@ -1031,6 +1063,16 @@ spawned_by: Leon v1.0
     # Public helpers
     # ------------------------------------------------------------------
 
+    async def _handle_screen_insight(self, insight: str):
+        """Called by ScreenAwareness when it has a proactive suggestion."""
+        if insight and self.notifications:
+            self.notifications.push_screen_insight(insight)
+            await self._broadcast_to_dashboard({
+                "type": "input_response",
+                "message": f"[Screen] {insight}",
+                "timestamp": datetime.now().strftime("%H:%M"),
+            })
+
     def set_voice_system(self, voice_system):
         """Wire the voice system into the hotkey listener for push-to-talk."""
         self.hotkey_listener.voice_system = voice_system
@@ -1062,6 +1104,8 @@ spawned_by: Leon v1.0
             "bridge_connected": (self.bridge.connected if self.bridge else self._bridge_connected) if self.brain_role == "left" else False,
             "right_brain_online": (self.bridge.connected if self.bridge else bool(self._right_brain_status)) if self.brain_role == "left" else False,
             "right_brain_status": self._right_brain_status if self.brain_role == "left" else {},
+            "screen": self.screen_awareness.get_context() if self.screen_awareness else {},
+            "notifications": self.notifications.get_stats() if self.notifications else {},
         }
         return status
 
