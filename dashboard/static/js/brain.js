@@ -1069,26 +1069,87 @@ async function pollHealth() {
         if (!resp.ok) return;
         const data = await resp.json();
         updateGauges(data);
+        updateExtraStats(data);
     } catch (e) {
-        // Server unreachable — gauges show stale data
+        // Server unreachable
     }
 }
 
 function updateGauges(data) {
-    const circumference = 97.4; // 2 * PI * 15.5
+    const C = 97.4; // circumference = 2 * PI * 15.5
 
-    // CPU
-    const cpuStr = data.cpu || '0%';
-    const cpuVal = parseFloat(cpuStr) || 0;
-    updateGauge('gauge-cpu', 'gauge-cpu-val', cpuVal, circumference);
+    const cpuVal = parseFloat(data.cpu) || 0;
+    updateGauge('gauge-cpu', 'gauge-cpu-val', cpuVal, C);
 
-    // Memory
     const memPct = data.memory?.percent ? parseFloat(data.memory.percent) : 0;
-    updateGauge('gauge-mem', 'gauge-mem-val', memPct, circumference);
+    updateGauge('gauge-mem', 'gauge-mem-val', memPct, C);
 
-    // Disk
     const diskPct = data.disk?.percent ? parseFloat(data.disk.percent) : 0;
-    updateGauge('gauge-disk', 'gauge-disk-val', diskPct, circumference);
+    updateGauge('gauge-disk', 'gauge-disk-val', diskPct, C);
+
+    // GPU
+    const gpuPct = data.gpu?.usage ? parseFloat(data.gpu.usage) : 0;
+    updateGauge('gauge-gpu', 'gauge-gpu-val', gpuPct, C);
+}
+
+function updateExtraStats(data) {
+    // Memory detail
+    const memEl = document.getElementById('mem-detail');
+    if (memEl && data.memory) {
+        const used = (data.memory.used_mb / 1024).toFixed(1);
+        const total = (data.memory.total_mb / 1024).toFixed(1);
+        memEl.textContent = `${used} / ${total} GB`;
+    }
+
+    // GPU details
+    if (data.gpu) {
+        const nameEl = document.getElementById('gpu-name');
+        const tempEl = document.getElementById('gpu-temp');
+        const vramEl = document.getElementById('gpu-vram');
+        if (nameEl) nameEl.textContent = data.gpu.name || '--';
+        if (tempEl) tempEl.textContent = data.gpu.temp || '-- °C';
+        if (vramEl) vramEl.textContent = `VRAM: ${data.gpu.vram_used || '--'} / ${data.gpu.vram_total || '--'}`;
+    }
+
+    // Disk detail
+    const diskEl = document.getElementById('disk-detail');
+    if (diskEl && data.disk) {
+        diskEl.textContent = `${data.disk.used_gb} / ${data.disk.total_gb} GB`;
+    }
+
+    // Network
+    const net = data.network ? Object.values(data.network)[0] : null;
+    if (net) {
+        const rxEl = document.getElementById('net-rx');
+        const txEl = document.getElementById('net-tx');
+        if (rxEl) rxEl.innerHTML = `&#x2193; RX: ${net.rx_gb} GB`;
+        if (txEl) txEl.innerHTML = `&#x2191; TX: ${net.tx_gb} GB`;
+    }
+
+    // Load + processes
+    const loadEl = document.getElementById('stat-load');
+    if (loadEl) loadEl.textContent = data.load_avg || '--';
+    const procEl = document.getElementById('stat-proc');
+    if (procEl) procEl.textContent = data.processes || '--';
+
+    // Leon stats
+    const leon = data.leon || {};
+    const brainEl = document.getElementById('brain-role');
+    if (brainEl) brainEl.textContent = (leon.brain_role || 'unified').toUpperCase();
+
+    // Notifications
+    const notifs = leon.notifications || {};
+    const ntEl = document.getElementById('notif-total');
+    const npEl = document.getElementById('notif-pending');
+    if (ntEl) ntEl.textContent = notifs.total || 0;
+    if (npEl) npEl.textContent = notifs.pending || 0;
+
+    // Screen awareness
+    const screen = leon.screen || {};
+    const saEl = document.getElementById('screen-activity');
+    const spEl = document.getElementById('screen-app');
+    if (saEl) saEl.textContent = `Activity: ${screen.activity || '--'}`;
+    if (spEl) spEl.textContent = `App: ${screen.active_app || '--'}`;
 }
 
 function updateGauge(circleId, valId, percent, circumference) {

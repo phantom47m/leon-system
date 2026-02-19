@@ -14,11 +14,11 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-
-from collections import defaultdict
 
 from aiohttp import web
 
@@ -112,6 +112,64 @@ async def api_health(request):
     except Exception:
         pass
 
+    # GPU
+    gpu = {}
+    if shutil.which("nvidia-smi"):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts = [p.strip() for p in result.stdout.strip().split(",")]
+                if len(parts) >= 5:
+                    gpu = {
+                        "name": parts[0],
+                        "usage": f"{parts[1]}%",
+                        "vram_used": f"{parts[2]} MB",
+                        "vram_total": f"{parts[3]} MB",
+                        "temp": f"{parts[4]}°C",
+                        "vram_pct": f"{100 * int(parts[2]) / max(int(parts[3]), 1):.0f}%",
+                    }
+        except Exception:
+            pass
+
+    # Network (quick)
+    net = {}
+    try:
+        with open("/proc/net/dev") as f:
+            for line in f:
+                if ":" in line and not line.strip().startswith("lo:"):
+                    parts = line.split()
+                    iface = parts[0].rstrip(":")
+                    rx_bytes = int(parts[1])
+                    tx_bytes = int(parts[9])
+                    net[iface] = {
+                        "rx_gb": round(rx_bytes / (1024**3), 2),
+                        "tx_gb": round(tx_bytes / (1024**3), 2),
+                    }
+                    break  # Just first non-lo interface
+    except Exception:
+        pass
+
+    # Process count
+    proc_count = 0
+    try:
+        import os as _os
+        proc_count = len([d for d in _os.listdir("/proc") if d.isdigit()])
+    except Exception:
+        pass
+
+    # Load average
+    load_avg = ""
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            load_avg = f"{parts[0]} / {parts[1]} / {parts[2]}"
+    except Exception:
+        pass
+
     # Leon stats
     leon_stats = {}
     if leon:
@@ -138,6 +196,10 @@ async def api_health(request):
         "cpu": cpu_line,
         "memory": mem,
         "disk": disk,
+        "gpu": gpu,
+        "network": net,
+        "processes": proc_count,
+        "load_avg": load_avg,
         "leon": leon_stats,
         "timestamp": datetime.now().isoformat(),
     })
