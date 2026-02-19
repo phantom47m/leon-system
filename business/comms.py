@@ -93,10 +93,9 @@ class CommsHub:
                         part.add_header("Content-Disposition", f"attachment; filename={path.name}")
                         msg.attach(part)
 
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.email_address, self.email_password)
-                server.send_message(msg)
+            # Run blocking SMTP I/O in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._smtp_send, msg)
 
             self._log_message("email", "sent", to, subject)
             logger.info(f"Email sent to {to}: {subject}")
@@ -106,50 +105,63 @@ class CommsHub:
             logger.error(f"Email send error: {e}")
             return {"success": False, "error": str(e)}
 
+    def _smtp_send(self, msg):
+        """Synchronous SMTP send — called via run_in_executor."""
+        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+            server.starttls()
+            server.login(self.email_address, self.email_password)
+            server.send_message(msg)
+
     async def check_emails(self, folder: str = "INBOX", limit: int = 10) -> list:
         """Check recent emails."""
         if not self.email_address or not self.email_password:
             return []
 
         try:
-            mail = imaplib.IMAP4_SSL(self.imap_host)
-            mail.login(self.email_address, self.email_password)
-            mail.select(folder)
-
-            _, message_ids = mail.search(None, "ALL")
-            ids = message_ids[0].split()[-limit:]  # Last N emails
-
-            emails = []
-            for mid in reversed(ids):
-                _, msg_data = mail.fetch(mid, "(RFC822)")
-                msg = email.message_from_bytes(msg_data[0][1])
-
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                            break
-                else:
-                    body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
-
-                emails.append({
-                    "from": msg.get("From", ""),
-                    "subject": msg.get("Subject", ""),
-                    "date": msg.get("Date", ""),
-                    "body": body[:500],  # Truncate
-                    "read": True,
-                })
-
-            mail.close()
-            mail.logout()
-
-            logger.info(f"Fetched {len(emails)} emails")
-            return emails
+            # Run blocking IMAP I/O in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, self._imap_fetch, folder, limit)
 
         except Exception as e:
             logger.error(f"Email check error: {e}")
             return []
+
+    def _imap_fetch(self, folder: str, limit: int) -> list:
+        """Synchronous IMAP fetch — called via run_in_executor."""
+        mail = imaplib.IMAP4_SSL(self.imap_host)
+        mail.login(self.email_address, self.email_password)
+        mail.select(folder)
+
+        _, message_ids = mail.search(None, "ALL")
+        ids = message_ids[0].split()[-limit:]  # Last N emails
+
+        emails = []
+        for mid in reversed(ids):
+            _, msg_data = mail.fetch(mid, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
+
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        break
+            else:
+                body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+
+            emails.append({
+                "from": msg.get("From", ""),
+                "subject": msg.get("Subject", ""),
+                "date": msg.get("Date", ""),
+                "body": body[:500],  # Truncate
+                "read": True,
+            })
+
+        mail.close()
+        mail.logout()
+
+        logger.info(f"Fetched {len(emails)} emails")
+        return emails
 
     # ══════════════════════════════════════════════════════
     # DISCORD
@@ -223,18 +235,14 @@ class CommsHub:
             return {"success": False, "error": "Twilio not configured."}
 
         try:
-            from twilio.rest import Client
-            client = Client(self.twilio_sid, self.twilio_token)
-
-            msg = client.messages.create(
-                body=message,
-                from_=self.twilio_phone,
-                to=to,
+            loop = asyncio.get_event_loop()
+            sid = await loop.run_in_executor(
+                None, self._twilio_send, self.twilio_phone, to, message
             )
 
             self._log_message("sms", "sent", to, message[:50])
             logger.info(f"SMS sent to {to}")
-            return {"success": True, "sid": msg.sid}
+            return {"success": True, "sid": sid}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -249,21 +257,25 @@ class CommsHub:
             return {"success": False, "error": "Twilio WhatsApp not configured."}
 
         try:
-            from twilio.rest import Client
-            client = Client(self.twilio_sid, self.twilio_token)
-
-            msg = client.messages.create(
-                body=message,
-                from_=f"whatsapp:{self.twilio_whatsapp}",
-                to=f"whatsapp:{to}",
+            loop = asyncio.get_event_loop()
+            sid = await loop.run_in_executor(
+                None, self._twilio_send,
+                f"whatsapp:{self.twilio_whatsapp}", f"whatsapp:{to}", message,
             )
 
             self._log_message("whatsapp", "sent", to, message[:50])
             logger.info(f"WhatsApp sent to {to}")
-            return {"success": True, "sid": msg.sid}
+            return {"success": True, "sid": sid}
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _twilio_send(self, from_number: str, to_number: str, body: str) -> str:
+        """Synchronous Twilio send — called via run_in_executor."""
+        from twilio.rest import Client
+        client = Client(self.twilio_sid, self.twilio_token)
+        msg = client.messages.create(body=body, from_=from_number, to=to_number)
+        return msg.sid
 
     # ══════════════════════════════════════════════════════
     # UNIFIED SEND
@@ -317,6 +329,7 @@ class CommsHub:
         self.log_file.write_text(json.dumps(log, indent=2))
 
     def get_recent_messages(self, limit: int = 20) -> list:
+        """Return recent message log entries."""
         if self.log_file.exists():
             try:
                 log = json.loads(self.log_file.read_text())

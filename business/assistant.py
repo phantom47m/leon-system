@@ -1,21 +1,21 @@
 """
 Leon Personal Assistant — Calendar, reminders, daily briefings, life management.
 
-"Good morning. Here's your day:
- - 3 hot leads need follow-up
- - $1,200 invoice due from Marcus today
- - You made $4,200 this month
- - 2 coding agents finished overnight
- - Weather: 78°F and sunny in Tampa"
+"Morning. You've got 3 leads going cold, a $1,200 invoice due from Marcus,
+ and two agents finished overnight. Oh, and it's 78 and sunny — not that
+ you'll notice from in here."
 """
 
 import asyncio
 import json
 import logging
 import os
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 logger = logging.getLogger("leon.business.assistant")
 
@@ -37,6 +37,14 @@ class PersonalAssistant:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
 
+        # Load personality config for greetings
+        self.personality = {}
+        try:
+            with open("config/personality.yaml", "r") as f:
+                self.personality = yaml.safe_load(f) or {}
+        except Exception:
+            pass
+
         logger.info("Personal assistant initialized")
 
     def _load(self) -> dict:
@@ -55,6 +63,7 @@ class PersonalAssistant:
         }
 
     def save(self):
+        """Persist assistant data to disk."""
         with open(self.data_file, "w") as f:
             json.dump(self.data, f, indent=2, default=str)
 
@@ -64,8 +73,7 @@ class PersonalAssistant:
 
     async def generate_daily_briefing(self) -> str:
         """
-        Generate a comprehensive morning briefing.
-        This is what Leon tells you when you wake up.
+        Generate a conversational briefing — like Jarvis catching you up.
         """
         now = datetime.now()
         greeting = self._get_greeting(now.hour)
@@ -80,60 +88,93 @@ class PersonalAssistant:
         active_tasks = self.memory.get_all_active_tasks()
         weather = await self._get_weather()
 
-        # Build briefing
-        sections = []
+        # Build a conversational briefing — no walls of emoji headers
+        lines = [greeting, ""]
 
-        sections.append(f"{greeting}\n")
-
-        # Weather
+        # Weather — casual, one line
         if weather:
-            sections.append(f"🌤️ {weather}\n")
+            lines.append(weather)
+            lines.append("")
 
-        # Money
-        sections.append(f"💰 FINANCES\n{finance_summary}\n")
+        # Money — straight to the point
+        lines.append(f"**Money:** {finance_summary}")
 
-        # Pipeline
-        sections.append(
-            f"📊 PIPELINE\n"
-            f"  {pipeline['total_leads']} total leads, {pipeline['needs_followup']} need follow-up\n"
-            f"  {pipeline['total_clients']} clients, {pipeline['active_deals']} active deals\n"
-            f"  Pipeline value: ${pipeline['pipeline_value']:,.2f}\n"
+        # Pipeline — conversational summary
+        total = pipeline["total_leads"]
+        followup_count = pipeline["needs_followup"]
+        deals = pipeline["active_deals"]
+        value = pipeline["pipeline_value"]
+        lines.append(
+            f"**Pipeline:** {total} leads in the funnel, {deals} active deals "
+            f"worth ${value:,.0f}."
         )
 
-        # Urgent items
-        urgent = []
-        if followups:
-            urgent.append(f"📞 {len(followups)} leads need follow-up")
-        if overdue_invoices:
-            total_overdue = sum(i['total'] for i in overdue_invoices)
-            urgent.append(f"⚠️ {len(overdue_invoices)} overdue invoices (${total_overdue:,.2f})")
-        if urgent:
-            sections.append("🔴 URGENT\n  " + "\n  ".join(urgent) + "\n")
+        # Urgent items — flag them clearly but naturally
+        if followups or overdue_invoices:
+            urgent_parts = []
+            if followups:
+                urgent_parts.append(f"{len(followups)} leads going cold")
+            if overdue_invoices:
+                total_overdue = sum(i["total"] for i in overdue_invoices)
+                urgent_parts.append(
+                    f"{len(overdue_invoices)} overdue invoice{'s' if len(overdue_invoices) > 1 else ''} "
+                    f"(${total_overdue:,.0f})"
+                )
+            lines.append(f"**Needs attention:** {' and '.join(urgent_parts)}.")
 
-        # Calendar
+        # Calendar — only if there are events
         if today_calendar:
-            events = "\n  ".join(f"📅 {e['time']} — {e['title']}" for e in today_calendar)
-            sections.append(f"📅 TODAY'S SCHEDULE\n  {events}\n")
+            if len(today_calendar) == 1:
+                e = today_calendar[0]
+                lines.append(f"**Schedule:** {e['time']} — {e['title']}.")
+            else:
+                lines.append(f"**Schedule:** {len(today_calendar)} things on the calendar today:")
+                for e in today_calendar:
+                    lines.append(f"  - {e['time']} — {e['title']}")
 
         # Reminders
         if today_reminders:
-            rems = "\n  ".join(f"🔔 {r['text']}" for r in today_reminders)
-            sections.append(f"🔔 REMINDERS\n  {rems}\n")
+            if len(today_reminders) == 1:
+                lines.append(f"**Reminder:** {today_reminders[0]['text']}")
+            else:
+                lines.append(f"**Reminders:** {len(today_reminders)} for today:")
+                for r in today_reminders:
+                    lines.append(f"  - {r['text']}")
 
-        # Active coding tasks
+        # Active agents — casual
         if active_tasks:
-            tasks = "\n  ".join(f"⚡ {t['description'][:50]}" for t in active_tasks.values())
-            sections.append(f"🤖 ACTIVE AGENTS\n  {tasks}\n")
+            count = len(active_tasks)
+            if count == 1:
+                task = list(active_tasks.values())[0]
+                lines.append(f"**Agents:** One still running — {task['description'][:60]}.")
+            else:
+                lines.append(f"**Agents:** {count} running in the background:")
+                for t in list(active_tasks.values())[:5]:
+                    lines.append(f"  - {t['description'][:60]}")
 
-        return "\n".join(sections)
+        # Nothing urgent? Say so
+        if not followups and not overdue_invoices and not today_calendar and not today_reminders:
+            lines.append("")
+            lines.append("Nothing urgent. Quiet day.")
+
+        return "\n".join(lines)
 
     def _get_greeting(self, hour: int) -> str:
-        if hour < 12:
-            return "☀️ Good morning. Here's your day:"
+        """Pick a time-appropriate greeting from personality config."""
+        greetings = self.personality.get("greetings", {})
+
+        if hour < 7:
+            options = greetings.get("early_morning", ["You're up early. Here's the rundown."])
+        elif hour < 12:
+            options = greetings.get("morning", ["Morning. Here's your day."])
         elif hour < 17:
-            return "🌤️ Good afternoon. Here's your update:"
+            options = greetings.get("afternoon", ["Afternoon update."])
+        elif hour < 21:
+            options = greetings.get("evening", ["Evening. Here's the summary."])
         else:
-            return "🌙 Good evening. Here's your summary:"
+            options = greetings.get("late_night", ["Late one. Here's what you should know."])
+
+        return random.choice(options)
 
     async def _get_weather(self) -> str:
         """Get current weather using a free API."""

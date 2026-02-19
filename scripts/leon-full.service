@@ -1,0 +1,17 @@
+[Unit]
+Description=Leon AI Orchestrator — Full System (Dashboard + Voice + WhatsApp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deansabr
+WorkingDirectory=/home/deansabr/leon-system
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/deansabr/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash start.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

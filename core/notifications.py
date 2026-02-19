@@ -14,6 +14,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("leon.notify")
@@ -71,11 +72,11 @@ class NotificationManager:
         self._task: Optional[asyncio.Task] = None
         self._last_notify_time: dict = {}  # source -> timestamp
         self._notify_count_window: list = []  # timestamps of recent notifications
+        self._recent_hashes: deque = deque(maxlen=50)  # dedup: (hash, timestamp) pairs
         self._sound_path: Optional[str] = None
 
         # Find a working sound file
         for s in SOUNDS:
-            from pathlib import Path
             if Path(s).exists():
                 self._sound_path = s
                 break
@@ -172,14 +173,14 @@ class NotificationManager:
         items = list(self.history)[-n:]
         return [
             {
-                "title": n.title,
-                "message": n.message,
-                "priority": n.priority.name,
-                "source": n.source,
-                "timestamp": n.timestamp,
-                "delivered": n.delivered,
+                "title": notif.title,
+                "message": notif.message,
+                "priority": notif.priority.name,
+                "source": notif.source,
+                "timestamp": notif.timestamp,
+                "delivered": notif.delivered,
             }
-            for n in items
+            for notif in items
         ]
 
     def get_stats(self) -> dict:
@@ -254,6 +255,14 @@ class NotificationManager:
         if now - last < cooldown:
             if notif.priority < Priority.HIGH:
                 return False
+
+        # Dedup: skip identical title+message within 60s
+        content_hash = hash((notif.title, notif.message))
+        for h, t in self._recent_hashes:
+            if h == content_hash and now - t < 60:
+                logger.debug(f"Deduplicated: {notif.title}")
+                return False
+        self._recent_hashes.append((content_hash, now))
 
         return True
 

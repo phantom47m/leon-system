@@ -54,6 +54,7 @@ class CRM:
         }
 
     def save(self):
+        """Persist CRM data to disk."""
         with open(self.data_file, "w") as f:
             json.dump(self.data, f, indent=2, default=str)
 
@@ -86,6 +87,7 @@ class CRM:
         return lead_id
 
     def get_lead(self, lead_id: str) -> Optional[dict]:
+        """Return a lead by ID, or None."""
         for lead in self.data["leads"]:
             if lead["id"] == lead_id:
                 return lead
@@ -122,6 +124,7 @@ class CRM:
         return False
 
     def get_leads_by_stage(self, stage: str) -> list:
+        """Return all leads in the given pipeline stage."""
         return [l for l in self.data["leads"] if l.get("stage") == stage]
 
     def get_hot_leads(self, min_score: int = 70) -> list:
@@ -190,12 +193,14 @@ class CRM:
         return client_id
 
     def get_client(self, client_id: str) -> Optional[dict]:
+        """Return a client by ID, or None."""
         for c in self.data["clients"]:
             if c["id"] == client_id:
                 return c
         return None
 
     def list_clients(self) -> list:
+        """Return all clients."""
         return self.data.get("clients", [])
 
     # ══════════════════════════════════════════════════════
@@ -231,6 +236,7 @@ class CRM:
         return deal_id
 
     def get_active_deals(self) -> list:
+        """Return all deals that are not paid or cancelled."""
         return [d for d in self.data["deals"] if d["stage"] not in ("paid", "cancelled")]
 
     def record_payment(self, deal_id: str, amount: float):
@@ -280,6 +286,7 @@ class CRM:
         self.save()
 
     def get_interactions(self, entity_id: str) -> list:
+        """Return all interactions for a given entity."""
         return [i for i in self.data["interactions"] if i["entity_id"] == entity_id]
 
     # ══════════════════════════════════════════════════════

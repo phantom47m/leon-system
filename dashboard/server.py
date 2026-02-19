@@ -18,9 +18,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from collections import defaultdict
+
 from aiohttp import web
 
 logger = logging.getLogger("leon.dashboard")
+
+# Rate limiting for /api/message
+_rate_limit_window = 60  # seconds
+_rate_limit_max = 20  # max requests per window per IP
+_rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
 
 DASHBOARD_DIR = Path(__file__).parent
 TEMPLATES_DIR = DASHBOARD_DIR / "templates"
@@ -144,6 +151,19 @@ async def api_message(request):
     Requires: Authorization: Bearer <token>
     Returns JSON: {"response": "leon's reply", "timestamp": "HH:MM"}
     """
+    # ── Rate limiting ──
+    client_ip = request.remote or "unknown"
+    now_ts = time.monotonic()
+    bucket = _rate_limit_buckets[client_ip]
+    # Prune old entries
+    bucket[:] = [t for t in bucket if now_ts - t < _rate_limit_window]
+    if len(bucket) >= _rate_limit_max:
+        return web.json_response(
+            {"error": f"Rate limited — max {_rate_limit_max} requests per {_rate_limit_window}s"},
+            status=429,
+        )
+    bucket.append(now_ts)
+
     # ── Auth check ──
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -406,7 +426,6 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                     break
             if not match:
                 return f"Agent not found: `{arg}`"
-            import asyncio
             asyncio.create_task(leon.agent_manager.terminate_agent(match))
             return f"Terminating agent `{match}`..."
 
@@ -431,8 +450,6 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                     match = aid
                     break
             if match:
-                agent = agents[match]
-                import asyncio
                 asyncio.create_task(leon.agent_manager._retry_agent(match))
                 return f"Retrying agent `{match}`..."
             return f"Agent not found: `{arg}`. Use `/agents` to see active agents."
@@ -700,6 +717,50 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 return "\n".join(lines)
             return "Memory system not available."
 
+        elif cmd == "/voice":
+            if hasattr(leon, 'voice_system') and leon.hotkey_listener and leon.hotkey_listener.voice_system:
+                vs = leon.hotkey_listener.voice_system
+                state = vs.listening_state if hasattr(vs, 'listening_state') else {}
+                return (
+                    f"**Voice System:**\n\n"
+                    f"- State: {state.get('state', 'unknown')}\n"
+                    f"- Listening: {state.get('is_listening', False)}\n"
+                    f"- Awake: {state.get('is_awake', False)}\n"
+                    f"- Deepgram: {'healthy' if state.get('deepgram_healthy', True) else 'DEGRADED'}\n"
+                    f"- ElevenLabs: {'degraded (using local TTS)' if state.get('elevenlabs_degraded', False) else 'active'}\n"
+                    f"- Voice ID: {vs.voice_id}\n"
+                    f"- Wake words: {'enabled' if vs.wake_words_enabled else 'disabled'}\n"
+                    f"- Push-to-talk: {leon.hotkey_listener.ptt_key_name}"
+                )
+            return "Voice system not active. Start Leon with `--voice` or `--full` flag."
+
+        elif cmd == "/restart":
+            return (
+                "To restart Leon:\n\n"
+                "1. Run `./stop.sh` in the leon-system directory\n"
+                "2. Run `./start.sh` to start everything back up\n\n"
+                "Or if using systemd: `systemctl --user restart leon`"
+            )
+
+        elif cmd == "/whatsapp":
+            import urllib.request
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:3001/health", timeout=3) as resp:
+                    data = json.loads(resp.read().decode())
+                    ready = data.get("whatsapp_ready", False)
+                    num = data.get("my_number", "unknown")
+                    uptime = data.get("uptime_seconds", 0)
+                    reconn = data.get("reconnect_count", 0)
+                    return (
+                        f"**WhatsApp Bridge:**\n\n"
+                        f"- Status: {'CONNECTED' if ready else 'NOT READY'}\n"
+                        f"- Phone: {num}\n"
+                        f"- Uptime: {uptime // 60}m {uptime % 60}s\n"
+                        f"- Reconnects: {reconn}"
+                    )
+            except Exception:
+                return "WhatsApp bridge is not running. Start it with `./start.sh`"
+
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -724,6 +785,9 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/vault list` — show stored vault keys\n"
                 "- `/approve <action>` — grant temporary permission\n"
                 "- `/login <pin>` — authenticate as owner\n"
+                "- `/voice` — voice system status\n"
+                "- `/restart` — how to restart Leon\n"
+                "- `/whatsapp` — WhatsApp bridge status\n"
                 "- `/help` — this message"
             )
 
@@ -812,6 +876,7 @@ def _build_state(leon) -> dict:
             "rightBrainOnline": right_brain_online,
             "remoteAgents": remote_active,
             "rightBrainTasks": right_brain_status.get("active_tasks", []),
+            "voice": status.get("voice", {}),
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")
@@ -888,7 +953,6 @@ def run_standalone(host="127.0.0.1", port=3000):
     logger.info(f"Starting Leon Brain Dashboard at http://localhost:{port}")
     app = create_app(leon_core=None)
     web.run_app(app, host=host, port=port, print=lambda _: None)
-    print(f"\n🧠 Leon Brain Dashboard running at http://localhost:{port}\n")
 
 
 if __name__ == "__main__":

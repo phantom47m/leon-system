@@ -16,9 +16,19 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("leon.skills")
+
+
+def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run a command, returning a failed-like result if the binary is missing."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    except FileNotFoundError:
+        tool = cmd[0] if cmd else "unknown"
+        fake = subprocess.CompletedProcess(cmd, returncode=127,
+                                           stdout="", stderr=f"{tool}: not installed")
+        return fake
 
 
 class SystemSkills:
@@ -158,16 +168,34 @@ DEV TOOLS:
 - git_status(path) — Git status for a project
 - npm_run(script, path) — Run an npm script
 - pip_install(pkg) — Install a Python package
-- port_check(port) — Check what's using a port"""
+- port_check(port) — Check what's using a port
+
+EXTRA UTILITIES:
+- system_info() — Quick system summary (hostname, OS, CPU, RAM, GPU, uptime)
+- hostname() — Get system hostname
+- date_time() — Current date and time
+- volume_get() — Get current volume level
+- open_terminal(path) — Open terminal in a directory
+- disk_free() — Quick free space check on main drive
+- who_am_i() — Current user info"""
 
     # ------------------------------------------------------------------
     # Execute a skill by name (called by Leon's AI router)
     # ------------------------------------------------------------------
 
+    # Methods that should NOT be callable as skills
+    _internal_methods = frozenset({
+        "execute", "get_skill_list", "_start_clipboard_monitor",
+    })
+
     async def execute(self, skill_name: str, args: dict) -> str:
         """Execute a skill by name with given arguments. Returns result string."""
+        # Block private/internal methods
+        if skill_name.startswith("_") or skill_name in self._internal_methods:
+            return f"Unknown skill: {skill_name}"
+
         method = getattr(self, skill_name, None)
-        if not method:
+        if not method or not callable(method):
             return f"Unknown skill: {skill_name}"
 
         try:
@@ -229,41 +257,48 @@ DEV TOOLS:
 
     def close_app(self, name: str) -> str:
         """Close an application by name."""
-        result = subprocess.run(
-            ["pkill", "-f", name],
-            capture_output=True, text=True,
-        )
+        # First try wmctrl to close the window gracefully
+        result = _run(["wmctrl", "-c", name])
         if result.returncode == 0:
             return f"Closed {name}."
+        # Try exact process name match (safe, won't match unrelated processes)
+        result = _run(["pkill", "-x", name])
+        if result.returncode == 0:
+            return f"Closed {name}."
+        # Try matching the app map in reverse to get the binary name
+        app_map = getattr(self, '_close_app_map', {
+            "firefox": "firefox", "chrome": "chrome", "chromium": "chromium",
+            "code": "code", "spotify": "spotify", "discord": "discord",
+            "slack": "slack", "gimp": "gimp", "vlc": "vlc", "obs": "obs",
+            "steam": "steam", "blender": "blender",
+        })
+        cmd_name = app_map.get(name.lower().strip())
+        if cmd_name and cmd_name != name:
+            result = _run(["pkill", "-x", cmd_name])
+            if result.returncode == 0:
+                return f"Closed {name}."
         return f"No running process found for '{name}'."
 
     def list_running(self) -> str:
         """List running GUI applications."""
-        result = subprocess.run(
-            ["wmctrl", "-l"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            # Fallback without wmctrl
-            result = subprocess.run(
-                ["ps", "-eo", "pid,comm", "--sort=-%mem"],
-                capture_output=True, text=True,
-            )
-            lines = result.stdout.strip().split("\n")[:20]
-            return "Running processes:\n" + "\n".join(lines)
-        return "Open windows:\n" + result.stdout.strip()
+        result = _run(["wmctrl", "-l"])
+        if result.returncode == 0:
+            return "Open windows:\n" + result.stdout.strip()
+        # Fallback without wmctrl
+        result = _run(["ps", "-eo", "pid,comm", "--sort=-%mem"])
+        lines = result.stdout.strip().split("\n")[:20]
+        return "Running processes:\n" + "\n".join(lines)
 
     def switch_to(self, name: str) -> str:
         """Bring a window to the foreground using xdotool."""
-        result = subprocess.run(
-            ["xdotool", "search", "--name", name],
-            capture_output=True, text=True,
-        )
+        result = _run(["xdotool", "search", "--name", name])
+        if result.returncode == 127:
+            return "xdotool not installed. Run: sudo apt install xdotool"
         window_ids = result.stdout.strip().split("\n")
         if not window_ids or not window_ids[0]:
             return f"No window found matching '{name}'."
 
-        subprocess.run(["xdotool", "windowactivate", window_ids[0]])
+        _run(["xdotool", "windowactivate", window_ids[0]])
         return f"Switched to {name}."
 
     def open_url(self, url: str) -> str:
@@ -293,34 +328,33 @@ DEV TOOLS:
 
     def cpu_usage(self) -> str:
         """Get current CPU usage."""
-        result = subprocess.run(
-            ["grep", "cpu ", "/proc/stat"],
-            capture_output=True, text=True,
-        )
-        # Simple CPU calculation from /proc/stat
+        # Read /proc/stat directly — no subprocess needed
         try:
-            parts = result.stdout.split()
-            idle = int(parts[4])
-            total = sum(int(x) for x in parts[1:])
-            usage = 100.0 * (1 - idle / total)
-            return f"CPU usage: {usage:.1f}%"
-        except (IndexError, ValueError):
-            # Fallback to top
-            result = subprocess.run(
-                ["top", "-bn1"],
-                capture_output=True, text=True, timeout=5,
-            )
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("cpu "):
+                        parts = line.split()
+                        idle = int(parts[4])
+                        total = sum(int(x) for x in parts[1:])
+                        usage = 100.0 * (1 - idle / total)
+                        return f"CPU usage: {usage:.1f}%"
+        except (OSError, IndexError, ValueError):
+            pass
+        # Fallback to top
+        try:
+            result = _run(["top", "-bn1"], timeout=5)
             for line in result.stdout.split("\n"):
                 if "Cpu" in line:
                     return f"CPU: {line.strip()}"
-            return "Could not read CPU usage."
+        except subprocess.TimeoutExpired:
+            pass
+        return "Could not read CPU usage."
 
     def ram_usage(self) -> str:
         """Get memory usage statistics."""
-        result = subprocess.run(
-            ["free", "-h"],
-            capture_output=True, text=True,
-        )
+        result = _run(["free", "-h"])
+        if result.returncode == 127:
+            return "free not installed."
         lines = result.stdout.strip().split("\n")
         if len(lines) >= 2:
             header = lines[0]
@@ -330,47 +364,48 @@ DEV TOOLS:
 
     def disk_usage(self) -> str:
         """Get disk usage for all mounted drives."""
-        result = subprocess.run(
-            ["df", "-h", "--total", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
-            capture_output=True, text=True,
-        )
+        result = _run(["df", "-h", "--total", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"])
+        if result.returncode == 127:
+            return "df not installed."
         return "Disk usage:\n" + result.stdout.strip()
 
     def top_processes(self, n: int = 10) -> str:
         """Show top processes by CPU and RAM usage."""
         n = min(int(n), 25)
-        result = subprocess.run(
-            ["ps", "aux", "--sort=-%cpu"],
-            capture_output=True, text=True,
-        )
+        result = _run(["ps", "aux", "--sort=-%cpu"])
+        if result.returncode == 127:
+            return "ps not installed."
         lines = result.stdout.strip().split("\n")
+        if not lines:
+            return "Could not list processes."
         header = lines[0]
         procs = lines[1:n + 1]
         return f"Top {n} processes by CPU:\n{header}\n" + "\n".join(procs)
 
     def uptime(self) -> str:
         """Get system uptime."""
-        result = subprocess.run(
-            ["uptime", "-p"],
-            capture_output=True, text=True,
-        )
-        return result.stdout.strip()
+        result = _run(["uptime", "-p"])
+        if result.returncode == 0:
+            return result.stdout.strip()
+        # Fallback: read /proc/uptime
+        try:
+            with open("/proc/uptime") as f:
+                secs = float(f.read().split()[0])
+            hours = int(secs // 3600)
+            mins = int((secs % 3600) // 60)
+            return f"up {hours} hours, {mins} minutes"
+        except (OSError, ValueError):
+            return "Could not read uptime."
 
     def ip_address(self) -> str:
         """Get local and public IP addresses."""
         # Local IP
-        local = subprocess.run(
-            ["hostname", "-I"],
-            capture_output=True, text=True,
-        )
+        local = _run(["hostname", "-I"])
         local_ip = local.stdout.strip().split()[0] if local.stdout.strip() else "unknown"
 
         # Public IP
         try:
-            pub = subprocess.run(
-                ["curl", "-s", "--max-time", "5", "https://ifconfig.me"],
-                capture_output=True, text=True, timeout=10,
-            )
+            pub = _run(["curl", "-s", "--max-time", "5", "https://ifconfig.me"], timeout=10)
             public_ip = pub.stdout.strip() or "unavailable"
         except subprocess.TimeoutExpired:
             public_ip = "timed out"
@@ -405,13 +440,10 @@ DEV TOOLS:
                 pass
 
         # Fallback to sensors
-        result = subprocess.run(
-            ["sensors"],
-            capture_output=True, text=True,
-        )
+        result = _run(["sensors"])
         if result.returncode == 0:
             return result.stdout.strip()
-        return "Temperature sensors not available."
+        return "Temperature sensors not available — install lm-sensors: sudo apt install lm-sensors"
 
     # ==================================================================
     # PROCESS CONTROL
@@ -419,10 +451,7 @@ DEV TOOLS:
 
     def kill_process(self, name: str) -> str:
         """Kill a process by name."""
-        result = subprocess.run(
-            ["pkill", name],
-            capture_output=True, text=True,
-        )
+        result = _run(["pkill", name])
         if result.returncode == 0:
             return f"Killed process: {name}"
         return f"No process found with name '{name}'."
@@ -430,10 +459,7 @@ DEV TOOLS:
     def kill_pid(self, pid: int) -> str:
         """Kill a process by PID."""
         pid = int(pid)
-        result = subprocess.run(
-            ["kill", str(pid)],
-            capture_output=True, text=True,
-        )
+        result = _run(["kill", str(pid)])
         if result.returncode == 0:
             return f"Killed PID {pid}."
         return f"Failed to kill PID {pid}: {result.stderr.strip()}"
@@ -444,49 +470,62 @@ DEV TOOLS:
 
     def play_pause(self) -> str:
         """Toggle media playback."""
-        result = subprocess.run(["playerctl", "play-pause"], capture_output=True, text=True)
+        result = _run(["playerctl", "play-pause"])
+        if result.returncode == 127:
+            return "playerctl not installed. Run: sudo apt install playerctl"
         return "Toggled play/pause." if result.returncode == 0 else "No media player running."
 
     def next_track(self) -> str:
         """Skip to next track."""
-        result = subprocess.run(["playerctl", "next"], capture_output=True, text=True)
+        result = _run(["playerctl", "next"])
+        if result.returncode == 127:
+            return "playerctl not installed. Run: sudo apt install playerctl"
         return "Skipped to next track." if result.returncode == 0 else "No media player running."
 
     def prev_track(self) -> str:
         """Go to previous track."""
-        result = subprocess.run(["playerctl", "previous"], capture_output=True, text=True)
+        result = _run(["playerctl", "previous"])
+        if result.returncode == 127:
+            return "playerctl not installed. Run: sudo apt install playerctl"
         return "Went to previous track." if result.returncode == 0 else "No media player running."
 
     def volume_up(self, step: int = 5) -> str:
         """Increase system volume."""
         step = int(step)
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"+{step}%"])
+        result = _run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"+{step}%"])
+        if result.returncode == 127:
+            return "pactl not installed. Run: sudo apt install pulseaudio-utils"
         return f"Volume up by {step}%."
 
     def volume_down(self, step: int = 5) -> str:
         """Decrease system volume."""
         step = int(step)
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"-{step}%"])
+        result = _run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"-{step}%"])
+        if result.returncode == 127:
+            return "pactl not installed. Run: sudo apt install pulseaudio-utils"
         return f"Volume down by {step}%."
 
     def volume_set(self, pct: int) -> str:
         """Set volume to a specific percentage."""
         pct = max(0, min(150, int(pct)))
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"])
+        result = _run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"])
+        if result.returncode == 127:
+            return "pactl not installed. Run: sudo apt install pulseaudio-utils"
         return f"Volume set to {pct}%."
 
     def mute(self) -> str:
         """Toggle mute."""
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
+        result = _run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"])
+        if result.returncode == 127:
+            return "pactl not installed. Run: sudo apt install pulseaudio-utils"
         return "Toggled mute."
 
     def now_playing(self) -> str:
         """Get current track info."""
-        result = subprocess.run(
-            ["playerctl", "metadata", "--format",
-             "{{artist}} - {{title}} ({{album}})"],
-            capture_output=True, text=True,
-        )
+        result = _run(["playerctl", "metadata", "--format",
+                        "{{artist}} - {{title}} ({{album}})"])
+        if result.returncode == 127:
+            return "playerctl not installed. Run: sudo apt install playerctl"
         if result.returncode == 0 and result.stdout.strip():
             return f"Now playing: {result.stdout.strip()}"
         return "Nothing is playing right now."
@@ -501,21 +540,15 @@ DEV TOOLS:
         path = Path.home() / "Pictures" / f"screenshot_{ts}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        result = subprocess.run(
-            ["scrot", str(path)],
-            capture_output=True, text=True,
-        )
+        result = _run(["scrot", str(path)])
         if result.returncode == 0:
             return f"Screenshot saved to {path}"
 
         # Fallback: gnome-screenshot
-        result = subprocess.run(
-            ["gnome-screenshot", "-f", str(path)],
-            capture_output=True, text=True,
-        )
+        result = _run(["gnome-screenshot", "-f", str(path)])
         if result.returncode == 0:
             return f"Screenshot saved to {path}"
-        return "Screenshot failed — scrot and gnome-screenshot not available."
+        return "Screenshot failed — install scrot or gnome-screenshot."
 
     def screenshot_area(self) -> str:
         """Take a screenshot of a selected area."""
@@ -523,27 +556,25 @@ DEV TOOLS:
         path = Path.home() / "Pictures" / f"screenshot_area_{ts}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        result = subprocess.run(
-            ["scrot", "-s", str(path)],
-            capture_output=True, text=True,
-        )
+        result = _run(["scrot", "-s", str(path)])
         if result.returncode == 0:
             return f"Screenshot saved to {path}"
-        return "Area screenshot failed. Select an area after running the command."
+        return "Area screenshot failed — install scrot: sudo apt install scrot"
 
     def clipboard_get(self) -> str:
         """Get clipboard contents."""
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-o"],
-            capture_output=True, text=True,
-        )
+        result = _run(["xclip", "-selection", "clipboard", "-o"])
+        if result.returncode == 127:
+            return "xclip not installed. Run: sudo apt install xclip"
         if result.returncode == 0:
             content = result.stdout[:500]
             return f"Clipboard: {content}"
-        return "Clipboard is empty or xclip not available."
+        return "Clipboard is empty."
 
     def clipboard_set(self, text: str) -> str:
         """Set clipboard contents."""
+        if not shutil.which("xclip"):
+            return "xclip not installed. Run: sudo apt install xclip"
         proc = subprocess.Popen(
             ["xclip", "-selection", "clipboard"],
             stdin=subprocess.PIPE,
@@ -553,10 +584,9 @@ DEV TOOLS:
 
     def notify(self, title: str, msg: str = "") -> str:
         """Show a desktop notification."""
-        subprocess.run(
-            ["notify-send", title, msg],
-            capture_output=True,
-        )
+        result = _run(["notify-send", title, msg])
+        if result.returncode == 127:
+            return "notify-send not installed. Run: sudo apt install libnotify-bin"
         return f"Notification sent: {title}"
 
     def lock_screen(self) -> str:
@@ -567,39 +597,31 @@ DEV TOOLS:
             ["gnome-screensaver-command", "-l"],
             ["xdg-screensaver", "lock"],
         ]:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = _run(cmd)
             if result.returncode == 0:
                 return "Screen locked."
         return "Could not lock screen — no supported locker found."
 
     def brightness_up(self) -> str:
         """Increase screen brightness."""
-        result = subprocess.run(
-            ["brightnessctl", "set", "+10%"],
-            capture_output=True, text=True,
-        )
+        result = _run(["brightnessctl", "set", "+10%"])
         if result.returncode == 0:
             return "Brightness increased."
-        # Fallback via xrandr
-        subprocess.run(
-            ["xdotool", "key", "XF86MonBrightnessUp"],
-            capture_output=True,
-        )
-        return "Brightness increase attempted."
+        # Fallback via xdotool
+        result = _run(["xdotool", "key", "XF86MonBrightnessUp"])
+        if result.returncode == 0:
+            return "Brightness increase attempted."
+        return "Brightness control not available — install brightnessctl."
 
     def brightness_down(self) -> str:
         """Decrease screen brightness."""
-        result = subprocess.run(
-            ["brightnessctl", "set", "10%-"],
-            capture_output=True, text=True,
-        )
+        result = _run(["brightnessctl", "set", "10%-"])
         if result.returncode == 0:
             return "Brightness decreased."
-        subprocess.run(
-            ["xdotool", "key", "XF86MonBrightnessDown"],
-            capture_output=True,
-        )
-        return "Brightness decrease attempted."
+        result = _run(["xdotool", "key", "XF86MonBrightnessDown"])
+        if result.returncode == 0:
+            return "Brightness decrease attempted."
+        return "Brightness control not available — install brightnessctl."
 
     # ==================================================================
     # FILE OPERATIONS
@@ -608,10 +630,10 @@ DEV TOOLS:
     def find_file(self, name: str) -> str:
         """Search for files by name in home directory."""
         try:
-            result = subprocess.run(
+            result = _run(
                 ["find", str(Path.home()), "-iname", f"*{name}*",
                  "-maxdepth", "5", "-not", "-path", "*/.*"],
-                capture_output=True, text=True, timeout=15,
+                timeout=15,
             )
             files = result.stdout.strip().split("\n")
             files = [f for f in files if f][:15]
@@ -637,9 +659,7 @@ DEV TOOLS:
             cmd.extend(["-iname", f"*.{ext}"])
 
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=15,
-            )
+            result = _run(cmd, timeout=15)
             files = [f for f in result.stdout.strip().split("\n") if f][:20]
             if files:
                 return f"Files modified in last {hours}h:\n" + "\n".join(files)
@@ -652,21 +672,17 @@ DEV TOOLS:
         p = Path(path).expanduser()
         if not p.exists():
             return f"File not found: {path}"
-        result = subprocess.run(
-            ["du", "-sh", str(p)],
-            capture_output=True, text=True,
-        )
-        return result.stdout.strip()
+        result = _run(["du", "-sh", str(p)])
+        return result.stdout.strip() or f"Could not determine size of {path}"
 
     def trash(self, path: str) -> str:
         """Move a file to trash."""
         p = Path(path).expanduser()
         if not p.exists():
             return f"File not found: {path}"
-        result = subprocess.run(
-            ["gio", "trash", str(p)],
-            capture_output=True, text=True,
-        )
+        result = _run(["gio", "trash", str(p)])
+        if result.returncode == 127:
+            return "gio not installed. Run: sudo apt install glib2.0"
         if result.returncode == 0:
             return f"Moved {p.name} to trash."
         return f"Failed to trash: {result.stderr.strip()}"
@@ -700,22 +716,25 @@ DEV TOOLS:
 
     def wifi_status(self) -> str:
         """Get connected WiFi network info."""
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "active,ssid,signal,security", "device", "wifi"],
-            capture_output=True, text=True,
-        )
+        result = _run(["nmcli", "-t", "-f", "active,ssid,signal,security", "device", "wifi"])
+        if result.returncode == 127:
+            return "nmcli not installed. Run: sudo apt install network-manager"
         for line in result.stdout.strip().split("\n"):
             if line.startswith("yes:"):
                 parts = line.split(":")
-                return f"Connected to: {parts[1]} (signal: {parts[2]}%, security: {parts[3]})"
+                if len(parts) >= 4:
+                    return f"Connected to: {parts[1]} (signal: {parts[2]}%, security: {parts[3]})"
+        # Check if connected via ethernet instead
+        eth = _run(["nmcli", "-t", "-f", "TYPE,STATE", "connection", "show", "--active"])
+        if eth.returncode == 0 and "ethernet" in eth.stdout.lower():
+            return "Not connected to WiFi (using Ethernet)."
         return "Not connected to WiFi."
 
     def wifi_list(self) -> str:
         """List available WiFi networks."""
-        result = subprocess.run(
-            ["nmcli", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"],
-            capture_output=True, text=True,
-        )
+        result = _run(["nmcli", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"])
+        if result.returncode == 127:
+            return "nmcli not installed. Run: sudo apt install network-manager"
         if result.returncode == 0:
             return "Available networks:\n" + result.stdout.strip()
         return "Could not scan WiFi networks."
@@ -727,10 +746,7 @@ DEV TOOLS:
 
         cmd = "speedtest-cli" if shutil.which("speedtest-cli") else "speedtest"
         try:
-            result = subprocess.run(
-                [cmd, "--simple"],
-                capture_output=True, text=True, timeout=60,
-            )
+            result = _run([cmd, "--simple"], timeout=60)
             return result.stdout.strip() or "Speed test returned no results."
         except subprocess.TimeoutExpired:
             return "Speed test timed out after 60 seconds."
@@ -738,10 +754,7 @@ DEV TOOLS:
     def ping(self, host: str = "8.8.8.8") -> str:
         """Ping a host to check connectivity."""
         try:
-            result = subprocess.run(
-                ["ping", "-c", "4", "-W", "3", host],
-                capture_output=True, text=True, timeout=20,
-            )
+            result = _run(["ping", "-c", "4", "-W", "3", host], timeout=20)
             # Get just the summary line
             lines = result.stdout.strip().split("\n")
             summary = [l for l in lines if "packets" in l or "rtt" in l]
@@ -772,17 +785,15 @@ DEV TOOLS:
             time.sleep(minutes * 60)
             if timer_info["active"]:
                 timer_info["active"] = False
-                subprocess.run(
-                    ["notify-send", "-u", "critical", f"Timer: {label}",
-                     f"{minutes} minute timer is up!"],
-                )
+                _run(["notify-send", "-u", "critical", f"Timer: {label}",
+                      f"{minutes} minute timer is up!"])
                 # Also try to play a sound
                 for sound in [
                     "/usr/share/sounds/freedesktop/stereo/complete.oga",
                     "/usr/share/sounds/gnome/default/alerts/glass.ogg",
                 ]:
                     if Path(sound).exists():
-                        subprocess.run(["paplay", sound], capture_output=True)
+                        _run(["paplay", sound])
                         break
                 logger.info(f"Timer '{label}' ({minutes}min) fired")
 
@@ -848,11 +859,13 @@ DEV TOOLS:
     def define(self, word: str) -> str:
         """Look up a word definition using curl + dictionary API."""
         try:
-            result = subprocess.run(
+            result = _run(
                 ["curl", "-s", "--max-time", "5",
                  f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"],
-                capture_output=True, text=True, timeout=10,
+                timeout=10,
             )
+            if result.returncode == 127:
+                return "curl not installed."
             data = json.loads(result.stdout)
             if isinstance(data, list) and data:
                 meanings = data[0].get("meanings", [])
@@ -864,17 +877,19 @@ DEV TOOLS:
                         lines.append(f"  ({pos}) {defs[0].get('definition', '')}")
                 return "\n".join(lines)
             return f"No definition found for '{word}'."
-        except Exception:
+        except (json.JSONDecodeError, subprocess.TimeoutExpired):
             return f"Could not look up '{word}'."
 
     def weather(self, location: str = "") -> str:
         """Get current weather from wttr.in."""
         loc = location or ""
         try:
-            result = subprocess.run(
+            result = _run(
                 ["curl", "-s", "--max-time", "5", f"https://wttr.in/{loc}?format=3"],
-                capture_output=True, text=True, timeout=10,
+                timeout=10,
             )
+            if result.returncode == 127:
+                return "curl not installed."
             return result.stdout.strip() or "Could not fetch weather."
         except subprocess.TimeoutExpired:
             return "Weather request timed out."
@@ -887,11 +902,14 @@ DEV TOOLS:
         """Get GPU utilization, memory, and temperature."""
         # Try NVIDIA first
         if shutil.which("nvidia-smi"):
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10,
-            )
+            try:
+                result = _run(
+                    ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                     "--format=csv,noheader,nounits"],
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                return "nvidia-smi timed out."
             if result.returncode == 0 and result.stdout.strip():
                 lines = ["**GPU Status (NVIDIA):**\n"]
                 for line in result.stdout.strip().split("\n"):
@@ -905,18 +923,18 @@ DEV TOOLS:
 
         # Try AMD
         if shutil.which("rocm-smi"):
-            result = subprocess.run(
-                ["rocm-smi", "--showuse", "--showtemp", "--showmeminfo", "vram"],
-                capture_output=True, text=True, timeout=10,
-            )
+            try:
+                result = _run(
+                    ["rocm-smi", "--showuse", "--showtemp", "--showmeminfo", "vram"],
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                return "rocm-smi timed out."
             if result.returncode == 0:
                 return "**GPU Status (AMD):**\n\n" + result.stdout.strip()
 
         # Try generic (lspci + sensors)
-        result = subprocess.run(
-            ["lspci"],
-            capture_output=True, text=True,
-        )
+        result = _run(["lspci"])
         gpu_lines = [l for l in result.stdout.split("\n") if "VGA" in l or "3D" in l]
         if gpu_lines:
             return "GPU detected but no monitoring tool found:\n" + "\n".join(gpu_lines) + \
@@ -926,18 +944,21 @@ DEV TOOLS:
     def gpu_temp(self) -> str:
         """Get GPU temperature only."""
         if shutil.which("nvidia-smi"):
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10,
-            )
+            try:
+                result = _run(
+                    ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                return "nvidia-smi timed out."
             if result.returncode == 0:
                 return f"GPU temperature: {result.stdout.strip()} C"
 
         if shutil.which("rocm-smi"):
-            result = subprocess.run(
-                ["rocm-smi", "--showtemp"],
-                capture_output=True, text=True, timeout=10,
-            )
+            try:
+                result = _run(["rocm-smi", "--showtemp"], timeout=10)
+            except subprocess.TimeoutExpired:
+                return "rocm-smi timed out."
             if result.returncode == 0:
                 return result.stdout.strip()
 
@@ -981,92 +1002,62 @@ DEV TOOLS:
     def list_workspaces(self) -> str:
         """List available workspaces."""
         # Try wmctrl
-        if shutil.which("wmctrl"):
-            result = subprocess.run(
-                ["wmctrl", "-d"],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                return "Workspaces:\n" + result.stdout.strip()
+        result = _run(["wmctrl", "-d"])
+        if result.returncode == 0:
+            return "Workspaces:\n" + result.stdout.strip()
 
-        # Fallback: xdotool
-        if shutil.which("xdotool"):
-            result = subprocess.run(
-                ["xdotool", "get_num_desktops"],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                num = result.stdout.strip()
-                current = subprocess.run(
-                    ["xdotool", "get_desktop"],
-                    capture_output=True, text=True,
-                )
-                cur = current.stdout.strip() if current.returncode == 0 else "?"
-                return f"Workspaces: {num} total, currently on workspace {cur}"
-        return "Could not list workspaces — wmctrl or xdotool not available."
+        # Fallback: xdotool (may return code 1 on Wayland but still output data)
+        result = _run(["xdotool", "get_num_desktops"])
+        if result.returncode == 127:
+            return "Could not list workspaces — install wmctrl or xdotool."
+        num = result.stdout.strip()
+        if num and num.isdigit():
+            current = _run(["xdotool", "get_desktop"])
+            cur = current.stdout.strip() if current.stdout.strip().isdigit() else "?"
+            return f"Workspaces: {num} total, currently on workspace {cur}"
+        return "Could not list workspaces — window manager may not support workspace queries."
 
     def move_to_workspace(self, n: int) -> str:
         """Switch to workspace N (0-indexed)."""
         n = int(n)
-        result = subprocess.run(
-            ["xdotool", "set_desktop", str(n)],
-            capture_output=True, text=True,
-        )
+        result = _run(["xdotool", "set_desktop", str(n)])
         if result.returncode == 0:
             return f"Switched to workspace {n}."
-        # Try wmctrl
-        result = subprocess.run(
-            ["wmctrl", "-s", str(n)],
-            capture_output=True, text=True,
-        )
+        result = _run(["wmctrl", "-s", str(n)])
         if result.returncode == 0:
             return f"Switched to workspace {n}."
-        return f"Failed to switch to workspace {n}."
+        return f"Failed to switch to workspace {n} — install xdotool or wmctrl."
+
+    def _xdotool_or_missing(self, args: list[str], success_msg: str) -> str:
+        """Helper for xdotool-based window commands."""
+        result = _run(["xdotool"] + args)
+        if result.returncode == 127:
+            return "xdotool not installed. Run: sudo apt install xdotool"
+        if result.returncode == 0:
+            return success_msg
+        return f"Failed: {result.stderr.strip() or 'xdotool error'}"
 
     def tile_left(self) -> str:
         """Tile the current window to the left half of the screen."""
-        # Use xdotool key combo
-        subprocess.run(
-            ["xdotool", "key", "super+Left"],
-            capture_output=True,
-        )
-        return "Window tiled to left."
+        return self._xdotool_or_missing(["key", "super+Left"], "Window tiled to left.")
 
     def tile_right(self) -> str:
         """Tile the current window to the right half of the screen."""
-        subprocess.run(
-            ["xdotool", "key", "super+Right"],
-            capture_output=True,
-        )
-        return "Window tiled to right."
+        return self._xdotool_or_missing(["key", "super+Right"], "Window tiled to right.")
 
     def minimize_window(self) -> str:
         """Minimize the current window."""
-        result = subprocess.run(
-            ["xdotool", "getactivewindow", "windowminimize"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            return "Window minimized."
-        return "Failed to minimize window."
+        return self._xdotool_or_missing(
+            ["getactivewindow", "windowminimize"], "Window minimized.")
 
     def maximize_window(self) -> str:
         """Maximize or restore the current window."""
-        subprocess.run(
-            ["xdotool", "key", "super+Up"],
-            capture_output=True,
-        )
-        return "Window maximized."
+        return self._xdotool_or_missing(["key", "super+Up"], "Window maximized.")
 
     def close_window(self) -> str:
         """Close the current window."""
-        result = subprocess.run(
-            ["xdotool", "getactivewindow", "windowclose"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            return "Window closed."
-        return "Failed to close window."
+        return self._xdotool_or_missing(
+            ["getactivewindow", "windowclose"], "Window closed.")
 
     # ==================================================================
     # DEV TOOLS
@@ -1077,10 +1068,9 @@ DEV TOOLS:
         p = Path(path).expanduser()
         if not p.exists():
             return f"Path not found: {path}"
-        result = subprocess.run(
-            ["git", "status", "--short"],
-            capture_output=True, text=True, cwd=str(p),
-        )
+        result = _run(["git", "status", "--short"], cwd=str(p))
+        if result.returncode == 127:
+            return "git not installed."
         if result.returncode == 0:
             output = result.stdout.strip()
             return f"Git status for {p.name}:\n{output}" if output else f"{p.name}: clean working tree"
@@ -1088,6 +1078,8 @@ DEV TOOLS:
 
     def npm_run(self, script: str, path: str = ".") -> str:
         """Run an npm script."""
+        if not shutil.which("npm"):
+            return "npm not installed. Install Node.js to get npm."
         p = Path(path).expanduser()
         if not (p / "package.json").exists():
             return f"No package.json found in {path}"
@@ -1102,10 +1094,12 @@ DEV TOOLS:
 
     def pip_install(self, pkg: str) -> str:
         """Install a Python package."""
-        result = subprocess.run(
-            ["pip", "install", "--break-system-packages", pkg],
-            capture_output=True, text=True, timeout=120,
-        )
+        try:
+            result = _run(["pip", "install", "--break-system-packages", pkg], timeout=120)
+        except subprocess.TimeoutExpired:
+            return f"pip install {pkg} timed out after 120 seconds."
+        if result.returncode == 127:
+            return "pip not installed. Run: sudo apt install python3-pip"
         if result.returncode == 0:
             return f"Installed {pkg} successfully."
         return f"Failed to install {pkg}: {result.stderr.strip()[:200]}"
@@ -1113,11 +1107,116 @@ DEV TOOLS:
     def port_check(self, port: int) -> str:
         """Check what's using a specific port."""
         port = int(port)
-        result = subprocess.run(
-            ["ss", "-tlnp", f"sport = :{port}"],
-            capture_output=True, text=True,
-        )
+        result = _run(["ss", "-tlnp", f"sport = :{port}"])
+        if result.returncode == 127:
+            return "ss not installed. Run: sudo apt install iproute2"
         output = result.stdout.strip()
         if output and len(output.split("\n")) > 1:
             return f"Port {port}:\n{output}"
         return f"Port {port} is not in use."
+
+    # ==================================================================
+    # EXTRA UTILITIES
+    # ==================================================================
+
+    def system_info(self) -> str:
+        """Quick system summary — hostname, OS, CPU, RAM, GPU, uptime."""
+        parts = []
+        # Hostname
+        import socket
+        parts.append(f"Hostname: {socket.gethostname()}")
+        # OS
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        parts.append(f"OS: {line.split('=', 1)[1].strip().strip('\"')}")
+                        break
+        except OSError:
+            pass
+        # CPU model
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        parts.append(f"CPU: {line.split(':', 1)[1].strip()}")
+                        break
+        except OSError:
+            pass
+        # RAM total
+        result = _run(["free", "-h", "--si"])
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if line.startswith("Mem:"):
+                    total = line.split()[1]
+                    parts.append(f"RAM: {total}")
+                    break
+        # GPU
+        if shutil.which("nvidia-smi"):
+            r = _run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+            if r.returncode == 0 and r.stdout.strip():
+                parts.append(f"GPU: {r.stdout.strip()}")
+        # Uptime
+        parts.append(f"Uptime: {self.uptime()}")
+        return "\n".join(parts)
+
+    def hostname(self) -> str:
+        """Get the system hostname."""
+        import socket
+        return f"Hostname: {socket.gethostname()}"
+
+    def date_time(self) -> str:
+        """Get current date and time."""
+        now = datetime.now()
+        return now.strftime("Date: %A, %B %d, %Y\nTime: %I:%M %p")
+
+    def volume_get(self) -> str:
+        """Get current volume level."""
+        result = _run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+        if result.returncode == 127:
+            return "pactl not installed. Run: sudo apt install pulseaudio-utils"
+        if result.returncode == 0:
+            # Parse "Volume: front-left: 32768 /  50% / ..."
+            for part in result.stdout.split("/"):
+                part = part.strip()
+                if part.endswith("%"):
+                    return f"Volume: {part}"
+        return "Could not get volume level."
+
+    def open_terminal(self, path: str = "~") -> str:
+        """Open a terminal in a specific directory."""
+        p = Path(path).expanduser()
+        if not p.is_dir():
+            return f"Directory not found: {path}"
+        # Try common terminal emulators
+        for term_cmd in [
+            ["gnome-terminal", f"--working-directory={p}"],
+            ["konsole", f"--workdir={p}"],
+            ["xfce4-terminal", f"--working-directory={p}"],
+            ["xterm", "-e", f"cd {p} && bash"],
+        ]:
+            if shutil.which(term_cmd[0]):
+                subprocess.Popen(
+                    term_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return f"Opened terminal in {p}"
+        return "No supported terminal emulator found."
+
+    def disk_free(self) -> str:
+        """Quick check of free space on the main filesystem."""
+        import os
+        stat = os.statvfs("/")
+        free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+        total_gb = (stat.f_blocks * stat.f_frsize) / (1024 ** 3)
+        used_pct = 100 * (1 - stat.f_bavail / stat.f_blocks)
+        return f"Disk: {free_gb:.1f} GB free / {total_gb:.1f} GB total ({used_pct:.0f}% used)"
+
+    def who_am_i(self) -> str:
+        """Get current user and groups."""
+        result = _run(["id"])
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return f"User: {os.environ.get('USER', 'unknown')}"

@@ -239,12 +239,6 @@ class AgentManager:
         except FileNotFoundError:
             return ""
 
-    def _detect_completion(self, output: str) -> bool:
-        """Legacy helper — completion now checked via returncode in check_status."""
-        if not output.strip():
-            return False
-        return True
-
     def _extract_summary(self, output: str) -> str:
         lines = output.strip().split("\n")
         if not lines:

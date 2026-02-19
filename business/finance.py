@@ -41,6 +41,7 @@ class FinanceTracker:
         }
 
     def save(self):
+        """Persist finance data to disk."""
         with open(self.data_file, "w") as f:
             json.dump(self.data, f, indent=2, default=str)
 
@@ -87,6 +88,7 @@ class FinanceTracker:
         return invoice
 
     def mark_invoice_sent(self, invoice_id: str):
+        """Mark an invoice as sent."""
         for inv in self.data["invoices"]:
             if inv["id"] == invoice_id:
                 inv["status"] = "sent"
@@ -96,6 +98,7 @@ class FinanceTracker:
         return False
 
     def mark_invoice_paid(self, invoice_id: str, amount: float = None):
+        """Mark an invoice as paid and record the payment."""
         for inv in self.data["invoices"]:
             if inv["id"] == invoice_id:
                 inv["status"] = "paid"
@@ -118,6 +121,7 @@ class FinanceTracker:
         return False
 
     def get_overdue_invoices(self) -> list:
+        """Return all invoices that are past their due date."""
         now = datetime.now()
         overdue = []
         for inv in self.data["invoices"]:
@@ -131,6 +135,7 @@ class FinanceTracker:
         return overdue
 
     def get_pending_invoices(self) -> list:
+        """Return all invoices with sent or overdue status."""
         return [i for i in self.data["invoices"] if i["status"] in ("sent", "overdue")]
 
     def generate_invoice_html(self, invoice_id: str) -> str:

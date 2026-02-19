@@ -189,35 +189,9 @@ Respond in JSON:
 Be concise. Focus on changes from previous observations."""
 
         try:
-            from anthropic import Anthropic
-            client = Anthropic()
-
-            response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=300,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": frame_b64,
-                            }
-                        },
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            )
-
-            result_text = response.content[0].text
-            # Extract JSON from response
-            start = result_text.find("{")
-            end = result_text.rfind("}") + 1
-            if start >= 0 and end > start:
-                analysis = json.loads(result_text[start:end])
-            else:
+            # Use the shared API client (supports async + image_b64)
+            analysis = await self.api_client.analyze_json(prompt, image_b64=frame_b64)
+            if not analysis:
                 logger.warning("Vision: no JSON in response")
                 return
 

@@ -89,6 +89,7 @@ class TaskQueue:
     # ------------------------------------------------------------------
 
     def add_task(self, agent_id: str, task: dict) -> str:
+        """Add a task to the queue or start it immediately if a slot is available."""
         task_entry = {
             "id": task.get("id", agent_id),
             "agent_id": agent_id,
@@ -112,6 +113,7 @@ class TaskQueue:
         return task_entry["id"]
 
     def complete_task(self, agent_id: str):
+        """Mark a task as completed and promote the next queued task."""
         task = self.active_tasks.pop(agent_id, None)
         if task:
             task["status"] = "completed"
@@ -129,6 +131,7 @@ class TaskQueue:
         self._save()
 
     def fail_task(self, agent_id: str, reason: str = ""):
+        """Mark a task as failed and promote the next queued task."""
         task = self.active_tasks.pop(agent_id, None)
         if task:
             task["status"] = "failed"
@@ -147,6 +150,7 @@ class TaskQueue:
         self._save()
 
     def get_status_summary(self) -> dict:
+        """Return a summary of active, queued, and completed tasks."""
         return {
             "active": len(self.active_tasks),
             "queued": len(self.queue),
@@ -157,4 +161,5 @@ class TaskQueue:
         }
 
     def get_task(self, agent_id: str) -> Optional[dict]:
+        """Return an active task by agent ID, or None."""
         return self.active_tasks.get(agent_id)

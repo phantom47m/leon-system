@@ -1,9 +1,8 @@
 /**
- * LEON BRAIN — 3D Neural Visualization
- * TRON / Iron Man Jarvis style holographic brain
+ * LEON BRAIN — 3D Neural Visualization + Dashboard Controller
  *
- * Two hemispheres made of glowing particle clouds connected
- * by pulsing neural pathways floating in 3D space.
+ * Premium Jarvis-style holographic brain with real-time system monitoring,
+ * WebSocket communication, and keyboard-driven command interface.
  */
 
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
@@ -14,24 +13,20 @@ import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/exam
 
 // ── CONFIG ──────────────────────────────────────────────
 const CFG = {
-    // Brain shape — wider gap so hemispheres never overlap
     LEFT_CENTER:  new THREE.Vector3(-2.3, 0, 0),
     RIGHT_CENTER: new THREE.Vector3( 2.3, 0, 0),
     HEMISPHERE_RADIUS: 1.4,
 
-    // Particles
-    NODE_COUNT: 350,          // nodes per hemisphere
+    NODE_COUNT: 350,
     BRIDGE_PARTICLE_COUNT: 50,
     AMBIENT_PARTICLE_COUNT: 300,
 
-    // Colors
-    LEFT_COLOR:   new THREE.Color(0x4fc3f7),  // cyan/blue
-    RIGHT_COLOR:  new THREE.Color(0xff7043),  // orange
-    BRIDGE_COLOR: new THREE.Color(0xab47bc),  // purple
-    ACTIVE_COLOR: new THREE.Color(0x76ff03),  // bright green pulse
-    BG_COLOR:     0x0a0a1a,
+    LEFT_COLOR:   new THREE.Color(0x00d4ff),
+    RIGHT_COLOR:  new THREE.Color(0xff6b35),
+    BRIDGE_COLOR: new THREE.Color(0xa855f7),
+    ACTIVE_COLOR: new THREE.Color(0x22ff66),
+    BG_COLOR:     0x050510,
 
-    // Animation
     ROTATION_SPEED: 0.0003,
     PULSE_SPEED: 0.02,
     SIGNAL_SPEED: 0.008,
@@ -42,9 +37,9 @@ let scene, camera, renderer, composer, controls;
 let leftNodes = [], rightNodes = [], bridgeParticles = [];
 let connections = [], signals = [];
 let ambientParticles;
-let connectionMaterials = [];  // store connection line materials for state animation
-let brainActivity = 0;         // 0=idle, 1=max — derived from agentCount
-let neuronFireState = { left: [], right: [] };  // neuron firing tracking
+let connectionMaterials = [];
+let brainActivity = 0;
+let neuronFireState = { left: [], right: [] };
 let frameCount = 0;
 let clock = new THREE.Clock();
 let brainState = {
@@ -61,34 +56,42 @@ let brainState = {
     taskFeed: [],
 };
 
-// Module-level WebSocket reference for command sending
 let wsConnection = null;
-
-// Local feed items (commands + responses) merged with server items
 let localFeedItems = [];
-
-// Demo mode uptime counter
 let demoUptimeStart = Date.now();
 
-// WebSocket reconnect backoff
-let wsReconnectDelay = 1000; // starts at 1s, grows exponentially
+// WebSocket reconnect
+let wsReconnectDelay = 1000;
 const WS_MAX_RECONNECT_DELAY = 30000;
+let wsReconnectTimer = null;
 
-// Max command input length
+// Input
 const MAX_INPUT_LENGTH = 2000;
+
+// Command history
+let commandHistory = [];
+let historyIndex = -1;
+const MAX_HISTORY = 50;
+
+// Health polling
+let healthPollTimer = null;
+const HEALTH_POLL_INTERVAL = 5000;
+
+// Loading state
+let isWaitingResponse = false;
+
+// Keyboard hint visibility
+let kbdHintTimer = null;
 
 // ── INIT ────────────────────────────────────────────────
 function init() {
-    // Scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color(CFG.BG_COLOR);
 
-    // Camera
     camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
     camera.position.set(0, 1.5, 9);
     camera.lookAt(0, 0, 0);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -96,19 +99,17 @@ function init() {
     renderer.toneMappingExposure = 1.0;
     document.getElementById('brain-container').appendChild(renderer.domElement);
 
-    // Post-processing (bloom glow)
     composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        0.3,   // strength
-        0.3,   // radius
-        0.8    // threshold
+        0.35,
+        0.3,
+        0.8
     );
     composer.addPass(bloomPass);
 
-    // Controls — locked angles so hemispheres always stay side-by-side
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
@@ -116,14 +117,11 @@ function init() {
     controls.autoRotateSpeed = 0.3;
     controls.minDistance = 5;
     controls.maxDistance = 12;
-    // Lock vertical angle (stay near eye level, slight tilt allowed)
-    controls.minPolarAngle = Math.PI * 0.35;  // ~63° from top
-    controls.maxPolarAngle = Math.PI * 0.65;  // ~117° from top
-    // Lock horizontal angle — gentle sway only, never see from side
-    controls.minAzimuthAngle = -Math.PI * 0.15;  // ±27°
+    controls.minPolarAngle = Math.PI * 0.35;
+    controls.maxPolarAngle = Math.PI * 0.65;
+    controls.minAzimuthAngle = -Math.PI * 0.15;
     controls.maxAzimuthAngle =  Math.PI * 0.15;
 
-    // Build the brain
     createHemisphere('left');
     createHemisphere('right');
     createNeuralBridge();
@@ -133,20 +131,16 @@ function init() {
     createCoreGlow('left');
     createCoreGlow('right');
 
-    // Lights
     const ambientLight = new THREE.AmbientLight(0x111122, 0.5);
     scene.add(ambientLight);
 
-    // Events
     window.addEventListener('resize', onResize);
 
-    // WebSocket for live brain data
     connectWebSocket();
-
-    // Initialize command bar
     initCommandBar();
+    initKeyboardShortcuts();
+    startHealthPolling();
 
-    // Start
     animate();
 }
 
@@ -156,34 +150,26 @@ function createHemisphere(side) {
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
     const nodes = side === 'left' ? leftNodes : rightNodes;
 
-    // Create nodes in a brain-like ellipsoid shape
     const geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(CFG.NODE_COUNT * 3);
     const colors = new Float32Array(CFG.NODE_COUNT * 3);
     const sizes = new Float32Array(CFG.NODE_COUNT);
-    const phases = new Float32Array(CFG.NODE_COUNT); // for individual pulse timing
 
     for (let i = 0; i < CFG.NODE_COUNT; i++) {
-        // Brain-shaped distribution (half-ellipsoid, flat on medial side)
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         const r = CFG.HEMISPHERE_RADIUS * (0.4 + 0.6 * Math.random());
+        const scaleY = 1.15;
 
-        // Ellipsoid scaling — taller than wide, flat on bridge side
-        const scaleY = 1.15;  // taller
-        const scaleZ = 1.0;
+        let rawX = r * Math.sin(phi) * Math.cos(theta);
+        if (side === 'left' && rawX > 0) rawX *= 0.3;
+        if (side === 'right' && rawX < 0) rawX *= 0.3;
 
-        // Flatten the medial (inner) side to look like a brain half
-        let rawX = (r) * Math.sin(phi) * Math.cos(theta);
-        if (side === 'left' && rawX > 0) rawX *= 0.3;   // flatten right side of left hemisphere
-        if (side === 'right' && rawX < 0) rawX *= 0.3;   // flatten left side of right hemisphere
-
-        // Add cortical folds — organic noise for brain wrinkle effect
         const noise = 0.12 * Math.sin(theta * 6) * Math.cos(phi * 4);
 
         const x = center.x + rawX + noise * 0.5;
         const y = center.y + (r + noise) * Math.sin(phi) * Math.sin(theta) * scaleY;
-        const z = center.z + (r + noise) * Math.cos(phi) * scaleZ;
+        const z = center.z + (r + noise) * Math.cos(phi);
 
         positions[i * 3]     = x;
         positions[i * 3 + 1] = y;
@@ -194,14 +180,12 @@ function createHemisphere(side) {
         colors[i * 3 + 2] = color.b;
 
         sizes[i] = 1 + Math.random() * 2;
-        phases[i] = Math.random() * Math.PI * 2;
 
         nodes.push({
             index: i,
             position: new THREE.Vector3(x, y, z),
             baseSize: sizes[i],
-            phase: phases[i],
-            active: false,
+            phase: Math.random() * Math.PI * 2,
         });
     }
 
@@ -238,11 +222,8 @@ function createHemisphere(side) {
             void main() {
                 float dist = length(gl_PointCoord - vec2(0.5));
                 if (dist > 0.45) discard;
-
-                // Sharp bright center with subtle falloff
                 float core = 1.0 - smoothstep(0.0, 0.15, dist);
                 float halo = 1.0 - smoothstep(0.0, 0.45, dist);
-
                 float brightness = mix(0.6, 1.2, uActivity);
                 vec3 finalColor = vColor * brightness;
                 float alpha = mix(halo * 0.4, core * 0.9 + halo * 0.3, 0.5);
@@ -267,10 +248,9 @@ function createNeuralBridge() {
     const sizes = new Float32Array(CFG.BRIDGE_PARTICLE_COUNT);
 
     for (let i = 0; i < CFG.BRIDGE_PARTICLE_COUNT; i++) {
-        // Particles flowing between hemispheres
         const t = Math.random();
         const x = THREE.MathUtils.lerp(CFG.LEFT_CENTER.x + 0.8, CFG.RIGHT_CENTER.x - 0.8, t);
-        const spread = 0.5 * Math.sin(t * Math.PI); // wider in middle
+        const spread = 0.5 * Math.sin(t * Math.PI);
         const y = (Math.random() - 0.5) * spread;
         const z = (Math.random() - 0.5) * spread;
 
@@ -286,7 +266,7 @@ function createNeuralBridge() {
 
         bridgeParticles.push({
             index: i,
-            t: t,           // position along bridge (0=left, 1=right)
+            t: t,
             speed: 0.001 + Math.random() * 0.003,
             baseY: y,
             baseZ: z,
@@ -341,12 +321,11 @@ function createNeuralBridge() {
     scene.add(points);
 }
 
-// ── CONNECTIONS (lines between nearby nodes) ────────────
+// ── CONNECTIONS ─────────────────────────────────────────
 function createConnections(side) {
     const nodes = side === 'left' ? leftNodes : rightNodes;
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
     const maxDist = 0.7;
-
     const linePositions = [];
 
     for (let i = 0; i < nodes.length; i++) {
@@ -375,49 +354,35 @@ function createConnections(side) {
     const lines = new THREE.LineSegments(geometry, material);
     lines.userData = { side };
     scene.add(lines);
-
-    // Store material ref for state-driven opacity animation
     connectionMaterials.push(material);
 }
 
-// ── CORE GLOW (center of each hemisphere) ───────────────
+// ── CORE GLOW ───────────────────────────────────────────
 function createCoreGlow(side) {
     const center = side === 'left' ? CFG.LEFT_CENTER : CFG.RIGHT_CENTER;
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
 
-    // Inner sphere — small and subtle
     const coreGeo = new THREE.SphereGeometry(0.08, 16, 16);
-    const coreMat = new THREE.MeshBasicMaterial({
-        color: color,
-        transparent: true,
-        opacity: 0.15,
-    });
+    const coreMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.15 });
     const core = new THREE.Mesh(coreGeo, coreMat);
     core.position.copy(center);
     core.userData = { side, type: 'core' };
     scene.add(core);
 
-    // Outer glow sphere
     const glowGeo = new THREE.SphereGeometry(0.4, 16, 16);
-    const glowMat = new THREE.MeshBasicMaterial({
-        color: color,
-        transparent: true,
-        opacity: 0.04,
-        side: THREE.BackSide,
-    });
+    const glowMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.04, side: THREE.BackSide });
     const glow = new THREE.Mesh(glowGeo, glowMat);
     glow.position.copy(center);
     glow.userData = { side, type: 'coreGlow' };
     scene.add(glow);
 
-    // Point light — dim
     const light = new THREE.PointLight(color, 0.15, 4);
     light.position.copy(center);
     light.userData = { side, type: 'coreLight' };
     scene.add(light);
 }
 
-// ── AMBIENT FLOATING PARTICLES ──────────────────────────
+// ── AMBIENT PARTICLES ───────────────────────────────────
 function createAmbientParticles() {
     const geometry = new THREE.BufferGeometry();
     const positions = new Float32Array(CFG.AMBIENT_PARTICLE_COUNT * 3);
@@ -439,12 +404,10 @@ function createAmbientParticles() {
             attribute float size;
             uniform float uTime;
             varying float vAlpha;
-
             void main() {
                 vec3 pos = position;
                 pos.y += sin(uTime * 0.3 + position.x) * 0.05;
                 pos.x += cos(uTime * 0.2 + position.z) * 0.03;
-
                 vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
                 gl_PointSize = size * (80.0 / -mvPosition.z);
                 vAlpha = 0.04 + 0.04 * sin(uTime + position.x * 2.0);
@@ -453,7 +416,6 @@ function createAmbientParticles() {
         `,
         fragmentShader: `
             varying float vAlpha;
-
             void main() {
                 float dist = length(gl_PointCoord - vec2(0.5));
                 if (dist > 0.5) discard;
@@ -469,9 +431,8 @@ function createAmbientParticles() {
     scene.add(ambientParticles);
 }
 
-// ── SIGNAL PULSE (traveling spark along bridge) ─────────
+// ── SIGNAL PULSE ────────────────────────────────────────
 function fireSignal(direction) {
-    // direction: 'left-to-right' or 'right-to-left'
     const start = direction === 'left-to-right' ? CFG.LEFT_CENTER.clone() : CFG.RIGHT_CENTER.clone();
     const end = direction === 'left-to-right' ? CFG.RIGHT_CENTER.clone() : CFG.LEFT_CENTER.clone();
 
@@ -484,15 +445,14 @@ function fireSignal(direction) {
     const signal = new THREE.Mesh(geometry, material);
     signal.position.copy(start);
 
-    // Trail light
     const light = new THREE.PointLight(CFG.ACTIVE_COLOR, 1, 2);
     signal.add(light);
 
     scene.add(signal);
     signals.push({
         mesh: signal,
-        start: start,
-        end: end,
+        start,
+        end,
         t: 0,
         speed: CFG.SIGNAL_SPEED + Math.random() * 0.005,
     });
@@ -505,11 +465,9 @@ function animate() {
     const time = clock.getElapsedTime();
     frameCount++;
 
-    // ── State-driven activity lerp ──
     const target = Math.min(1, (brainState.agentCount || 0) / 3);
     brainActivity += (target - brainActivity) * 0.02;
 
-    // Derived values from activity
     const connOpacity = THREE.MathUtils.lerp(0.15, 0.45, brainActivity);
     const bridgeSpeedMult = THREE.MathUtils.lerp(0.3, 1.5, brainActivity);
     const signalChance = THREE.MathUtils.lerp(0.0, 0.05, brainActivity);
@@ -520,12 +478,10 @@ function animate() {
 
     controls.autoRotateSpeed = autoRotateSpeed;
 
-    // ── Update connection opacities ──
     for (const mat of connectionMaterials) {
         mat.opacity = connOpacity;
     }
 
-    // ── Update all shader uniforms ──
     scene.traverse((obj) => {
         if (obj.userData?.material?.uniforms?.uTime) {
             obj.userData.material.uniforms.uTime.value = time;
@@ -539,8 +495,6 @@ function animate() {
         if (obj.isPoints && obj.material?.uniforms?.uActivity) {
             obj.material.uniforms.uActivity.value = brainActivity;
         }
-
-        // Pulse core glows — subtle, activity-driven
         if (obj.userData?.type === 'core') {
             const pulse = coreOpacity + corePulseAmp * Math.sin(time * corePulseSpeed + (obj.userData.side === 'left' ? 0 : Math.PI));
             obj.material.opacity = pulse;
@@ -554,7 +508,7 @@ function animate() {
         }
     });
 
-    // ── Animate bridge particles — speed driven by activity ──
+    // Bridge particles
     scene.traverse((obj) => {
         if (obj.userData?.type === 'bridge' && obj.isPoints) {
             const positions = obj.geometry.attributes.position.array;
@@ -577,7 +531,7 @@ function animate() {
         }
     });
 
-    // ── Animate signals traveling along bridge ──
+    // Signals
     for (let i = signals.length - 1; i >= 0; i--) {
         const s = signals[i];
         s.t += s.speed;
@@ -591,17 +545,14 @@ function animate() {
         s.mesh.material.opacity = 1 - s.t * 0.5;
     }
 
-    // ── Ambient particle drift ──
     if (ambientParticles) {
         ambientParticles.material.uniforms.uTime.value = time;
     }
 
-    // ── Signal firing — activity-driven ──
     if (brainActivity > 0.1 && Math.random() < signalChance) {
         fireSignal(Math.random() > 0.5 ? 'left-to-right' : 'right-to-left');
     }
 
-    // ── Neuron firing effect (working only) ──
     if (brainActivity > 0.3 && frameCount % 15 === 0) {
         fireNeurons('left', leftNodes);
         fireNeurons('right', rightNodes);
@@ -612,21 +563,19 @@ function animate() {
     composer.render();
 }
 
-// ── NEURON FIRING ────────────────────────────────────────
+// ── NEURON FIRING ───────────────────────────────────────
 function fireNeurons(side, nodes) {
-    const count = 3 + Math.floor(Math.random() * 3); // 3-5 neurons
+    const count = 3 + Math.floor(Math.random() * 3);
     const state = neuronFireState[side];
     for (let n = 0; n < count; n++) {
         const idx = Math.floor(Math.random() * nodes.length);
-        // Don't double-fire
         if (!state.some(f => f.index === idx)) {
             state.push({ index: idx, framesLeft: 10 });
         }
     }
 }
 
-function updateNeuronFiring(time) {
-    // Process each hemisphere
+function updateNeuronFiring() {
     scene.traverse((obj) => {
         if (!obj.isPoints || !obj.userData?.side) return;
         const side = obj.userData.side;
@@ -644,13 +593,11 @@ function updateNeuronFiring(time) {
 
             const idx = fire.index;
             if (fire.framesLeft > 0) {
-                // Blend toward green ACTIVE_COLOR
                 const t = fire.framesLeft / 10;
                 colors.array[idx * 3]     = THREE.MathUtils.lerp(baseColor.r, CFG.ACTIVE_COLOR.r, t);
                 colors.array[idx * 3 + 1] = THREE.MathUtils.lerp(baseColor.g, CFG.ACTIVE_COLOR.g, t);
                 colors.array[idx * 3 + 2] = THREE.MathUtils.lerp(baseColor.b, CFG.ACTIVE_COLOR.b, t);
             } else {
-                // Restore base color
                 colors.array[idx * 3]     = baseColor.r;
                 colors.array[idx * 3 + 1] = baseColor.g;
                 colors.array[idx * 3 + 2] = baseColor.b;
@@ -683,7 +630,6 @@ function showAuthOverlay(errorMsg) {
     const submitBtn = document.getElementById('auth-submit');
     if (!tokenInput || !submitBtn) return;
 
-    // Focus the input
     setTimeout(() => tokenInput.focus(), 100);
 
     function doAuth() {
@@ -691,7 +637,6 @@ function showAuthOverlay(errorMsg) {
         if (!token) return;
         setStoredToken(token);
         overlay.style.display = 'none';
-        // Reconnect with new token
         if (wsConnection) {
             wsConnection.close();
         } else {
@@ -710,16 +655,75 @@ function hideAuthOverlay() {
     if (overlay) overlay.style.display = 'none';
 }
 
+// ── CONNECTION STATUS UI ─────────────────────────────────
+function setConnectionStatus(status) {
+    const dot = document.getElementById('ws-dot');
+    const text = document.getElementById('ws-status-text');
+    if (!dot || !text) return;
+
+    const indicator = document.getElementById('ws-indicator');
+
+    // Remove all state classes
+    dot.classList.remove('pulse', 'disconnected', 'reconnecting');
+    if (indicator) {
+        indicator.classList.remove('disconnected', 'reconnecting');
+    }
+
+    switch (status) {
+        case 'connected':
+            dot.classList.add('pulse');
+            dot.style.background = '';
+            text.textContent = 'SYSTEM ONLINE';
+            if (indicator) indicator.style.color = '';
+            break;
+        case 'disconnected':
+            dot.classList.add('disconnected');
+            text.textContent = 'DISCONNECTED';
+            if (indicator) {
+                indicator.classList.add('disconnected');
+            }
+            break;
+        case 'reconnecting':
+            dot.classList.add('reconnecting');
+            text.textContent = 'RECONNECTING';
+            if (indicator) {
+                indicator.classList.add('reconnecting');
+            }
+            break;
+        case 'demo':
+            dot.classList.add('pulse');
+            dot.style.background = 'var(--gold)';
+            text.textContent = 'DEMO MODE';
+            if (indicator) indicator.style.color = 'var(--gold)';
+            break;
+    }
+}
+
+// ── LOADING STATE ────────────────────────────────────────
+function setLoading(active) {
+    isWaitingResponse = active;
+    const loader = document.getElementById('command-loading');
+    if (loader) {
+        if (active) {
+            loader.classList.add('active');
+        } else {
+            loader.classList.remove('active');
+        }
+    }
+}
+
 // ── WEBSOCKET ───────────────────────────────────────────
 function connectWebSocket() {
     const token = getStoredToken();
 
-    // If no token saved, show auth overlay immediately
     if (!token) {
         showAuthOverlay('');
+        setConnectionStatus('demo');
         startDemoMode();
         return;
     }
+
+    setConnectionStatus('reconnecting');
 
     try {
         const ws = new WebSocket(`ws://${window.location.host}/ws`);
@@ -727,8 +731,7 @@ function connectWebSocket() {
         wsAuthenticated = false;
 
         ws.onopen = () => {
-            wsReconnectDelay = 1000; // Reset backoff on successful connect
-            // Send auth message as first message
+            wsReconnectDelay = 1000;
             ws.send(JSON.stringify({ command: 'auth', token: token }));
         };
 
@@ -737,15 +740,14 @@ function connectWebSocket() {
             try {
                 data = JSON.parse(event.data);
             } catch (e) {
-                return; // Ignore malformed messages
+                return;
             }
 
-            // Handle auth result
             if (data.type === 'auth_result') {
                 if (data.success) {
                     wsAuthenticated = true;
                     hideAuthOverlay();
-                    // Stop demo mode if it was running
+                    setConnectionStatus('connected');
                     if (demoInterval) {
                         clearInterval(demoInterval);
                         demoInterval = null;
@@ -753,17 +755,17 @@ function connectWebSocket() {
                 } else {
                     wsAuthenticated = false;
                     localStorage.removeItem('leon_session_token');
+                    setConnectionStatus('disconnected');
                     showAuthOverlay(data.message || 'Authentication failed');
                 }
                 return;
             }
 
-            // Handle input responses separately
             if (data.type === 'input_response') {
+                setLoading(false);
                 appendToFeed(data.timestamp || nowTime(), `Leon: ${data.message}`, 'feed-response');
                 return;
             }
-            // Handle agent completion/failure notifications
             if (data.type === 'agent_completed') {
                 appendToFeed(nowTime(), `Agent #${(data.agent_id || '').slice(-8)} completed: ${data.summary || ''}`, 'feed-agent-ok');
                 return;
@@ -778,19 +780,20 @@ function connectWebSocket() {
         ws.onclose = () => {
             wsConnection = null;
             wsAuthenticated = false;
-            // Reconnect with exponential backoff
-            setTimeout(connectWebSocket, wsReconnectDelay);
+            setConnectionStatus('reconnecting');
+            if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = setTimeout(connectWebSocket, wsReconnectDelay);
             wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
         };
 
         ws.onerror = () => {
             wsConnection = null;
             wsAuthenticated = false;
-            // Run in demo mode if no server
+            setConnectionStatus('demo');
             startDemoMode();
         };
     } catch (e) {
-        // Demo mode
+        setConnectionStatus('demo');
         startDemoMode();
     }
 }
@@ -809,13 +812,12 @@ const demoAgentPool = [
 ];
 
 function startDemoMode() {
-    if (demoInterval) return; // Already running
+    if (demoInterval) return;
 
     let demoAgents = [];
     let demoQueued = 2;
 
     demoInterval = setInterval(() => {
-        // Randomly add/remove agents
         if (Math.random() > 0.5 && demoAgents.length < 4) {
             const pool = demoAgentPool.filter(a => !demoAgents.some(d => d.description === a.description));
             if (pool.length > 0) {
@@ -842,11 +844,10 @@ function startDemoMode() {
         brainState.maxConcurrent = 5;
         brainState.uptime = uptimeSeconds;
 
-        // Generate demo feed items from server perspective
         const now = nowTime();
         brainState.taskFeed = demoAgents.map(a => ({
             time: now,
-            message: `⚡ Agent working: ${a.description}`
+            message: `Agent working: ${a.description}`
         }));
 
         updateUI();
@@ -855,11 +856,9 @@ function startDemoMode() {
 
 function updateBrainState(data) {
     brainState = { ...brainState, ...data };
-
     if (data.signal) {
         fireSignal(data.signal);
     }
-
     updateUI();
 }
 
@@ -884,38 +883,38 @@ function escapeHtml(str) {
 
 // ── UI UPDATES ──────────────────────────────────────────
 function updateUI() {
-    // Left brain status
+    // Left brain
     const leftStatus = document.getElementById('left-status');
     if (leftStatus) {
-        leftStatus.textContent = brainState.leftActive ? '● ACTIVE' : '○ Idle';
+        leftStatus.innerHTML = brainState.leftActive ? '&#x25CF; ACTIVE' : '&#x25CB; Idle';
         leftStatus.className = brainState.leftActive ? 'status active' : 'status idle';
     }
 
-    // Right brain status
+    // Right brain
     const rightStatus = document.getElementById('right-status');
     if (rightStatus) {
-        rightStatus.textContent = brainState.rightActive ? '● ACTIVE' : '○ Idle';
+        rightStatus.innerHTML = brainState.rightActive ? '&#x25CF; ACTIVE' : '&#x25CB; Idle';
         rightStatus.className = brainState.rightActive ? 'status active' : 'status idle';
     }
 
-    // Bridge status — show real connection state in split mode
+    // Bridge
     const bridgeStatus = document.getElementById('bridge-status');
     if (bridgeStatus) {
         if (brainState.brainRole === 'left') {
             if (brainState.bridgeConnected) {
-                bridgeStatus.textContent = '● CONNECTED';
+                bridgeStatus.innerHTML = '&#x25CF; CONNECTED';
                 bridgeStatus.className = 'status synced';
             } else {
-                bridgeStatus.textContent = '○ DISCONNECTED';
+                bridgeStatus.innerHTML = '&#x25CB; DISCONNECTED';
                 bridgeStatus.className = 'status idle';
             }
         } else {
-            bridgeStatus.textContent = brainState.bridgeActive ? '● SYNCED' : '○ Idle';
+            bridgeStatus.innerHTML = brainState.bridgeActive ? '&#x25CF; SYNCED' : '&#x25CB; Idle';
             bridgeStatus.className = brainState.bridgeActive ? 'status synced' : 'status idle';
         }
     }
 
-    // Right Brain location label
+    // Right Brain location
     const rightLabel = document.getElementById('right-brain-location');
     if (rightLabel) {
         if (brainState.brainRole === 'left' && brainState.rightBrainOnline) {
@@ -929,52 +928,36 @@ function updateUI() {
         }
     }
 
-    // Agent count (use agentCount from state, not activeAgents.length)
+    // Counts
     const agentCount = document.getElementById('agent-count');
-    if (agentCount) {
-        agentCount.textContent = brainState.agentCount || 0;
-    }
+    if (agentCount) agentCount.textContent = brainState.agentCount || 0;
 
-    // Task count
     const taskCount = document.getElementById('task-count');
-    if (taskCount) {
-        taskCount.textContent = brainState.taskCount || 0;
-    }
+    if (taskCount) taskCount.textContent = brainState.taskCount || 0;
 
-    // Load bar (active / maxConcurrent)
+    // Load bar
     const loadFill = document.getElementById('load-fill');
     if (loadFill) {
         const max = brainState.maxConcurrent || 5;
         const active = brainState.agentCount || 0;
-        const pct = Math.min(100, Math.round((active / max) * 100));
-        loadFill.style.width = pct + '%';
+        loadFill.style.width = Math.min(100, Math.round((active / max) * 100)) + '%';
     }
 
-    // System stats (top bar)
     updateSystemStats();
-
-    // Active agents panel
     updateAgentsPanel();
-
-    // Activity feed — merge server + local items
     updateActivityFeed();
+    updateVoiceState();
 }
 
 function updateSystemStats() {
     const uptimeEl = document.getElementById('stat-uptime');
-    if (uptimeEl) {
-        uptimeEl.textContent = formatUptime(brainState.uptime || 0);
-    }
+    if (uptimeEl) uptimeEl.textContent = formatUptime(brainState.uptime || 0);
 
     const completedEl = document.getElementById('stat-completed');
-    if (completedEl) {
-        completedEl.textContent = brainState.completedCount || 0;
-    }
+    if (completedEl) completedEl.textContent = brainState.completedCount || 0;
 
     const queuedEl = document.getElementById('stat-queued');
-    if (queuedEl) {
-        queuedEl.textContent = brainState.queuedCount || 0;
-    }
+    if (queuedEl) queuedEl.textContent = brainState.queuedCount || 0;
 }
 
 function updateAgentsPanel() {
@@ -989,7 +972,6 @@ function updateAgentsPanel() {
     }
 
     agentsList.innerHTML = agents.map(agent => {
-        // Calculate elapsed time
         let elapsed = '';
         if (agent.startedAt) {
             const startMs = new Date(agent.startedAt).getTime();
@@ -1016,45 +998,123 @@ function updateAgentsPanel() {
 }
 
 function updateActivityFeed() {
-    // Only update server-side feed items (agent status);
-    // local items (commands + responses) are already in the DOM via appendToFeed
     const feed = document.getElementById('activity-feed');
     if (!feed) return;
-
-    // Update chat count badge
     const countEl = document.getElementById('chat-count');
-    if (countEl) {
-        countEl.textContent = feed.children.length;
+    if (countEl) countEl.textContent = feed.children.length;
+}
+
+function updateVoiceState() {
+    const el = document.getElementById('voice-state');
+    if (!el) return;
+    const voice = brainState.voice || {};
+    if (!voice.active) {
+        el.textContent = 'Voice: Offline';
+        return;
+    }
+    const state = voice.state || 'unknown';
+    const labels = {
+        idle: 'Voice: Idle',
+        listening: 'Voice: Listening',
+        awake: 'Voice: Awake',
+        processing: 'Voice: Processing...',
+        speaking: 'Voice: Speaking',
+        sleeping: 'Voice: Sleeping',
+        stopped: 'Voice: Stopped',
+        degraded: 'Voice: Degraded',
+    };
+    el.textContent = labels[state] || `Voice: ${state}`;
+}
+
+// ── HEALTH POLLING ──────────────────────────────────────
+function startHealthPolling() {
+    pollHealth();
+    healthPollTimer = setInterval(pollHealth, HEALTH_POLL_INTERVAL);
+}
+
+async function pollHealth() {
+    try {
+        const resp = await fetch('/api/health');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        updateGauges(data);
+    } catch (e) {
+        // Server unreachable — gauges show stale data
     }
 }
 
-// ── SLASH COMMANDS ───────────────────────────────────────
+function updateGauges(data) {
+    const circumference = 97.4; // 2 * PI * 15.5
+
+    // CPU
+    const cpuStr = data.cpu || '0%';
+    const cpuVal = parseFloat(cpuStr) || 0;
+    updateGauge('gauge-cpu', 'gauge-cpu-val', cpuVal, circumference);
+
+    // Memory
+    const memPct = data.memory?.percent ? parseFloat(data.memory.percent) : 0;
+    updateGauge('gauge-mem', 'gauge-mem-val', memPct, circumference);
+
+    // Disk
+    const diskPct = data.disk?.percent ? parseFloat(data.disk.percent) : 0;
+    updateGauge('gauge-disk', 'gauge-disk-val', diskPct, circumference);
+}
+
+function updateGauge(circleId, valId, percent, circumference) {
+    const circle = document.getElementById(circleId);
+    const valEl = document.getElementById(valId);
+    if (!circle || !valEl) return;
+
+    const offset = circumference - (circumference * Math.min(percent, 100) / 100);
+    circle.style.strokeDashoffset = offset;
+
+    valEl.textContent = Math.round(percent) + '%';
+
+    // Color thresholds
+    circle.classList.remove('warn', 'critical');
+    if (percent > 90) {
+        circle.classList.add('critical');
+    } else if (percent > 75) {
+        circle.classList.add('warn');
+    }
+}
+
+// ── SLASH COMMANDS ──────────────────────────────────────
 const SLASH_COMMANDS = [
-    { cmd: '/agents',   desc: 'List active agents' },
-    { cmd: '/status',   desc: 'System overview' },
-    { cmd: '/kill',     desc: 'Terminate an agent' },
-    { cmd: '/queue',    desc: 'Show queued tasks' },
-    { cmd: '/retry',    desc: 'Retry a failed agent' },
-    { cmd: '/history',  desc: 'Recent completed tasks' },
-    { cmd: '/search',   desc: 'Search agent history' },
-    { cmd: '/stats',    desc: 'Agent run statistics' },
-    { cmd: '/schedule', desc: 'View scheduled tasks' },
-    { cmd: '/bridge',   desc: 'Right Brain connection' },
-    { cmd: '/setkey',   desc: 'Store API key in vault' },
-    { cmd: '/vault',    desc: 'List vault keys' },
-    { cmd: '/approve',  desc: 'Grant temp permission' },
-    { cmd: '/login',    desc: 'Authenticate as owner' },
-    { cmd: '/help',     desc: 'Show all commands' },
+    { cmd: '/agents',        desc: 'List active agents' },
+    { cmd: '/status',        desc: 'System overview' },
+    { cmd: '/kill',          desc: 'Terminate an agent' },
+    { cmd: '/queue',         desc: 'Show queued tasks' },
+    { cmd: '/retry',         desc: 'Retry a failed agent' },
+    { cmd: '/history',       desc: 'Recent completed tasks' },
+    { cmd: '/search',        desc: 'Search agent history' },
+    { cmd: '/stats',         desc: 'Agent run statistics' },
+    { cmd: '/schedule',      desc: 'View scheduled tasks' },
+    { cmd: '/notifications', desc: 'Recent notifications' },
+    { cmd: '/screen',        desc: 'Screen awareness status' },
+    { cmd: '/gpu',           desc: 'GPU usage and temperature' },
+    { cmd: '/clipboard',     desc: 'Clipboard contents' },
+    { cmd: '/changes',       desc: 'File changes in projects' },
+    { cmd: '/export',        desc: 'Export conversation' },
+    { cmd: '/context',       desc: 'Memory context stats' },
+    { cmd: '/bridge',        desc: 'Right Brain connection' },
+    { cmd: '/setkey',        desc: 'Store API key in vault' },
+    { cmd: '/vault',         desc: 'List vault keys' },
+    { cmd: '/approve',       desc: 'Grant temp permission' },
+    { cmd: '/login',         desc: 'Authenticate as owner' },
+    { cmd: '/voice',         desc: 'Voice system status' },
+    { cmd: '/restart',       desc: 'How to restart Leon' },
+    { cmd: '/whatsapp',      desc: 'WhatsApp bridge status' },
+    { cmd: '/help',          desc: 'Show all commands' },
 ];
 
 // ── COMMAND BAR ─────────────────────────────────────────
 function initCommandBar() {
     const input = document.getElementById('command-input');
     const sendBtn = document.getElementById('command-send');
-
     if (!input || !sendBtn) return;
 
-    // Create autocomplete dropdown
+    // Autocomplete dropdown
     const autocomplete = document.createElement('div');
     autocomplete.id = 'command-autocomplete';
     autocomplete.style.cssText = `
@@ -1063,27 +1123,30 @@ function initCommandBar() {
         bottom: 100%;
         left: 0;
         right: 0;
-        background: rgba(10, 10, 26, 0.95);
-        border: 1px solid rgba(79, 195, 247, 0.3);
-        border-radius: 8px;
+        background: rgba(5, 5, 16, 0.96);
+        border: 1px solid rgba(0, 212, 255, 0.2);
+        border-radius: 10px;
         padding: 6px 0;
-        margin-bottom: 4px;
+        margin-bottom: 6px;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        font-size: 0.8rem;
+        font-size: 12px;
         z-index: 100;
-        max-height: 260px;
+        max-height: 280px;
         overflow-y: auto;
-        backdrop-filter: blur(10px);
+        backdrop-filter: blur(20px);
+        box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.4), 0 0 20px rgba(0, 212, 255, 0.05);
     `;
-    // Insert above the command bar
     const commandBar = input.closest('.command-bar') || input.parentElement;
     commandBar.style.position = 'relative';
     commandBar.appendChild(autocomplete);
+
+    let selectedIdx = -1;
 
     function updateAutocomplete() {
         const val = input.value;
         if (!val.startsWith('/')) {
             autocomplete.style.display = 'none';
+            selectedIdx = -1;
             return;
         }
 
@@ -1092,66 +1155,83 @@ function initCommandBar() {
 
         if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === query)) {
             autocomplete.style.display = 'none';
+            selectedIdx = -1;
             return;
         }
 
-        autocomplete.innerHTML = matches.map(c => `
-            <div class="autocomplete-item" data-cmd="${c.cmd}" style="
-                padding: 6px 12px;
+        selectedIdx = -1;
+        renderAutocomplete(matches);
+        autocomplete.style.display = 'block';
+    }
+
+    function renderAutocomplete(matches) {
+        autocomplete.innerHTML = matches.map((c, i) => `
+            <div class="autocomplete-item" data-cmd="${c.cmd}" data-idx="${i}" style="
+                padding: 8px 14px;
                 cursor: pointer;
                 display: flex;
                 justify-content: space-between;
-                gap: 12px;
+                align-items: center;
+                gap: 16px;
                 transition: background 0.15s;
+                border-radius: 6px;
+                margin: 0 4px;
+                ${i === selectedIdx ? 'background: rgba(0, 212, 255, 0.1);' : ''}
             ">
-                <span style="color: #4fc3f7; font-weight: 600;">${escapeHtml(c.cmd)}</span>
-                <span style="color: rgba(255,255,255,0.4);">${escapeHtml(c.desc)}</span>
+                <span style="color: #00d4ff; font-weight: 600; font-size: 12px;">${escapeHtml(c.cmd)}</span>
+                <span style="color: rgba(255,255,255,0.3); font-size: 11px;">${escapeHtml(c.desc)}</span>
             </div>
         `).join('');
 
-        // Click handlers
+        // Click/hover handlers
         autocomplete.querySelectorAll('.autocomplete-item').forEach(el => {
             el.addEventListener('mouseenter', () => {
-                el.style.background = 'rgba(79, 195, 247, 0.1)';
+                el.style.background = 'rgba(0, 212, 255, 0.08)';
             });
             el.addEventListener('mouseleave', () => {
-                el.style.background = 'transparent';
+                const idx = parseInt(el.dataset.idx);
+                el.style.background = idx === selectedIdx ? 'rgba(0, 212, 255, 0.1)' : 'transparent';
             });
             el.addEventListener('mousedown', (e) => {
                 e.preventDefault();
-                const cmd = el.dataset.cmd;
-                input.value = cmd + ' ';
+                input.value = el.dataset.cmd + ' ';
                 input.focus();
                 autocomplete.style.display = 'none';
             });
         });
-
-        autocomplete.style.display = 'block';
     }
 
     function sendCommand() {
         const text = input.value.trim();
         if (!text) return;
         if (text.length > MAX_INPUT_LENGTH) {
-            appendToFeed(nowTime(), `System: Input too long (max ${MAX_INPUT_LENGTH} chars)`);
+            appendToFeed(nowTime(), `System: Input too long (max ${MAX_INPUT_LENGTH} chars)`, 'feed-system');
             return;
         }
 
         autocomplete.style.display = 'none';
 
-        const time = nowTime();
+        // Save to command history
+        if (commandHistory[commandHistory.length - 1] !== text) {
+            commandHistory.push(text);
+            if (commandHistory.length > MAX_HISTORY) {
+                commandHistory = commandHistory.slice(-MAX_HISTORY);
+            }
+        }
+        historyIndex = -1;
 
-        // Add command to local feed
+        const time = nowTime();
         appendToFeed(time, `> ${text}`, 'feed-command');
 
-        // Send via WebSocket
         if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+            setLoading(true);
             wsConnection.send(JSON.stringify({ command: 'input', message: text }));
+            // Auto-clear loading after timeout
+            setTimeout(() => setLoading(false), 30000);
         } else {
-            // Demo mode response
             setTimeout(() => {
                 appendToFeed(nowTime(), `Leon: [Demo] Received: ${text}`, 'feed-response');
-            }, 500 + Math.random() * 1000);
+            }, 300 + Math.random() * 700);
         }
 
         input.value = '';
@@ -1159,35 +1239,139 @@ function initCommandBar() {
     }
 
     sendBtn.addEventListener('click', sendCommand);
+
     input.addEventListener('keydown', (e) => {
+        const items = autocomplete.querySelectorAll('.autocomplete-item');
+
         if (e.key === 'Enter') {
-            sendCommand();
+            if (selectedIdx >= 0 && items[selectedIdx]) {
+                e.preventDefault();
+                input.value = items[selectedIdx].dataset.cmd + ' ';
+                autocomplete.style.display = 'none';
+                selectedIdx = -1;
+            } else {
+                sendCommand();
+            }
+            return;
         }
+
         if (e.key === 'Escape') {
-            autocomplete.style.display = 'none';
+            if (autocomplete.style.display === 'block') {
+                autocomplete.style.display = 'none';
+                selectedIdx = -1;
+            } else {
+                input.blur();
+            }
+            return;
         }
+
+        // Arrow key navigation — autocomplete first, then command history
+        if (autocomplete.style.display === 'block' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+            e.preventDefault();
+            if (e.key === 'ArrowDown') {
+                selectedIdx = selectedIdx < items.length - 1 ? selectedIdx + 1 : 0;
+            } else {
+                selectedIdx = selectedIdx > 0 ? selectedIdx - 1 : items.length - 1;
+            }
+            // Highlight selected
+            items.forEach((item, i) => {
+                item.style.background = i === selectedIdx ? 'rgba(0, 212, 255, 0.1)' : 'transparent';
+            });
+            // Scroll selected into view
+            if (items[selectedIdx]) {
+                items[selectedIdx].scrollIntoView({ block: 'nearest' });
+            }
+            return;
+        }
+
+        // Command history navigation (when autocomplete is NOT showing)
+        if (autocomplete.style.display !== 'block' && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+            if (commandHistory.length === 0) return;
+            e.preventDefault();
+            if (e.key === 'ArrowUp') {
+                if (historyIndex < commandHistory.length - 1) {
+                    historyIndex++;
+                }
+            } else {
+                if (historyIndex > 0) {
+                    historyIndex--;
+                } else {
+                    historyIndex = -1;
+                    input.value = '';
+                    return;
+                }
+            }
+            input.value = commandHistory[commandHistory.length - 1 - historyIndex] || '';
+            // Move cursor to end
+            setTimeout(() => input.setSelectionRange(input.value.length, input.value.length), 0);
+            return;
+        }
+
         // Tab completion
         if (e.key === 'Tab' && autocomplete.style.display === 'block') {
             e.preventDefault();
-            const first = autocomplete.querySelector('.autocomplete-item');
-            if (first) {
-                input.value = first.dataset.cmd + ' ';
+            const target = selectedIdx >= 0 && items[selectedIdx] ? items[selectedIdx] : items[0];
+            if (target) {
+                input.value = target.dataset.cmd + ' ';
                 autocomplete.style.display = 'none';
+                selectedIdx = -1;
             }
         }
     });
+
     input.addEventListener('input', updateAutocomplete);
+
     input.addEventListener('blur', () => {
-        // Small delay so click on autocomplete item fires first
-        setTimeout(() => { autocomplete.style.display = 'none'; }, 150);
+        setTimeout(() => { autocomplete.style.display = 'none'; selectedIdx = -1; }, 150);
+    });
+
+    input.addEventListener('focus', () => {
+        showKbdHint();
     });
 }
 
+// ── KEYBOARD SHORTCUTS ──────────────────────────────────
+function initKeyboardShortcuts() {
+    document.addEventListener('keydown', (e) => {
+        const input = document.getElementById('command-input');
+        if (!input) return;
+
+        // Don't capture if typing in auth input
+        if (document.activeElement?.id === 'auth-token-input') return;
+
+        // / key focuses command input (when not already focused)
+        if (e.key === '/' && document.activeElement !== input) {
+            e.preventDefault();
+            input.focus();
+            input.value = '/';
+            // Trigger autocomplete
+            input.dispatchEvent(new Event('input'));
+            return;
+        }
+
+        // Escape blurs input
+        if (e.key === 'Escape' && document.activeElement === input) {
+            input.blur();
+            return;
+        }
+    });
+}
+
+function showKbdHint() {
+    const hint = document.getElementById('kbd-hint');
+    if (!hint) return;
+    hint.classList.add('visible');
+    if (kbdHintTimer) clearTimeout(kbdHintTimer);
+    kbdHintTimer = setTimeout(() => {
+        hint.classList.remove('visible');
+    }, 3000);
+}
+
+// ── FEED ────────────────────────────────────────────────
 function appendToFeed(time, message, cssClass) {
     const feed = document.getElementById('activity-feed');
     if (!feed) return;
 
-    // Determine CSS class from message content if not provided
     if (!cssClass) {
         if (message.startsWith('> ')) {
             cssClass = 'feed-command';
@@ -1207,19 +1391,20 @@ function appendToFeed(time, message, cssClass) {
     div.innerHTML = `<span class="feed-time">${escapeHtml(time)}</span> ${escapeHtml(message)}`;
     feed.appendChild(div);
 
-    // Keep feed bounded (remove oldest items)
+    // Bound feed size
     while (feed.children.length > 200) {
         feed.removeChild(feed.firstChild);
     }
 
-    // Auto-scroll to bottom
-    feed.scrollTop = feed.scrollHeight;
+    // Smooth scroll to bottom
+    requestAnimationFrame(() => {
+        feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+    });
 
     // Update count
     const countEl = document.getElementById('chat-count');
     if (countEl) countEl.textContent = feed.children.length;
 
-    // Also store in localFeedItems for state tracking
     localFeedItems.push({ time, message });
     if (localFeedItems.length > 200) {
         localFeedItems = localFeedItems.slice(-100);

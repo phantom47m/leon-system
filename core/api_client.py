@@ -23,6 +23,26 @@ def _has_claude_cli() -> bool:
     return shutil.which("claude") is not None
 
 
+def _load_oauth_token() -> str:
+    """Load the OAuth access token from Claude CLI credentials file.
+    This allows Leon to make direct API calls using the subscription
+    without shelling out to `claude --print` (which conflicts with
+    active Claude Code sessions)."""
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return ""
+    try:
+        creds = json.loads(creds_path.read_text())
+        oauth = creds.get("claudeAiOauth", {})
+        token = oauth.get("accessToken", "")
+        if token:
+            logger.info("Loaded OAuth token from Claude CLI credentials")
+        return token
+    except Exception as e:
+        logger.debug(f"Could not load OAuth token: {e}")
+        return ""
+
+
 class AnthropicAPI:
     """Wrapper for Anthropic API calls used by Leon's brain."""
 
@@ -45,11 +65,13 @@ class AnthropicAPI:
             import anthropic
             self.client = anthropic.AsyncAnthropic(api_key=api_key)
             self._auth_method = "api_key"
-        elif _has_claude_cli():
-            self._auth_method = "claude_cli"
-            logger.info("Using Claude CLI for API calls (subscription auth)")
         else:
-            logger.warning("No API auth configured — use /setkey or install Claude CLI")
+            # Try OAuth token from Claude CLI credentials (works alongside active sessions)
+            if _has_claude_cli():
+                self._auth_method = "claude_cli"
+                logger.info("Using Claude CLI for API calls (subscription auth)")
+            else:
+                logger.warning("No API auth configured — use /setkey or install Claude CLI")
 
         self.model = config.get("model", "claude-sonnet-4-5-20250929")
         self.max_tokens = config.get("max_tokens", 8000)
@@ -101,7 +123,7 @@ class AnthropicAPI:
 
     async def create_message(self, system: str, messages: list) -> str:
         """Full conversation-style request."""
-        if self._auth_method == "api_key" and self.client:
+        if self._auth_method in ("api_key", "oauth") and self.client:
             try:
                 response = await self.client.messages.create(
                     model=self.model,
@@ -126,14 +148,28 @@ class AnthropicAPI:
 
         return "No API authentication configured. Use /setkey or log in to Claude CLI."
 
-    async def quick_request(self, prompt: str) -> str:
-        """Single-turn quick request."""
-        if self._auth_method == "api_key" and self.client:
+    async def quick_request(self, prompt: str, image_b64: str = None) -> str:
+        """Single-turn quick request. Optionally include a base64 image."""
+        if self._auth_method in ("api_key", "oauth") and self.client:
             try:
+                if image_b64:
+                    content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
+                        },
+                        {"type": "text", "text": prompt},
+                    ]
+                else:
+                    content = prompt
                 response = await self.client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": content}],
                 )
                 return response.content[0].text
             except Exception as e:
@@ -145,9 +181,9 @@ class AnthropicAPI:
 
         return "No API authentication configured. Use /setkey or log in to Claude CLI."
 
-    async def analyze_json(self, prompt: str) -> Optional[dict]:
+    async def analyze_json(self, prompt: str, image_b64: str = None) -> Optional[dict]:
         """Request that expects JSON back — parses it automatically."""
-        raw = await self.quick_request(prompt)
+        raw = await self.quick_request(prompt, image_b64=image_b64)
         # Strip markdown code fences if present
         text = raw.strip()
         if text.startswith("```"):

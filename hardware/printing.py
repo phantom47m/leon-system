@@ -19,14 +19,11 @@ Bambu Lab P1S Communication:
 
 import asyncio
 import ftplib
-import io
 import json
 import logging
 import os
 import re
 import ssl
-import struct
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional

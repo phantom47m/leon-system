@@ -37,6 +37,7 @@ class MemorySystem:
         return self._empty()
 
     def save(self):
+        """Persist memory state to disk."""
         # Atomic write: write to tmp then rename
         tmp = self.memory_file.with_suffix(".tmp")
         with open(tmp, "w") as f:
@@ -80,6 +81,7 @@ class MemorySystem:
         self.save()
 
     def get_recent_context(self, limit: int = 20) -> list:
+        """Return the last `limit` conversation messages."""
         history = self.memory.get("conversation_history", [])
         return history[-limit:]
 
@@ -112,6 +114,7 @@ class MemorySystem:
         return None
 
     def list_projects(self) -> list:
+        """Return a list of all tracked projects."""
         return [
             {"id": pid, **proj}
             for pid, proj in self.memory.get("ongoing_projects", {}).items()
@@ -129,12 +132,15 @@ class MemorySystem:
     # ------------------------------------------------------------------
 
     def get_active_task(self, agent_id: str) -> Optional[dict]:
+        """Return the active task for the given agent, or None."""
         return self.memory["active_tasks"].get(agent_id)
 
     def remove_active_task(self, agent_id: str):
+        """Remove an active task by agent ID."""
         self.memory["active_tasks"].pop(agent_id, None)
 
     def update_active_task(self, agent_id: str, task: dict):
+        """Merge updates into an existing active task."""
         if agent_id in self.memory["active_tasks"]:
             self.memory["active_tasks"][agent_id].update(task)
 
@@ -186,6 +192,7 @@ class MemorySystem:
         logger.info(f"Task completed: {task['description'][:60]}")
 
     def get_all_active_tasks(self) -> dict:
+        """Return a copy of all active tasks."""
         return dict(self.memory.get("active_tasks", {}))
 
     # ------------------------------------------------------------------
@@ -204,5 +211,6 @@ class MemorySystem:
     # ------------------------------------------------------------------
 
     def learn(self, key: str, value):
+        """Store a learned context key-value pair."""
         self.memory.setdefault("learned_context", {})[key] = value
         self.save()

@@ -31,6 +31,8 @@ const ALLOWED_NUMBERS = new Set(
 
 const HTTP_TIMEOUT_MS = 120_000; // 2 min — AI responses can be slow
 const MAX_CHUNK = 4000; // WhatsApp message length limit
+const MAX_RECONNECTS = 5;
+const RECONNECT_DELAY_MS = 10_000;
 
 if (!API_TOKEN) {
   console.error("[bridge] LEON_API_TOKEN is required. Check Leon dashboard output for the token.");
@@ -49,14 +51,24 @@ console.log(`[bridge] Leon API: ${API_URL}/api/message`);
 const sentByBridge = new Set();
 let myNumber = null;
 let processing = false; // Prevent overlapping/looping message handling
+let reconnectCount = 0;
 
 // ── WhatsApp Client ─────────────────────────────────────
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: ".wwebjs_auth" }),
   puppeteer: {
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--disable-gpu",
+    ],
   },
+  restartOnAuthFail: true,
 });
 
 client.on("qr", (qr) => {
@@ -82,6 +94,21 @@ client.on("auth_failure", (msg) => {
 
 client.on("disconnected", (reason) => {
   console.warn(`[bridge] Disconnected: ${reason}`);
+  clientReady = false;
+
+  if (reconnectCount < MAX_RECONNECTS) {
+    reconnectCount++;
+    const delay = RECONNECT_DELAY_MS * reconnectCount;
+    console.log(`[bridge] Reconnecting in ${delay / 1000}s (attempt ${reconnectCount}/${MAX_RECONNECTS})...`);
+    setTimeout(() => {
+      console.log("[bridge] Attempting reconnect...");
+      client.initialize().catch((err) => {
+        console.error(`[bridge] Reconnect failed: ${err.message}`);
+      });
+    }, delay);
+  } else {
+    console.error(`[bridge] Max reconnect attempts (${MAX_RECONNECTS}) reached. Restart the bridge manually.`);
+  }
 });
 
 // ── Message handler ─────────────────────────────────────
@@ -236,8 +263,69 @@ function splitMessage(text) {
   return chunks;
 }
 
+// ── Outbound HTTP server (for Leon to send proactive messages) ──
+const OUTBOUND_PORT = 3001;
+let clientReady = false;
+const outboundServer = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/send") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        if (!clientReady) {
+          res.writeHead(503);
+          res.end(JSON.stringify({ error: "WhatsApp not ready yet, try again in 30s" }));
+          return;
+        }
+        const { number, message } = JSON.parse(body);
+        if (!number || !message) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "number and message required" }));
+          return;
+        }
+        // Send to the "Message Yourself" chat (self-chat) or a specific number
+        const chatId = number.includes("@") ? number : `${number}@c.us`;
+        const sent = await client.sendMessage(chatId, `[Leon] ${message}`);
+        if (sent && sent.id && sent.id._serialized) {
+          sentByBridge.add(sent.id._serialized);
+        }
+        console.log(`[bridge] Outbound to ${number}: ${message.substring(0, 60)}...`);
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        console.error(`[bridge] Outbound error: ${err.message}`);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+  } else if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200);
+    res.end(JSON.stringify({
+      status: "ok",
+      whatsapp_ready: clientReady,
+      my_number: myNumber || null,
+      reconnect_count: reconnectCount,
+      uptime_seconds: Math.floor(process.uptime()),
+    }));
+  } else {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+});
+
 // ── Start ───────────────────────────────────────────────
 console.log("[bridge] Starting WhatsApp bridge...");
+
+// Start outbound server immediately (doesn't need WhatsApp ready)
+outboundServer.listen(OUTBOUND_PORT, "127.0.0.1", () => {
+  console.log(`[bridge] Outbound API listening on http://127.0.0.1:${OUTBOUND_PORT}/send`);
+});
+
+client.on("ready", () => {
+  clientReady = true;
+  reconnectCount = 0;
+  console.log("[bridge] WhatsApp ready — outbound messages enabled");
+});
 client.initialize().catch((err) => {
   console.error(`[bridge] Failed to initialize: ${err.message}`);
   process.exit(1);

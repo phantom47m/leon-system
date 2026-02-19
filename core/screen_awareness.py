@@ -11,7 +11,6 @@ about what the user is working on. Can detect patterns like:
 
 import asyncio
 import base64
-import io
 import logging
 import subprocess
 import time
@@ -231,9 +230,9 @@ Rules:
 
         try:
             result = await self.api.analyze_json(prompt, image_b64=screenshot_b64)
-            return result
-        except TypeError:
-            # API client doesn't support image_b64 param yet — use text-only fallback
+            if result:
+                return result
+            # Image analysis returned nothing — fall back to text-only
             return await self._analyze_screen_text_only()
         except Exception as e:
             logger.debug(f"Screen analysis failed: {e}")
@@ -282,7 +281,8 @@ Rules:
                 "suggestion": "",
                 "mood": "focused",
             }
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Text-only screen analysis failed: {e}")
             return None
 
     # ------------------------------------------------------------------

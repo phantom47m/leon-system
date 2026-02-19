@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LEON — Brain Monitor</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=7">
+    <title>LEON — Neural Interface</title>
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=11">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -16,9 +16,9 @@
         <!-- Top Bar -->
         <div id="top-bar">
             <div class="logo">
-                <span class="logo-icon">⬡</span>
+                <span class="logo-icon">&#x2B21;</span>
                 <span class="logo-text">LEON</span>
-                <span class="logo-sub">NEURAL INTERFACE v2.0</span>
+                <span class="logo-sub">NEURAL INTERFACE v3.0</span>
             </div>
             <div class="top-stats">
                 <div class="top-stat">
@@ -35,9 +35,9 @@
                 </div>
             </div>
             <div class="top-right">
-                <div class="indicator">
-                    <span class="dot pulse"></span>
-                    <span>SYSTEM ONLINE</span>
+                <div class="indicator" id="ws-indicator">
+                    <span class="dot pulse" id="ws-dot"></span>
+                    <span id="ws-status-text">CONNECTING</span>
                 </div>
             </div>
         </div>
@@ -45,11 +45,11 @@
         <!-- Left Panel — Left Brain Info -->
         <div id="left-panel" class="panel">
             <div class="panel-header">
-                <span class="panel-icon">◉</span>
+                <span class="panel-icon">&#x25C9;</span>
                 LEFT HEMISPHERE
             </div>
             <div class="panel-label">AWARENESS CORE</div>
-            <div id="left-status" class="status active">● ACTIVE</div>
+            <div id="left-status" class="status active">&#x25CF; ACTIVE</div>
             <div class="panel-stats">
                 <div class="stat">
                     <span class="stat-label">Memory</span>
@@ -65,21 +65,21 @@
                 </div>
             </div>
             <div class="panel-detail">
-                <div>🎤 Voice: Standby</div>
-                <div>🧠 Owner Memory: Active</div>
-                <div>💭 Context Window: 92%</div>
+                <div id="voice-state">Voice: Standby</div>
+                <div>Owner Memory: Active</div>
+                <div>Context Window: 92%</div>
             </div>
         </div>
 
         <!-- Right Panel — Right Brain Info -->
         <div id="right-panel" class="panel">
             <div class="panel-header">
-                <span class="panel-icon">◉</span>
+                <span class="panel-icon">&#x25C9;</span>
                 RIGHT HEMISPHERE
                 <span id="right-brain-location" class="brain-location" style="display:none"></span>
             </div>
             <div class="panel-label">ACTION CORE</div>
-            <div id="right-status" class="status active">● ACTIVE</div>
+            <div id="right-status" class="status active">&#x25CF; ACTIVE</div>
             <div class="panel-stats">
                 <div class="stat">
                     <span class="stat-label">Agents</span>
@@ -95,16 +95,59 @@
                 </div>
             </div>
             <div class="panel-detail">
-                <div>⚡ OpenClaw: Connected</div>
-                <div>🔧 Agents: Ready</div>
-                <div>🌐 Web Control: Standby</div>
+                <div>OpenClaw: Connected</div>
+                <div>Agents: Ready</div>
+                <div>Web Control: Standby</div>
+            </div>
+        </div>
+
+        <!-- System Stats Panel -->
+        <div id="system-stats-panel">
+            <div class="panel-header">
+                <span class="panel-icon">&#x25A3;</span>
+                SYSTEM RESOURCES
+            </div>
+            <div class="gauge-row">
+                <div class="gauge">
+                    <div class="gauge-ring">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                            <circle class="gauge-fill cpu" id="gauge-cpu" cx="18" cy="18" r="15.5"
+                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                        </svg>
+                        <div class="gauge-value" id="gauge-cpu-val">--%</div>
+                    </div>
+                    <span class="gauge-label">CPU</span>
+                </div>
+                <div class="gauge">
+                    <div class="gauge-ring">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                            <circle class="gauge-fill mem" id="gauge-mem" cx="18" cy="18" r="15.5"
+                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                        </svg>
+                        <div class="gauge-value" id="gauge-mem-val">--%</div>
+                    </div>
+                    <span class="gauge-label">RAM</span>
+                </div>
+                <div class="gauge">
+                    <div class="gauge-ring">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
+                            <circle class="gauge-fill disk" id="gauge-disk" cx="18" cy="18" r="15.5"
+                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
+                        </svg>
+                        <div class="gauge-value" id="gauge-disk-val">--%</div>
+                    </div>
+                    <span class="gauge-label">DISK</span>
+                </div>
             </div>
         </div>
 
         <!-- Active Agents Panel -->
         <div id="agents-panel">
             <div class="panel-header">
-                <span class="panel-icon">⚙</span>
+                <span class="panel-icon">&#x2699;</span>
                 ACTIVE AGENTS
             </div>
             <div id="agents-list"></div>
@@ -114,10 +157,10 @@
         <div id="bottom-panel">
             <div class="bottom-left">
                 <div class="panel-header">
-                    <span class="panel-icon">⬡</span>
+                    <span class="panel-icon">&#x2B21;</span>
                     NEURAL BRIDGE
                 </div>
-                <div id="bridge-status" class="status synced">● SYNCED</div>
+                <div id="bridge-status" class="status synced">&#x25CF; SYNCED</div>
                 <div class="bridge-visual">
                     <span class="bridge-node left-node">L</span>
                     <span class="bridge-line"></span>
@@ -128,17 +171,17 @@
             </div>
             <div class="bottom-right" id="chat-panel">
                 <div class="panel-header">
-                    <span class="panel-icon">▤</span>
+                    <span class="panel-icon">&#x25A4;</span>
                     COMMAND LOG
                     <span id="chat-count" class="chat-count">0</span>
                 </div>
                 <div id="activity-feed">
-                    <div class="feed-item feed-system"><span class="feed-time">--:--</span> System initialized. Awaiting input.</div>
+                    <div class="feed-item feed-system"><span class="feed-time">--:--</span> Neural interface initialized. Type /help for commands.</div>
                 </div>
             </div>
         </div>
 
-        <!-- Corner Decorations (TRON style) -->
+        <!-- Corner Decorations -->
         <div class="corner top-left-corner"></div>
         <div class="corner top-right-corner"></div>
         <div class="corner bottom-left-corner"></div>
@@ -149,26 +192,29 @@
     </div>
 
     <!-- Auth Overlay -->
-    <div id="auth-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(5,5,15,0.95); align-items:center; justify-content:center;">
+    <div id="auth-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(5,5,16,0.92); align-items:center; justify-content:center;">
         <div style="text-align:center; font-family:'Orbitron',monospace;">
-            <div style="font-size:2rem; color:#4fc3f7; margin-bottom:8px;">LEON</div>
-            <div style="font-size:0.8rem; color:rgba(255,255,255,0.4); margin-bottom:32px; letter-spacing:4px;">NEURAL INTERFACE</div>
-            <div style="margin-bottom:16px; color:rgba(255,255,255,0.6); font-family:'Rajdhani',sans-serif; font-size:0.9rem;">Enter session token to connect</div>
-            <input type="text" id="auth-token-input" placeholder="Session token..." autocomplete="off" spellcheck="false"
-                style="width:320px; padding:12px 16px; background:rgba(79,195,247,0.08); border:1px solid rgba(79,195,247,0.3); border-radius:8px; color:#4fc3f7; font-family:'JetBrains Mono','Fira Code',monospace; font-size:0.9rem; outline:none; text-align:center;">
+            <div style="font-size:2.2rem; color:#00d4ff; margin-bottom:6px; text-shadow: 0 0 30px rgba(0,212,255,0.3);">LEON</div>
+            <div style="font-size:0.7rem; color:rgba(255,255,255,0.3); margin-bottom:36px; letter-spacing:5px;">NEURAL INTERFACE</div>
+            <div style="margin-bottom:18px; color:rgba(255,255,255,0.5); font-family:'Rajdhani',sans-serif; font-size:0.85rem; letter-spacing:1px;">Enter session token to connect</div>
+            <input type="text" id="auth-token-input" placeholder="Session token..." autocomplete="off" spellcheck="false">
             <br>
-            <button id="auth-submit" style="margin-top:16px; padding:10px 40px; background:rgba(79,195,247,0.15); border:1px solid rgba(79,195,247,0.4); border-radius:8px; color:#4fc3f7; font-family:'Orbitron',monospace; font-size:0.85rem; cursor:pointer; letter-spacing:2px; transition:all 0.2s;">
-                CONNECT
-            </button>
-            <div id="auth-error" style="margin-top:16px; color:#ff4444; font-family:'Rajdhani',sans-serif; font-size:0.85rem; min-height:1.2em;"></div>
+            <button id="auth-submit">CONNECT</button>
+            <div id="auth-error" style="margin-top:18px; color:#ff4466; font-family:'Rajdhani',sans-serif; font-size:0.85rem; min-height:1.2em;"></div>
         </div>
     </div>
 
-    <!-- Command Input Bar (outside HUD so it's always clickable) -->
+    <!-- Command Input Bar -->
     <div id="command-bar" class="command-bar">
         <span class="command-prefix">LEON &gt;</span>
-        <input type="text" id="command-input" placeholder="Type a command or /help ..." autocomplete="off" spellcheck="false">
-        <button id="command-send">SEND</button>
+        <input type="text" id="command-input" placeholder="Type a message or /help ..." autocomplete="off" spellcheck="false" aria-label="Command input">
+        <button id="command-send" aria-label="Send command">SEND</button>
+        <div class="command-bar-loading" id="command-loading"></div>
+    </div>
+
+    <!-- Keyboard Shortcut Hint -->
+    <div class="kbd-hint" id="kbd-hint">
+        <kbd>/</kbd> focus &nbsp; <kbd>Esc</kbd> blur &nbsp; <kbd>Enter</kbd> send
     </div>
 
     <script type="importmap">
@@ -179,12 +225,11 @@
         }
     }
     </script>
-    <script type="module" src="/static/js/brain.js?v=6"></script>
+    <script type="module" src="/static/js/brain.js?v=11"></script>
     <script>
-        // Show any JS errors on screen for debugging
         window.onerror = function(msg, url, line) {
             var el = document.getElementById('brain-container');
-            if (el) el.innerHTML = '<div style="color:#ff4444;padding:40px;font-family:monospace;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5"><h2>WebGL Error</h2><p>' + msg + '</p><p>' + url + ':' + line + '</p></div>';
+            if (el) el.innerHTML = '<div style="color:#ff4466;padding:40px;font-family:monospace;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5"><h2>WebGL Error</h2><p>' + msg + '</p><p>' + url + ':' + line + '</p></div>';
         };
     </script>
 </body>

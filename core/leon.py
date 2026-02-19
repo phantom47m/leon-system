@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import subprocess
 import uuid
 from datetime import datetime
@@ -93,9 +94,17 @@ class Leon:
             with open(personality_file, "r") as f:
                 personality = yaml.safe_load(f)
             self.system_prompt = personality["system_prompt"]
+            self._wake_responses = personality.get("wake_responses", ["Yeah?"])
+            self._task_complete_phrases = personality.get("task_complete", ["Done."])
+            self._task_failed_phrases = personality.get("task_failed", ["That didn't work — {error}."])
+            self._error_translations = personality.get("error_translations", {})
         except FileNotFoundError:
             logger.warning(f"Personality file not found: {personality_file}, using default")
             self.system_prompt = "You are Leon, a helpful AI assistant and orchestrator."
+            self._wake_responses = ["Yeah?"]
+            self._task_complete_phrases = ["Done."]
+            self._task_failed_phrases = ["That didn't work — {error}."]
+            self._error_translations = {}
 
         # Load projects
         projects_file = self.config.get("leon", {}).get("projects_file", "config/projects.yaml")
@@ -494,16 +503,16 @@ class Leon:
             if ("find" in msg or "search" in msg or "stl" in msg) and self.stl_searcher:
                 results = await self.stl_searcher.search(message)
                 if results:
-                    lines = ["Found some STL files:\n"]
+                    lines = ["Found a few options:\n"]
                     for i, r in enumerate(results[:5], 1):
                         lines.append(f"{i}. **{r.get('name', 'Untitled')}** — {r.get('url', 'N/A')}")
                     return "\n".join(lines)
-                return "Couldn't find any matching STL files. Try different keywords."
+                return "Nothing came up. Try different keywords?"
             if "status" in msg and self.printer:
                 printers = self.printer.list_printers()
                 if not printers:
-                    return "No printers configured. Update config/printers.yaml with your printer details."
-                lines = ["Printer status:\n"]
+                    return "No printers configured yet. Add them to config/printers.yaml."
+                lines = ["Here's what the printers are doing:\n"]
                 for p in printers:
                     s = p.get_status()
                     lines.append(f"**{p.name}**: {s.get('state', 'unknown')} — {s.get('progress', 0)}%")
@@ -512,57 +521,57 @@ class Leon:
         # Vision
         if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around", "describe the room", "camera"]):
             if not self.vision:
-                return "Vision system is not available."
+                return "Camera's not set up yet. Want me to configure it?"
             return self.vision.describe_scene()
 
         # Business — CRM
         if any(w in msg for w in ["crm", "pipeline", "clients", "contacts", "deals", "customer list"]):
             if not self.crm:
-                return "CRM module is not available."
+                return "CRM isn't set up yet. Want me to get that configured?"
             return json.dumps(self.crm.get_pipeline_summary(), indent=2, default=str)
 
         # Business — leads
         if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect", "generate leads", "new leads", "lead search"]):
             if self.audit_log:
                 self.audit_log.log("lead_hunt", message, "info")
-            return "Starting lead hunt... I'll search for businesses that need websites and score them. Check back shortly."
+            return "On it — hunting for leads now. I'll score them and have something for you shortly."
 
         # Business — finance
         if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings", "profit", "expenses", "income", "billing"]):
             if not self.finance:
-                return "Finance module is not available."
+                return "Finance tracking isn't set up yet. Want me to configure it?"
             return self.finance.get_daily_summary()
 
         # Business — communications
         if any(w in msg for w in ["send email", "check email", "inbox", "messages", "unread", "compose"]):
             if not self.comms:
-                return "Communications module is not available."
+                return "Comms module isn't wired up yet. Want me to set it up?"
             # Sending email requires permission
             if "send" in msg and self.permissions:
                 if not self.permissions.check_permission("send_email"):
-                    return "This requires owner approval. Use `/approve send_email` to grant temporary access."
-            return "Comms hub active. What would you like to do — check inbox, send an email, or review messages?"
+                    return "I'll need your approval to send emails. Run `/approve send_email` to unlock that."
+            return "Comms hub's live. Check inbox, send something, or review messages?"
 
         # Business — briefing
         if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief", "daily briefing", "what's happening", "catch me up", "daily summary"]):
             if not self.assistant:
-                return "Personal assistant module is not available."
+                return "Assistant module isn't loaded. Might need to check the business config."
             return await self.assistant.generate_daily_briefing()
 
         # Business — schedule/calendar
         if any(w in msg for w in ["schedule", "calendar", "appointments", "meetings today", "what's on my calendar"]):
             if not self.assistant:
-                return "Personal assistant module is not available."
+                return "Assistant module isn't loaded. Can't check the calendar without it."
             return await self.assistant.generate_daily_briefing()
 
         # Security
         if any(w in msg for w in ["audit log", "security log", "audit trail", "recent actions"]):
             if not self.audit_log:
-                return "Audit log is not available."
+                return "Audit system isn't loaded. Check the security module."
             entries = self.audit_log.get_recent(10)
             if not entries:
-                return "Audit log is clean — no entries yet."
-            lines = ["Recent audit entries:\n"]
+                return "Audit log's clean — nothing to report."
+            lines = ["Recent activity:\n"]
             for e in entries:
                 lines.append(f"[{e.get('timestamp', '?')}] **{e.get('action')}** — {e.get('details', '')} ({e.get('severity')})")
             return "\n".join(lines)
@@ -653,8 +662,8 @@ Examples:
             if any(kw in msg for kw in keywords):
                 if not self.permissions.check_permission(action):
                     return (
-                        f"This requires owner approval for `{action}`. "
-                        f"Use `/approve {action}` to grant temporary access."
+                        f"I'll need your go-ahead for that. "
+                        f"Run `/approve {action}` to unlock it."
                     )
         return None
 
@@ -766,8 +775,8 @@ Vision: {vision_desc}
 
         if not project:
             return (
-                "I'm not sure which project to work on. "
-                "Which project directory should I use for this task?"
+                "Not sure which project this is for. "
+                "Which one should I target?"
             )
 
         brief_path = await self._create_task_brief(task_desc, project)
@@ -794,11 +803,11 @@ Vision: {vision_desc}
             str(self.agent_manager.output_dir / f"{agent_id}.log"),
         )
 
-        location = " (local fallback)" if self.brain_role == "left" else ""
+        location = " Ran locally since Right Brain's not available." if self.brain_role == "left" else ""
         return (
-            f"On it. Spawned Agent #{agent_id[-8:]} to handle:\n"
-            f"**{task_desc}** (project: {project['name']}){location}\n\n"
-            f"I'll update you when it's done."
+            f"On it. Spinning up an agent for **{task_desc}** "
+            f"in {project['name']}.{location}\n\n"
+            f"I'll let you know when it's done."
         )
 
     async def _orchestrate(self, message: str, analysis: dict) -> str:
@@ -872,16 +881,15 @@ Vision: {vision_desc}
                 self.memory.add_active_task(agent_id, task_obj)
                 spawned.append((agent_id, task_desc, project["name"], "local"))
 
-        # Build response
-        lines = [f"On it. I've broken this into {len(spawned)} tasks:\n"]
+        # Build response — conversational, not robotic
+        lines = [f"Right. Breaking that into {len(spawned)} tasks:\n"]
         for idx, (aid, desc, proj, loc) in enumerate(spawned, 1):
             if aid:
-                tag = f"Agent #{aid[-8:]}"
                 where = f" [{loc}]" if loc and self.brain_role == "left" else ""
-                lines.append(f"{idx}. **{desc}** → {tag} ({proj}){where}")
+                lines.append(f"{idx}. **{desc}** — {proj}{where}")
             else:
-                lines.append(f"{idx}. **{desc}** → Needs project")
-        lines.append("\nI'm monitoring all of them and will update you on progress.")
+                lines.append(f"{idx}. **{desc}** — need to know which project for this one")
+        lines.append("\nAll running in parallel. I'll keep you posted.")
 
         return "\n".join(lines)
 
@@ -1005,39 +1013,44 @@ spawned_by: Leon v1.0
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
 
-                        # Push completion to dashboard WebSocket + desktop notification
+                        # Push natural completion message to dashboard + desktop
+                        completion_msg = self._pick_completion_phrase(
+                            results.get("summary", "")
+                        )
                         await self._broadcast_to_dashboard({
                             "type": "agent_completed",
                             "agent_id": agent_id,
-                            "summary": results.get("summary", "")[:200],
+                            "summary": completion_msg,
                         })
                         self.notifications.push_agent_completed(
-                            agent_id, results.get("summary", "Task completed")
+                            agent_id, completion_msg
                         )
 
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
+                        raw_error = results.get("errors", "unknown error")
                         self.memory.complete_task(agent_id, {
-                            "summary": f"FAILED: {results.get('errors', 'unknown error')[:200]}",
+                            "summary": f"FAILED: {raw_error[:200]}",
                             "files_modified": [],
                         })
-                        self.task_queue.fail_task(agent_id, results.get("errors", ""))
+                        self.task_queue.fail_task(agent_id, raw_error)
                         self.agent_index.record_failure(
                             agent_id,
-                            results.get("errors", "unknown"),
+                            raw_error,
                             status.get("duration_seconds", 0),
                         )
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")
 
-                        # Push failure to dashboard WebSocket + desktop notification
+                        # Push natural failure message to dashboard + desktop
+                        failure_msg = self._pick_failure_phrase(raw_error)
                         await self._broadcast_to_dashboard({
                             "type": "agent_failed",
                             "agent_id": agent_id,
-                            "error": results.get("errors", "")[:200],
+                            "error": failure_msg,
                         })
                         self.notifications.push_agent_failed(
-                            agent_id, results.get("errors", "Unknown error")
+                            agent_id, failure_msg
                         )
 
                 # Poll Right Brain status if Left Brain
@@ -1079,6 +1092,35 @@ spawned_by: Leon v1.0
                 logger.error(f"Awareness loop error: {e}")
 
             await asyncio.sleep(10)
+
+    # ------------------------------------------------------------------
+    # Personality helpers
+    # ------------------------------------------------------------------
+
+    def _translate_error(self, raw_error: str) -> str:
+        """Turn a raw error string into human-friendly language."""
+        error_lower = raw_error.lower()
+        for pattern, friendly in self._error_translations.items():
+            if pattern.lower() in error_lower:
+                return friendly
+        # Fallback: truncate and present simply
+        short = raw_error[:120].rstrip(".")
+        return f"Something went wrong — {short}"
+
+    def _pick_completion_phrase(self, summary: str = "") -> str:
+        """Pick a random task completion phrase, optionally with summary."""
+        phrase = random.choice(self._task_complete_phrases)
+        if "{summary}" in phrase and summary:
+            return phrase.replace("{summary}", summary[:100])
+        elif "{summary}" in phrase:
+            return phrase.replace("{summary}", "").strip()
+        return phrase
+
+    def _pick_failure_phrase(self, error: str = "") -> str:
+        """Pick a random task failure phrase with translated error."""
+        friendly = self._translate_error(error) if error else "unknown issue"
+        phrase = random.choice(self._task_failed_phrases)
+        return phrase.replace("{error}", friendly)
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -1141,6 +1183,17 @@ spawned_by: Leon v1.0
                 "timestamp": datetime.now().strftime("%H:%M"),
             })
 
+    def _get_voice_status(self) -> dict:
+        """Get voice system status for the dashboard."""
+        vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
+        if not vs:
+            return {"active": False}
+        if hasattr(vs, 'listening_state'):
+            state = vs.listening_state
+            state["active"] = True
+            return state
+        return {"active": vs.is_listening, "state": "unknown"}
+
     def set_voice_system(self, voice_system):
         """Wire the voice system into the hotkey listener for push-to-talk."""
         self.hotkey_listener.voice_system = voice_system
@@ -1174,6 +1227,7 @@ spawned_by: Leon v1.0
             "right_brain_status": self._right_brain_status if self.brain_role == "left" else {},
             "screen": self.screen_awareness.get_context() if self.screen_awareness else {},
             "notifications": self.notifications.get_stats() if self.notifications else {},
+            "voice": self._get_voice_status(),
         }
         return status
 
@@ -1208,9 +1262,8 @@ spawned_by: Leon v1.0
             }
             self.memory.add_active_task(agent_id, task_obj)
             return (
-                f"On it. Dispatched to Right Brain — Agent #{agent_id[-8:]}:\n"
-                f"**{task_desc}** (project: {project['name']})\n\n"
-                f"Running on homelab. I'll update you when it's done."
+                f"Sent that to the homelab. Working on **{task_desc}** "
+                f"in {project['name']}.\n\nI'll let you know when it's done."
             )
 
         # Handle explicit rejection (backpressure)
@@ -1233,23 +1286,22 @@ spawned_by: Leon v1.0
         self.task_queue.add_task(agent_id, task_obj)
         self.memory.add_active_task(agent_id, task_obj)
         return (
-            f"Right Brain unavailable — running locally. Agent #{agent_id[-8:]}:\n"
-            f"**{task_desc}** (project: {project['name']})\n\n"
-            f"I'll update you when it's done."
+            f"Homelab's not responding — running it locally instead. "
+            f"Working on **{task_desc}** in {project['name']}.\n\n"
+            f"I'll let you know when it's done."
         )
 
     async def _broadcast_to_dashboard(self, data: dict):
         """Push a notification to all connected dashboard WebSocket clients."""
         try:
-            from dashboard.server import ws_clients
-            import json as _json
+            from dashboard.server import ws_authenticated
             dead = set()
-            for ws in ws_clients:
+            for ws in ws_authenticated:
                 try:
                     await ws.send_json(data)
                 except Exception:
                     dead.add(ws)
-            ws_clients -= dead
+            ws_authenticated -= dead
         except Exception:
             pass  # Dashboard may not be running
 
