@@ -59,6 +59,83 @@ async def health(request):
     })
 
 
+async def api_health(request):
+    """
+    GET /api/health — Detailed system health for monitoring/widgets.
+    No auth required — read-only system stats.
+    """
+    import shutil
+
+    leon = request.app.get("leon_core")
+    uptime = int(time.monotonic() - _start_time)
+
+    # System stats
+    cpu_line = ""
+    try:
+        with open("/proc/stat") as f:
+            parts = f.readline().split()
+        idle = int(parts[4])
+        total = sum(int(x) for x in parts[1:])
+        cpu_line = f"{100.0 * (1 - idle / total):.1f}%"
+    except Exception:
+        cpu_line = "unknown"
+
+    # Memory
+    mem = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    mem["total_mb"] = int(line.split()[1]) // 1024
+                elif line.startswith("MemAvailable"):
+                    mem["available_mb"] = int(line.split()[1]) // 1024
+        mem["used_mb"] = mem.get("total_mb", 0) - mem.get("available_mb", 0)
+        mem["percent"] = f"{100 * mem['used_mb'] / max(mem['total_mb'], 1):.1f}%"
+    except Exception:
+        pass
+
+    # Disk
+    disk = {}
+    try:
+        usage = shutil.disk_usage("/")
+        disk["total_gb"] = round(usage.total / (1024**3), 1)
+        disk["used_gb"] = round(usage.used / (1024**3), 1)
+        disk["free_gb"] = round(usage.free / (1024**3), 1)
+        disk["percent"] = f"{100 * usage.used / max(usage.total, 1):.1f}%"
+    except Exception:
+        pass
+
+    # Leon stats
+    leon_stats = {}
+    if leon:
+        try:
+            status = leon.get_status()
+            tasks = status.get("tasks", {})
+            leon_stats = {
+                "active_agents": status.get("active_agents", 0),
+                "active_tasks": tasks.get("active", 0),
+                "queued_tasks": tasks.get("queued", 0),
+                "completed_tasks": tasks.get("completed", 0),
+                "brain_role": status.get("brain_role", "unified"),
+                "bridge_connected": status.get("bridge_connected", False),
+                "screen": status.get("screen", {}),
+                "notifications": status.get("notifications", {}),
+            }
+        except Exception:
+            pass
+
+    return web.json_response({
+        "status": "ok",
+        "uptime_seconds": uptime,
+        "ws_clients": len(ws_authenticated),
+        "cpu": cpu_line,
+        "memory": mem,
+        "disk": disk,
+        "leon": leon_stats,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
 async def api_message(request):
     """
     POST /api/message — HTTP API for external integrations (WhatsApp bridge, etc.)
@@ -561,6 +638,68 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 return result
             return "System skills not available."
 
+        elif cmd == "/changes":
+            if hasattr(leon, 'project_watcher'):
+                if arg:
+                    changes = leon.project_watcher.get_recent_changes(arg, 20)
+                    if not changes:
+                        return f"No recent changes for `{arg}`."
+                    lines = [f"**Recent changes in {arg}:**\n"]
+                    for c in reversed(changes[-15:]):
+                        ts = c["timestamp"][11:19]
+                        path = Path(c["path"]).name
+                        lines.append(f"[{ts}] {c['type']}: {path}")
+                    return "\n".join(lines)
+                summary = leon.project_watcher.get_all_changes_summary()
+                if not summary or all(v == 0 for v in summary.values()):
+                    return "No file changes detected yet."
+                lines = ["**Project Changes:**\n"]
+                for name, count in summary.items():
+                    lines.append(f"- **{name}**: {count} changes")
+                lines.append("\nUse `/changes <project>` for details.")
+                return "\n".join(lines)
+            return "Project watcher not available."
+
+        elif cmd == "/export":
+            if hasattr(leon, 'memory'):
+                recent = leon.memory.get_recent_context(limit=100)
+                if not recent:
+                    return "No conversation history to export."
+                lines = [f"# Leon Conversation Export — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
+                for msg in recent:
+                    role = msg.get("role", "?").upper()
+                    content = msg.get("content", "")
+                    ts = msg.get("timestamp", "")[:19]
+                    lines.append(f"**[{ts}] {role}:**\n{content}\n")
+                export_path = f"data/conversation_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                with open(export_path, "w") as f:
+                    f.write("\n".join(lines))
+                return f"Exported {len(recent)} messages to `{export_path}`"
+            return "Memory system not available."
+
+        elif cmd == "/context":
+            if hasattr(leon, 'memory'):
+                conversations = len(leon.memory.get_recent_context(limit=9999))
+                active = leon.memory.get_all_active_tasks()
+                projects = leon.memory.list_projects()
+                lines = [
+                    "**Memory Context:**\n",
+                    f"- Conversations stored: {conversations}",
+                    f"- Active tasks: {len(active)}",
+                    f"- Known projects: {len(projects)}",
+                ]
+                for p in projects:
+                    ctx = leon.memory.get_project_context(p.get("name", ""))
+                    ctx_size = len(json.dumps(ctx)) if ctx else 0
+                    lines.append(f"  - {p.get('name', '?')}: {ctx_size} bytes context")
+                if hasattr(leon, 'agent_index'):
+                    stats = leon.agent_index.get_stats()
+                    lines.append(f"- Agent history: {stats['total_runs']} runs indexed")
+                if hasattr(leon, 'screen_awareness'):
+                    lines.append(f"- Screen history: {len(leon.screen_awareness.history)} snapshots")
+                return "\n".join(lines)
+            return "Memory system not available."
+
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -577,6 +716,9 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/screen` — screen awareness status (`/screen history` for log)\n"
                 "- `/gpu` — GPU usage and temperature\n"
                 "- `/clipboard` — clipboard contents (`/clipboard history`)\n"
+                "- `/changes` — file changes in projects (`/changes <project>`)\n"
+                "- `/export` — export conversation history to markdown\n"
+                "- `/context` — memory usage and context stats\n"
                 "- `/bridge` — Right Brain connection status\n"
                 "- `/setkey <key>` — store API key in vault\n"
                 "- `/vault list` — show stored vault keys\n"
@@ -723,6 +865,7 @@ def create_app(leon_core=None) -> web.Application:
     # Routes
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_get("/api/health", api_health)
     app.router.add_post("/api/message", api_message)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)

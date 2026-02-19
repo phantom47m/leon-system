@@ -1091,6 +1091,45 @@ class TestNotifications(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# PROJECT WATCHER
+# ══════════════════════════════════════════════════════════
+
+class TestProjectWatcher(unittest.TestCase):
+    def test_init(self):
+        from core.project_watcher import ProjectWatcher
+        pw = ProjectWatcher([
+            {"name": "test", "path": "/tmp/nonexistent"},
+        ])
+        self.assertIn("test", pw.projects)
+
+    def test_get_changes_empty(self):
+        from core.project_watcher import ProjectWatcher
+        pw = ProjectWatcher([])
+        self.assertEqual(pw.get_recent_changes("nonexistent"), [])
+
+    def test_changes_summary(self):
+        from core.project_watcher import ProjectWatcher
+        pw = ProjectWatcher([])
+        pw._changes = {"proj1": [{"path": "a.py", "type": "modified"}]}
+        summary = pw.get_all_changes_summary()
+        self.assertEqual(summary["proj1"], 1)
+
+    def test_auto_commit_disabled(self):
+        from core.project_watcher import ProjectWatcher
+        pw = ProjectWatcher([
+            {"name": "test", "path": str(ROOT), "auto_commit": False},
+        ])
+        result = pw.auto_commit("test")
+        self.assertIn("disabled", result)
+
+    def test_auto_commit_unknown_project(self):
+        from core.project_watcher import ProjectWatcher
+        pw = ProjectWatcher([])
+        result = pw.auto_commit("nonexistent")
+        self.assertIn("Unknown", result)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

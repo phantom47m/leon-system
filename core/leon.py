@@ -33,6 +33,7 @@ from .system_skills import SystemSkills
 from .hotkey_listener import HotkeyListener
 from .screen_awareness import ScreenAwareness
 from .notifications import NotificationManager, Priority
+from .project_watcher import ProjectWatcher
 
 logger = logging.getLogger("leon")
 
@@ -156,6 +157,11 @@ class Leon:
         # Notification manager — unified desktop alerts
         self.notifications = NotificationManager()
 
+        # Project watcher — monitor file changes in configured projects
+        self.project_watcher = ProjectWatcher(
+            self.projects_config.get("projects", [])
+        )
+
         # Screen awareness — monitor what user is doing
         self.screen_awareness = ScreenAwareness(
             api_client=self.api,
@@ -250,6 +256,13 @@ class Leon:
             logger.info("Hotkey listener active — push-to-talk ready")
         except Exception as e:
             logger.warning(f"Hotkey listener failed to start: {e}")
+
+        # Start project watcher
+        try:
+            self.project_watcher.start()
+            logger.info("Project watcher active")
+        except Exception as e:
+            logger.warning(f"Project watcher failed: {e}")
 
         # Start notification manager
         await self.notifications.start()
@@ -355,6 +368,8 @@ class Leon:
             self._whatsapp_process = None
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+        if self.project_watcher:
+            self.project_watcher.stop()
         if self.screen_awareness:
             await self.screen_awareness.stop()
         if self.notifications:
@@ -1052,6 +1067,9 @@ spawned_by: Leon v1.0
                                 logger.error(f"Scheduled task failed: {sched_task['name']}: {e}")
                             self.scheduler.mark_completed(sched_task["name"])
 
+                # Watchdog: check agent resource usage
+                await self._watchdog_check()
+
                 # Periodic save
                 self.memory.save()
 
@@ -1065,6 +1083,53 @@ spawned_by: Leon v1.0
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
+
+    async def _watchdog_check(self):
+        """Monitor agent processes for excessive resource usage or zombie state."""
+        try:
+            for agent_id, agent_info in list(self.agent_manager.active_agents.items()):
+                proc = agent_info.get("process")
+                if not proc or proc.poll() is not None:
+                    continue
+
+                pid = proc.pid
+                try:
+                    # Read /proc/<pid>/stat for CPU and memory
+                    stat_path = Path(f"/proc/{pid}/stat")
+                    if not stat_path.exists():
+                        continue
+
+                    # Check RSS memory (field 23 in /proc/pid/stat)
+                    statm_path = Path(f"/proc/{pid}/statm")
+                    if statm_path.exists():
+                        pages = int(statm_path.read_text().split()[1])
+                        rss_mb = (pages * 4096) / (1024 * 1024)
+
+                        # Warn if agent uses > 2GB RAM
+                        if rss_mb > 2048:
+                            logger.warning(
+                                f"Watchdog: Agent {agent_id} (PID {pid}) using {rss_mb:.0f} MB RAM"
+                            )
+                            self.notifications.push_system(
+                                f"Agent #{agent_id[-8:]} high memory",
+                                f"Using {rss_mb:.0f} MB RAM — may need attention",
+                            )
+
+                        # Kill if > 4GB (runaway process)
+                        if rss_mb > 4096:
+                            logger.error(
+                                f"Watchdog: Killing agent {agent_id} — {rss_mb:.0f} MB RAM (runaway)"
+                            )
+                            await self.agent_manager.terminate_agent(agent_id)
+                            self.notifications.push_system(
+                                f"Agent #{agent_id[-8:]} killed",
+                                f"Exceeded 4 GB memory limit ({rss_mb:.0f} MB)",
+                                urgent=True,
+                            )
+                except (ValueError, FileNotFoundError, PermissionError):
+                    pass
+        except Exception as e:
+            logger.debug(f"Watchdog error: {e}")
 
     async def _handle_screen_insight(self, insight: str):
         """Called by ScreenAwareness when it has a proactive suggestion."""
