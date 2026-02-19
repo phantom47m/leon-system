@@ -4,188 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LEON — Neural Interface</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=11">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=12">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <!-- 3D Brain Container -->
+    <!-- 3D Brain — HERO (full screen) -->
     <div id="brain-container"></div>
 
-    <!-- HUD Overlay -->
+    <!-- HUD Overlay — minimal, edges only -->
     <div id="hud">
-        <!-- Top Bar -->
+
+        <!-- Top Bar — slim, transparent -->
         <div id="top-bar">
             <div class="logo">
                 <span class="logo-icon">&#x2B21;</span>
                 <span class="logo-text">LEON</span>
-                <span class="logo-sub">NEURAL INTERFACE v3.0</span>
             </div>
             <div class="top-stats">
-                <div class="top-stat">
-                    <span class="top-stat-label">UPTIME</span>
-                    <span class="top-stat-value" id="stat-uptime">00:00:00</span>
-                </div>
-                <div class="top-stat">
-                    <span class="top-stat-label">COMPLETED</span>
-                    <span class="top-stat-value" id="stat-completed">0</span>
-                </div>
-                <div class="top-stat">
-                    <span class="top-stat-label">QUEUED</span>
-                    <span class="top-stat-value" id="stat-queued">0</span>
-                </div>
+                <span class="hud-chip"><span class="hud-label">UP</span><span id="stat-uptime" class="hud-val">00:00:00</span></span>
+                <span class="hud-chip"><span class="hud-label">DONE</span><span id="stat-completed" class="hud-val">0</span></span>
+                <span class="hud-chip"><span class="hud-label">Q</span><span id="stat-queued" class="hud-val">0</span></span>
             </div>
             <div class="top-right">
+                <span id="voice-state" class="hud-chip voice-chip">VOICE: OFF</span>
                 <div class="indicator" id="ws-indicator">
                     <span class="dot pulse" id="ws-dot"></span>
-                    <span id="ws-status-text">CONNECTING</span>
+                    <span id="ws-status-text">ONLINE</span>
                 </div>
             </div>
         </div>
 
-        <!-- Left Panel — Left Brain Info -->
-        <div id="left-panel" class="panel">
-            <div class="panel-header">
-                <span class="panel-icon">&#x25C9;</span>
-                LEFT HEMISPHERE
+        <!-- Left Edge — Hemisphere status + gauges (compact vertical strip) -->
+        <div id="left-strip">
+            <div class="strip-section">
+                <div class="strip-label cyan">LEFT BRAIN</div>
+                <div id="left-status" class="strip-status active">ACTIVE</div>
             </div>
-            <div class="panel-label">AWARENESS CORE</div>
-            <div id="left-status" class="status active">&#x25CF; ACTIVE</div>
-            <div class="panel-stats">
-                <div class="stat">
-                    <span class="stat-label">Memory</span>
-                    <div class="stat-bar"><div class="stat-fill" style="width: 78%"></div></div>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Context</span>
-                    <div class="stat-bar"><div class="stat-fill" style="width: 92%"></div></div>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Listening</span>
-                    <div class="stat-bar"><div class="stat-fill listening" style="width: 100%"></div></div>
-                </div>
+            <div class="strip-gauge">
+                <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill cpu" id="gauge-cpu" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
+                <span class="gauge-value" id="gauge-cpu-val">--%</span>
+                <span class="gauge-label">CPU</span>
             </div>
-            <div class="panel-detail">
-                <div id="voice-state">Voice: Standby</div>
-                <div>Owner Memory: Active</div>
-                <div>Context Window: 92%</div>
+            <div class="strip-gauge">
+                <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill mem" id="gauge-mem" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
+                <span class="gauge-value" id="gauge-mem-val">--%</span>
+                <span class="gauge-label">RAM</span>
+            </div>
+            <div class="strip-gauge">
+                <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill disk" id="gauge-disk" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
+                <span class="gauge-value" id="gauge-disk-val">--%</span>
+                <span class="gauge-label">DSK</span>
             </div>
         </div>
 
-        <!-- Right Panel — Right Brain Info -->
-        <div id="right-panel" class="panel">
-            <div class="panel-header">
-                <span class="panel-icon">&#x25C9;</span>
-                RIGHT HEMISPHERE
-                <span id="right-brain-location" class="brain-location" style="display:none"></span>
+        <!-- Right Edge — Agents + action status (compact vertical strip) -->
+        <div id="right-strip">
+            <div class="strip-section">
+                <div class="strip-label orange">RIGHT BRAIN</div>
+                <div id="right-status" class="strip-status active">ACTIVE</div>
             </div>
-            <div class="panel-label">ACTION CORE</div>
-            <div id="right-status" class="status active">&#x25CF; ACTIVE</div>
-            <div class="panel-stats">
-                <div class="stat">
-                    <span class="stat-label">Agents</span>
-                    <span class="stat-value" id="agent-count">0</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Tasks</span>
-                    <span class="stat-value" id="task-count">0</span>
-                </div>
-                <div class="stat">
-                    <span class="stat-label">Load</span>
-                    <div class="stat-bar"><div id="load-fill" class="stat-fill right-fill" style="width: 0%"></div></div>
-                </div>
+            <div class="strip-section">
+                <div class="strip-label orange">AGENTS</div>
+                <div class="strip-big" id="agent-count">0</div>
             </div>
-            <div class="panel-detail">
-                <div>OpenClaw: Connected</div>
-                <div>Agents: Ready</div>
-                <div>Web Control: Standby</div>
+            <div class="strip-section">
+                <div class="strip-label orange">TASKS</div>
+                <div class="strip-big" id="task-count">0</div>
             </div>
+            <div id="agents-list" class="strip-agents"></div>
         </div>
 
-        <!-- System Stats Panel -->
-        <div id="system-stats-panel">
-            <div class="panel-header">
-                <span class="panel-icon">&#x25A3;</span>
-                SYSTEM RESOURCES
-            </div>
-            <div class="gauge-row">
-                <div class="gauge">
-                    <div class="gauge-ring">
-                        <svg viewBox="0 0 36 36">
-                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
-                            <circle class="gauge-fill cpu" id="gauge-cpu" cx="18" cy="18" r="15.5"
-                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
-                        </svg>
-                        <div class="gauge-value" id="gauge-cpu-val">--%</div>
-                    </div>
-                    <span class="gauge-label">CPU</span>
-                </div>
-                <div class="gauge">
-                    <div class="gauge-ring">
-                        <svg viewBox="0 0 36 36">
-                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
-                            <circle class="gauge-fill mem" id="gauge-mem" cx="18" cy="18" r="15.5"
-                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
-                        </svg>
-                        <div class="gauge-value" id="gauge-mem-val">--%</div>
-                    </div>
-                    <span class="gauge-label">RAM</span>
-                </div>
-                <div class="gauge">
-                    <div class="gauge-ring">
-                        <svg viewBox="0 0 36 36">
-                            <circle class="gauge-bg" cx="18" cy="18" r="15.5" />
-                            <circle class="gauge-fill disk" id="gauge-disk" cx="18" cy="18" r="15.5"
-                                stroke-dasharray="97.4" stroke-dashoffset="97.4" />
-                        </svg>
-                        <div class="gauge-value" id="gauge-disk-val">--%</div>
-                    </div>
-                    <span class="gauge-label">DISK</span>
-                </div>
+        <!-- Bottom — Chat log (slim, collapsible feel) -->
+        <div id="chat-strip">
+            <div id="activity-feed">
+                <div class="feed-item feed-system"><span class="feed-time">--:--</span> Ready. Type below or say "Hey Leon".</div>
             </div>
         </div>
-
-        <!-- Active Agents Panel -->
-        <div id="agents-panel">
-            <div class="panel-header">
-                <span class="panel-icon">&#x2699;</span>
-                ACTIVE AGENTS
-            </div>
-            <div id="agents-list"></div>
-        </div>
-
-        <!-- Bottom Panel — Neural Bridge + Chat Log -->
-        <div id="bottom-panel">
-            <div class="bottom-left">
-                <div class="panel-header">
-                    <span class="panel-icon">&#x2B21;</span>
-                    NEURAL BRIDGE
-                </div>
-                <div id="bridge-status" class="status synced">&#x25CF; SYNCED</div>
-                <div class="bridge-visual">
-                    <span class="bridge-node left-node">L</span>
-                    <span class="bridge-line"></span>
-                    <span class="bridge-signal"></span>
-                    <span class="bridge-line"></span>
-                    <span class="bridge-node right-node">R</span>
-                </div>
-            </div>
-            <div class="bottom-right" id="chat-panel">
-                <div class="panel-header">
-                    <span class="panel-icon">&#x25A4;</span>
-                    COMMAND LOG
-                    <span id="chat-count" class="chat-count">0</span>
-                </div>
-                <div id="activity-feed">
-                    <div class="feed-item feed-system"><span class="feed-time">--:--</span> Neural interface initialized. Type /help for commands.</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Corner Decorations -->
-        <div class="corner top-left-corner"></div>
-        <div class="corner top-right-corner"></div>
-        <div class="corner bottom-left-corner"></div>
-        <div class="corner bottom-right-corner"></div>
 
         <!-- Scan Lines -->
         <div class="scanlines"></div>
@@ -204,17 +98,12 @@
         </div>
     </div>
 
-    <!-- Command Input Bar -->
+    <!-- Command Bar — fixed bottom center -->
     <div id="command-bar" class="command-bar">
-        <span class="command-prefix">LEON &gt;</span>
-        <input type="text" id="command-input" placeholder="Type a message or /help ..." autocomplete="off" spellcheck="false" aria-label="Command input">
-        <button id="command-send" aria-label="Send command">SEND</button>
+        <span class="command-prefix">&#x2B21;</span>
+        <input type="text" id="command-input" placeholder="Talk to Leon..." autocomplete="off" spellcheck="false" aria-label="Command input">
+        <button id="command-send" aria-label="Send command">&#x27A4;</button>
         <div class="command-bar-loading" id="command-loading"></div>
-    </div>
-
-    <!-- Keyboard Shortcut Hint -->
-    <div class="kbd-hint" id="kbd-hint">
-        <kbd>/</kbd> focus &nbsp; <kbd>Esc</kbd> blur &nbsp; <kbd>Enter</kbd> send
     </div>
 
     <script type="importmap">
@@ -225,7 +114,7 @@
         }
     }
     </script>
-    <script type="module" src="/static/js/brain.js?v=11"></script>
+    <script type="module" src="/static/js/brain.js?v=12"></script>
     <script>
         window.onerror = function(msg, url, line) {
             var el = document.getElementById('brain-container');

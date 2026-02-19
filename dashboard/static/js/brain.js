@@ -886,46 +886,15 @@ function updateUI() {
     // Left brain
     const leftStatus = document.getElementById('left-status');
     if (leftStatus) {
-        leftStatus.innerHTML = brainState.leftActive ? '&#x25CF; ACTIVE' : '&#x25CB; Idle';
-        leftStatus.className = brainState.leftActive ? 'status active' : 'status idle';
+        leftStatus.textContent = brainState.leftActive ? 'ACTIVE' : 'IDLE';
+        leftStatus.className = brainState.leftActive ? 'strip-status active' : 'strip-status idle';
     }
 
     // Right brain
     const rightStatus = document.getElementById('right-status');
     if (rightStatus) {
-        rightStatus.innerHTML = brainState.rightActive ? '&#x25CF; ACTIVE' : '&#x25CB; Idle';
-        rightStatus.className = brainState.rightActive ? 'status active' : 'status idle';
-    }
-
-    // Bridge
-    const bridgeStatus = document.getElementById('bridge-status');
-    if (bridgeStatus) {
-        if (brainState.brainRole === 'left') {
-            if (brainState.bridgeConnected) {
-                bridgeStatus.innerHTML = '&#x25CF; CONNECTED';
-                bridgeStatus.className = 'status synced';
-            } else {
-                bridgeStatus.innerHTML = '&#x25CB; DISCONNECTED';
-                bridgeStatus.className = 'status idle';
-            }
-        } else {
-            bridgeStatus.innerHTML = brainState.bridgeActive ? '&#x25CF; SYNCED' : '&#x25CB; Idle';
-            bridgeStatus.className = brainState.bridgeActive ? 'status synced' : 'status idle';
-        }
-    }
-
-    // Right Brain location
-    const rightLabel = document.getElementById('right-brain-location');
-    if (rightLabel) {
-        if (brainState.brainRole === 'left' && brainState.rightBrainOnline) {
-            rightLabel.textContent = 'HOMELAB';
-            rightLabel.style.display = '';
-        } else if (brainState.brainRole === 'left') {
-            rightLabel.textContent = 'OFFLINE';
-            rightLabel.style.display = '';
-        } else {
-            rightLabel.style.display = 'none';
-        }
+        rightStatus.textContent = brainState.rightActive ? 'ACTIVE' : 'IDLE';
+        rightStatus.className = brainState.rightActive ? 'strip-status active' : 'strip-status idle';
     }
 
     // Counts
@@ -934,14 +903,6 @@ function updateUI() {
 
     const taskCount = document.getElementById('task-count');
     if (taskCount) taskCount.textContent = brainState.taskCount || 0;
-
-    // Load bar
-    const loadFill = document.getElementById('load-fill');
-    if (loadFill) {
-        const max = brainState.maxConcurrent || 5;
-        const active = brainState.agentCount || 0;
-        loadFill.style.width = Math.min(100, Math.round((active / max) * 100)) + '%';
-    }
 
     updateSystemStats();
     updateAgentsPanel();
@@ -967,7 +928,7 @@ function updateAgentsPanel() {
     const agents = brainState.activeAgents || [];
 
     if (agents.length === 0) {
-        agentsList.innerHTML = '<div class="agents-empty">No active agents</div>';
+        agentsList.innerHTML = '<div class="agents-empty">IDLE</div>';
         return;
     }
 
@@ -978,21 +939,14 @@ function updateAgentsPanel() {
             const elapsedSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
             const min = Math.floor(elapsedSec / 60);
             const sec = elapsedSec % 60;
-            elapsed = `${min}m ${sec.toString().padStart(2, '0')}s`;
+            elapsed = `${min}m${sec.toString().padStart(2, '0')}s`;
         }
 
-        const desc = escapeHtml(agent.description || 'Working...');
-        const project = escapeHtml(agent.project || '');
+        const desc = escapeHtml((agent.description || 'Working...').substring(0, 20));
 
         return `<div class="agent-card">
-            <div class="agent-card-top">
-                <span class="agent-status-dot"></span>
-                <span class="agent-desc">${desc}</span>
-            </div>
-            <div class="agent-card-bottom">
-                ${project ? `<span class="agent-project">${project}</span>` : ''}
-                ${elapsed ? `<span class="agent-elapsed">${elapsed}</span>` : ''}
-            </div>
+            <span class="agent-desc">${desc}</span>
+            ${elapsed ? `<span class="agent-elapsed">${elapsed}</span>` : ''}
         </div>`;
     }).join('');
 }
@@ -1009,21 +963,23 @@ function updateVoiceState() {
     if (!el) return;
     const voice = brainState.voice || {};
     if (!voice.active) {
-        el.textContent = 'Voice: Offline';
+        el.textContent = 'VOICE: OFF';
+        el.classList.remove('active');
         return;
     }
     const state = voice.state || 'unknown';
     const labels = {
-        idle: 'Voice: Idle',
-        listening: 'Voice: Listening',
-        awake: 'Voice: Awake',
-        processing: 'Voice: Processing...',
-        speaking: 'Voice: Speaking',
-        sleeping: 'Voice: Sleeping',
-        stopped: 'Voice: Stopped',
-        degraded: 'Voice: Degraded',
+        idle: 'VOICE: IDLE',
+        listening: 'VOICE: LISTENING',
+        awake: 'VOICE: AWAKE',
+        processing: 'VOICE: THINKING',
+        speaking: 'VOICE: SPEAKING',
+        sleeping: 'VOICE: SLEEP',
+        stopped: 'VOICE: OFF',
+        degraded: 'VOICE: DEGRADED',
     };
-    el.textContent = labels[state] || `Voice: ${state}`;
+    el.textContent = labels[state] || `VOICE: ${state.toUpperCase()}`;
+    el.classList.toggle('active', state === 'listening' || state === 'awake' || state === 'speaking');
 }
 
 // ── HEALTH POLLING ──────────────────────────────────────
