@@ -27,7 +27,41 @@ class SystemSkills:
     def __init__(self):
         self._timers: list[dict] = []
         self._timer_id = 0
+        self._clipboard_history: list[dict] = []
+        self._clipboard_max = 50
+        self._clipboard_last = ""
+        self._clipboard_thread = None
+        self._clipboard_running = False
+        self._start_clipboard_monitor()
         logger.info("System skills module loaded")
+
+    def _start_clipboard_monitor(self):
+        """Start background thread that polls clipboard for changes."""
+        self._clipboard_running = True
+
+        def _monitor():
+            while self._clipboard_running:
+                try:
+                    result = subprocess.run(
+                        ["xclip", "-selection", "clipboard", "-o"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    if result.returncode == 0:
+                        content = result.stdout[:500]
+                        if content and content != self._clipboard_last:
+                            self._clipboard_last = content
+                            self._clipboard_history.append({
+                                "content": content,
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                            if len(self._clipboard_history) > self._clipboard_max:
+                                self._clipboard_history = self._clipboard_history[-self._clipboard_max:]
+                except Exception:
+                    pass
+                time.sleep(3)
+
+        self._clipboard_thread = threading.Thread(target=_monitor, daemon=True)
+        self._clipboard_thread.start()
 
     # ------------------------------------------------------------------
     # Skill registry — used by AI router to pick the right skill
@@ -102,6 +136,23 @@ WEB/SEARCH:
 - web_search(query) — Open a Google search
 - define(word) — Look up a word definition
 - weather(location) — Current weather
+
+GPU:
+- gpu_usage() — GPU utilization, memory, and temperature (NVIDIA/AMD)
+- gpu_temp() — GPU temperature only
+
+CLIPBOARD:
+- clipboard_history() — Show recent clipboard entries
+- clipboard_search(query) — Search clipboard history
+
+WINDOW MANAGEMENT:
+- list_workspaces() — List available workspaces
+- move_to_workspace(n) — Move to workspace number N
+- tile_left() — Tile current window to left half
+- tile_right() — Tile current window to right half
+- minimize_window() — Minimize current window
+- maximize_window() — Maximize/restore current window
+- close_window() — Close current window
 
 DEV TOOLS:
 - git_status(path) — Git status for a project
@@ -827,6 +878,195 @@ DEV TOOLS:
             return result.stdout.strip() or "Could not fetch weather."
         except subprocess.TimeoutExpired:
             return "Weather request timed out."
+
+    # ==================================================================
+    # GPU
+    # ==================================================================
+
+    def gpu_usage(self) -> str:
+        """Get GPU utilization, memory, and temperature."""
+        # Try NVIDIA first
+        if shutil.which("nvidia-smi"):
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = ["**GPU Status (NVIDIA):**\n"]
+                for line in result.stdout.strip().split("\n"):
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 5:
+                        lines.append(
+                            f"- {parts[0]}: {parts[1]}% utilization, "
+                            f"{parts[2]}/{parts[3]} MB VRAM, {parts[4]} C"
+                        )
+                return "\n".join(lines)
+
+        # Try AMD
+        if shutil.which("rocm-smi"):
+            result = subprocess.run(
+                ["rocm-smi", "--showuse", "--showtemp", "--showmeminfo", "vram"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return "**GPU Status (AMD):**\n\n" + result.stdout.strip()
+
+        # Try generic (lspci + sensors)
+        result = subprocess.run(
+            ["lspci"],
+            capture_output=True, text=True,
+        )
+        gpu_lines = [l for l in result.stdout.split("\n") if "VGA" in l or "3D" in l]
+        if gpu_lines:
+            return "GPU detected but no monitoring tool found:\n" + "\n".join(gpu_lines) + \
+                   "\n\nInstall nvidia-smi (NVIDIA) or rocm-smi (AMD) for detailed stats."
+        return "No GPU detected."
+
+    def gpu_temp(self) -> str:
+        """Get GPU temperature only."""
+        if shutil.which("nvidia-smi"):
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return f"GPU temperature: {result.stdout.strip()} C"
+
+        if shutil.which("rocm-smi"):
+            result = subprocess.run(
+                ["rocm-smi", "--showtemp"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+
+        return "GPU temperature not available — install nvidia-smi or rocm-smi."
+
+    # ==================================================================
+    # CLIPBOARD HISTORY
+    # ==================================================================
+
+    def clipboard_history(self) -> str:
+        """Show recent clipboard entries."""
+        if not self._clipboard_history:
+            return "Clipboard history is empty."
+        lines = ["**Clipboard History:**\n"]
+        for i, entry in enumerate(reversed(self._clipboard_history[:20]), 1):
+            ts = entry["timestamp"][11:19]  # HH:MM:SS
+            content = entry["content"][:80].replace("\n", " ")
+            lines.append(f"{i}. [{ts}] {content}")
+        return "\n".join(lines)
+
+    def clipboard_search(self, query: str) -> str:
+        """Search clipboard history for a query."""
+        query_lower = query.lower()
+        matches = [
+            e for e in self._clipboard_history
+            if query_lower in e["content"].lower()
+        ]
+        if not matches:
+            return f"No clipboard entries matching '{query}'."
+        lines = [f"**Clipboard matches for '{query}':**\n"]
+        for entry in reversed(matches[-10:]):
+            ts = entry["timestamp"][11:19]
+            content = entry["content"][:100].replace("\n", " ")
+            lines.append(f"[{ts}] {content}")
+        return "\n".join(lines)
+
+    # ==================================================================
+    # WINDOW MANAGEMENT
+    # ==================================================================
+
+    def list_workspaces(self) -> str:
+        """List available workspaces."""
+        # Try wmctrl
+        if shutil.which("wmctrl"):
+            result = subprocess.run(
+                ["wmctrl", "-d"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                return "Workspaces:\n" + result.stdout.strip()
+
+        # Fallback: xdotool
+        if shutil.which("xdotool"):
+            result = subprocess.run(
+                ["xdotool", "get_num_desktops"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                num = result.stdout.strip()
+                current = subprocess.run(
+                    ["xdotool", "get_desktop"],
+                    capture_output=True, text=True,
+                )
+                cur = current.stdout.strip() if current.returncode == 0 else "?"
+                return f"Workspaces: {num} total, currently on workspace {cur}"
+        return "Could not list workspaces — wmctrl or xdotool not available."
+
+    def move_to_workspace(self, n: int) -> str:
+        """Switch to workspace N (0-indexed)."""
+        n = int(n)
+        result = subprocess.run(
+            ["xdotool", "set_desktop", str(n)],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return f"Switched to workspace {n}."
+        # Try wmctrl
+        result = subprocess.run(
+            ["wmctrl", "-s", str(n)],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return f"Switched to workspace {n}."
+        return f"Failed to switch to workspace {n}."
+
+    def tile_left(self) -> str:
+        """Tile the current window to the left half of the screen."""
+        # Use xdotool key combo
+        subprocess.run(
+            ["xdotool", "key", "super+Left"],
+            capture_output=True,
+        )
+        return "Window tiled to left."
+
+    def tile_right(self) -> str:
+        """Tile the current window to the right half of the screen."""
+        subprocess.run(
+            ["xdotool", "key", "super+Right"],
+            capture_output=True,
+        )
+        return "Window tiled to right."
+
+    def minimize_window(self) -> str:
+        """Minimize the current window."""
+        result = subprocess.run(
+            ["xdotool", "getactivewindow", "windowminimize"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return "Window minimized."
+        return "Failed to minimize window."
+
+    def maximize_window(self) -> str:
+        """Maximize or restore the current window."""
+        subprocess.run(
+            ["xdotool", "key", "super+Up"],
+            capture_output=True,
+        )
+        return "Window maximized."
+
+    def close_window(self) -> str:
+        """Close the current window."""
+        result = subprocess.run(
+            ["xdotool", "getactivewindow", "windowclose"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return "Window closed."
+        return "Failed to close window."
 
     # ==================================================================
     # DEV TOOLS

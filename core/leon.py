@@ -567,6 +567,9 @@ class Leon:
             "search for", "google", "define", "weather",
             "git status", "npm", "pip install", "port",
             "what's eating", "what's hogging", "what's running",
+            "gpu", "graphics card", "vram", "cuda",
+            "clipboard history", "clipboard search", "what did i copy",
+            "workspace", "tile", "minimize", "maximize", "snap",
         ]
         if any(hint in msg for hint in system_hints):
             skill_result = await self._route_to_system_skill(message)

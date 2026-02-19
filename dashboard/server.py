@@ -497,6 +497,70 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 return "\n".join(lines)
             return "Agent index not available."
 
+        elif cmd == "/notifications":
+            if hasattr(leon, 'notifications'):
+                if arg == "stats":
+                    stats = leon.notifications.get_stats()
+                    return (
+                        f"**Notification Stats:**\n\n"
+                        f"- Total sent: {stats['total']}\n"
+                        f"- Pending: {stats['pending']}\n"
+                        f"- By source: {json.dumps(stats['by_source'])}\n"
+                        f"- By priority: {json.dumps(stats['by_priority'])}"
+                    )
+                recent = leon.notifications.get_recent(15)
+                if not recent:
+                    return "No notifications yet."
+                lines = ["**Recent Notifications:**\n"]
+                for n in reversed(recent):
+                    icon = {"LOW": "-", "NORMAL": "*", "HIGH": "!", "URGENT": "!!!"}.get(n["priority"], "*")
+                    delivered = "sent" if n["delivered"] else "dropped"
+                    ts = n["timestamp"][:16] if n["timestamp"] else ""
+                    lines.append(f"[{icon}] {ts} [{n['source']}] **{n['title']}** — {n['message'][:80]} ({delivered})")
+                return "\n".join(lines)
+            return "Notification system not available."
+
+        elif cmd == "/screen":
+            if hasattr(leon, 'screen_awareness'):
+                ctx = leon.screen_awareness.get_context()
+                if arg == "history":
+                    history = leon.screen_awareness.get_recent_activity(10)
+                    if not history:
+                        return "No screen activity recorded yet."
+                    lines = ["**Screen Activity History:**\n"]
+                    for h in reversed(history):
+                        ts = h.get("timestamp", "")[:16]
+                        err = " [ERROR VISIBLE]" if h.get("error_visible") else ""
+                        lines.append(f"[{ts}] {h.get('activity', '?')} ({h.get('category', '?')}){err}")
+                    return "\n".join(lines)
+                return (
+                    f"**Screen Awareness:**\n\n"
+                    f"- Active app: {ctx.get('active_app', 'unknown')}\n"
+                    f"- Activity: {ctx.get('activity', 'unknown')}\n"
+                    f"- Category: {ctx.get('category', 'N/A')}\n"
+                    f"- Mood: {ctx.get('mood', 'N/A')}\n"
+                    f"- Last update: {ctx.get('last_update', 'never')}\n"
+                    f"- Monitoring: {'ON' if ctx.get('monitoring') else 'OFF'}\n"
+                    f"- History entries: {ctx.get('history_count', 0)}\n\n"
+                    f"Use `/screen history` for activity log."
+                )
+            return "Screen awareness not available."
+
+        elif cmd == "/gpu":
+            if hasattr(leon, 'system_skills'):
+                result = leon.system_skills.gpu_usage()
+                return result
+            return "System skills not available."
+
+        elif cmd == "/clipboard":
+            if hasattr(leon, 'system_skills'):
+                if arg == "history":
+                    result = leon.system_skills.clipboard_history()
+                    return result
+                result = leon.system_skills.clipboard_get()
+                return result
+            return "System skills not available."
+
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -509,6 +573,10 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/search <query>` — search agent history\n"
                 "- `/stats` — agent run statistics\n"
                 "- `/schedule` — view scheduled tasks\n"
+                "- `/notifications` — recent notifications (`/notifications stats` for stats)\n"
+                "- `/screen` — screen awareness status (`/screen history` for log)\n"
+                "- `/gpu` — GPU usage and temperature\n"
+                "- `/clipboard` — clipboard contents (`/clipboard history`)\n"
                 "- `/bridge` — Right Brain connection status\n"
                 "- `/setkey <key>` — store API key in vault\n"
                 "- `/vault list` — show stored vault keys\n"

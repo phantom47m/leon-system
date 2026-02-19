@@ -861,6 +861,39 @@ class TestSystemSkills(unittest.TestCase):
         result = self.skills.open_app("definitely_not_a_real_app_12345")
         self.assertIn("not found", result)
 
+    def test_gpu_usage(self):
+        result = self.skills.gpu_usage()
+        self.assertIsInstance(result, str)
+        # Should return something (even "No GPU detected")
+        self.assertTrue(len(result) > 0)
+
+    def test_gpu_temp(self):
+        result = self.skills.gpu_temp()
+        self.assertIsInstance(result, str)
+
+    def test_clipboard_history_empty_initially(self):
+        from core.system_skills import SystemSkills
+        # Fresh instance won't have history yet
+        fresh = SystemSkills()
+        fresh._clipboard_history = []
+        result = fresh.clipboard_history()
+        self.assertIn("empty", result)
+
+    def test_clipboard_search_no_results(self):
+        result = self.skills.clipboard_search("xyznonexistent12345")
+        self.assertIn("No clipboard entries", result)
+
+    def test_list_workspaces(self):
+        result = self.skills.list_workspaces()
+        self.assertIsInstance(result, str)
+
+    def test_close_window_skill_exists(self):
+        self.assertTrue(hasattr(self.skills, 'close_window'))
+        self.assertTrue(hasattr(self.skills, 'tile_left'))
+        self.assertTrue(hasattr(self.skills, 'tile_right'))
+        self.assertTrue(hasattr(self.skills, 'minimize_window'))
+        self.assertTrue(hasattr(self.skills, 'maximize_window'))
+
 
 # ══════════════════════════════════════════════════════════
 # HOTKEY LISTENER
