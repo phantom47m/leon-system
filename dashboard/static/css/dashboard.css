@@ -28,7 +28,22 @@
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 html { font-size: 16px; -webkit-font-smoothing: antialiased; }
-body { background: var(--bg-deep); color: var(--text); font-family: var(--font-body); overflow: hidden; min-height: 100vh; }
+body {
+    background: var(--bg-deep);
+    color: var(--text);
+    font-family: var(--font-body);
+    overflow: hidden;
+    min-height: 100vh;
+}
+/* Subtle radial vignette */
+body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: radial-gradient(ellipse at center, transparent 30%, rgba(2,8,18,0.7) 100%);
+    pointer-events: none;
+}
 
 /* ── Brain Container — FULL SCREEN ───────────────────── */
 #brain-container {
@@ -181,7 +196,7 @@ body { background: var(--bg-deep); color: var(--text); font-family: var(--font-b
     border: 1px solid var(--border);
     border-radius: 8px;
     backdrop-filter: blur(12px);
-    border-right: 2px solid var(--orange);
+    border-right: 2px solid var(--cyan);
     width: 72px;
 }
 
@@ -198,7 +213,7 @@ body { background: var(--bg-deep); color: var(--text); font-family: var(--font-b
     margin-bottom: 3px;
 }
 .strip-label.cyan { color: var(--cyan); }
-.strip-label.orange { color: var(--orange); }
+.strip-label.orange { color: var(--cyan); }
 
 .strip-status {
     font-family: var(--font-display);
@@ -213,8 +228,8 @@ body { background: var(--bg-deep); color: var(--text); font-family: var(--font-b
     font-family: var(--font-display);
     font-size: 20px;
     font-weight: 900;
-    color: var(--orange);
-    text-shadow: 0 0 10px rgba(255,107,53,0.3);
+    color: var(--cyan);
+    text-shadow: 0 0 10px rgba(0,212,255,0.3);
     line-height: 1;
 }
 

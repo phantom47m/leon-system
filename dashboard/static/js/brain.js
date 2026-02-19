@@ -13,19 +13,22 @@ import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/exam
 
 // ── CONFIG ──────────────────────────────────────────────
 const CFG = {
-    LEFT_CENTER:  new THREE.Vector3(-2.3, 0, 0),
-    RIGHT_CENTER: new THREE.Vector3( 2.3, 0, 0),
-    HEMISPHERE_RADIUS: 1.4,
+    // Symmetric brain — both hemispheres EQUAL
+    LEFT_CENTER:  new THREE.Vector3(-1.2, 0, 0),
+    RIGHT_CENTER: new THREE.Vector3( 1.2, 0, 0),
+    HEMISPHERE_RADIUS: 1.6,
 
-    NODE_COUNT: 350,
-    BRIDGE_PARTICLE_COUNT: 50,
-    AMBIENT_PARTICLE_COUNT: 300,
+    NODE_COUNT: 400,
+    BRIDGE_PARTICLE_COUNT: 60,
+    AMBIENT_PARTICLE_COUNT: 200,
 
+    // Jarvis palette — all cyan/blue/white, matching hemispheres
     LEFT_COLOR:   new THREE.Color(0x00d4ff),
-    RIGHT_COLOR:  new THREE.Color(0xff6b35),
-    BRIDGE_COLOR: new THREE.Color(0xa855f7),
-    ACTIVE_COLOR: new THREE.Color(0x22ff66),
-    BG_COLOR:     0x050510,
+    RIGHT_COLOR:  new THREE.Color(0x00a8ff),  // Slightly different cyan, not orange
+    BRIDGE_COLOR: new THREE.Color(0x44bbff),
+    ACTIVE_COLOR: new THREE.Color(0x00ffcc),
+    RING_COLOR:   new THREE.Color(0x00d4ff),
+    BG_COLOR:     0x020812,
 
     ROTATION_SPEED: 0.0003,
     PULSE_SPEED: 0.02,
@@ -130,6 +133,7 @@ function init() {
     createAmbientParticles();
     createCoreGlow('left');
     createCoreGlow('right');
+    createJarvisRings();
 
     const ambientLight = new THREE.AmbientLight(0x111122, 0.5);
     scene.add(ambientLight);
@@ -158,18 +162,23 @@ function createHemisphere(side) {
     for (let i = 0; i < CFG.NODE_COUNT; i++) {
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const r = CFG.HEMISPHERE_RADIUS * (0.4 + 0.6 * Math.random());
-        const scaleY = 1.15;
+        const r = CFG.HEMISPHERE_RADIUS * (0.5 + 0.5 * Math.random());
+
+        // Brain-like shape: taller, slight front-back elongation
+        const scaleY = 1.2;   // Taller
+        const scaleZ = 1.05;  // Slightly deeper front-to-back
 
         let rawX = r * Math.sin(phi) * Math.cos(theta);
-        if (side === 'left' && rawX > 0) rawX *= 0.3;
-        if (side === 'right' && rawX < 0) rawX *= 0.3;
+        // Flatten inner face slightly (where hemispheres meet)
+        if (side === 'left' && rawX > 0) rawX *= 0.15;
+        if (side === 'right' && rawX < 0) rawX *= 0.15;
 
-        const noise = 0.12 * Math.sin(theta * 6) * Math.cos(phi * 4);
+        // Brain surface folds (sulci) — add organic waviness
+        const fold = 0.08 * Math.sin(theta * 8 + phi * 6) * Math.cos(phi * 3);
 
-        const x = center.x + rawX + noise * 0.5;
-        const y = center.y + (r + noise) * Math.sin(phi) * Math.sin(theta) * scaleY;
-        const z = center.z + (r + noise) * Math.cos(phi);
+        const x = center.x + rawX + fold * 0.3;
+        const y = center.y + (r + fold) * Math.sin(phi) * Math.sin(theta) * scaleY;
+        const z = center.z + (r + fold) * Math.cos(phi) * scaleZ;
 
         positions[i * 3]     = x;
         positions[i * 3 + 1] = y;
@@ -382,6 +391,60 @@ function createCoreGlow(side) {
     scene.add(light);
 }
 
+// ── JARVIS RINGS — Rotating holographic arcs ────────────
+let jarvisRings = [];
+
+function createJarvisRings() {
+    const ringConfigs = [
+        { radius: 3.2, tube: 0.008, arc: Math.PI * 1.6, color: 0x00d4ff, speed: 0.15, tilt: 0.1 },
+        { radius: 3.5, tube: 0.006, arc: Math.PI * 1.3, color: 0x00a8ff, speed: -0.12, tilt: -0.15 },
+        { radius: 3.8, tube: 0.005, arc: Math.PI * 0.9, color: 0x0088cc, speed: 0.08, tilt: 0.25 },
+        { radius: 2.8, tube: 0.007, arc: Math.PI * 1.1, color: 0x00d4ff, speed: -0.2, tilt: -0.05 },
+        { radius: 4.1, tube: 0.004, arc: Math.PI * 0.7, color: 0x006699, speed: 0.06, tilt: 0.3 },
+    ];
+
+    for (const cfg of ringConfigs) {
+        const geometry = new THREE.TorusGeometry(cfg.radius, cfg.tube, 8, 128, cfg.arc);
+        const material = new THREE.MeshBasicMaterial({
+            color: cfg.color,
+            transparent: true,
+            opacity: 0.25,
+            side: THREE.DoubleSide,
+        });
+        const ring = new THREE.Mesh(geometry, material);
+        ring.rotation.x = Math.PI / 2 + cfg.tilt;
+        ring.rotation.z = Math.random() * Math.PI * 2;
+        ring.userData = { speed: cfg.speed, baseTilt: cfg.tilt };
+        scene.add(ring);
+        jarvisRings.push(ring);
+    }
+
+    // Dashed circle rings (like HUD targeting circles)
+    for (let i = 0; i < 3; i++) {
+        const r = 2.5 + i * 0.8;
+        const segments = 128;
+        const points = [];
+        for (let j = 0; j <= segments; j++) {
+            const angle = (j / segments) * Math.PI * 2;
+            points.push(new THREE.Vector3(Math.cos(angle) * r, 0, Math.sin(angle) * r));
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineDashedMaterial({
+            color: 0x00d4ff,
+            transparent: true,
+            opacity: 0.06 + i * 0.02,
+            dashSize: 0.3,
+            gapSize: 0.5 + i * 0.3,
+        });
+        const circle = new THREE.Line(geometry, material);
+        circle.computeLineDistances();
+        circle.rotation.x = Math.PI / 2;
+        circle.userData = { speed: 0.02 * (i % 2 === 0 ? 1 : -1) };
+        scene.add(circle);
+        jarvisRings.push(circle);
+    }
+}
+
 // ── AMBIENT PARTICLES ───────────────────────────────────
 function createAmbientParticles() {
     const geometry = new THREE.BufferGeometry();
@@ -547,6 +610,18 @@ function animate() {
 
     if (ambientParticles) {
         ambientParticles.material.uniforms.uTime.value = time;
+    }
+
+    // Jarvis rings rotation
+    for (const ring of jarvisRings) {
+        ring.rotation.z += ring.userData.speed * 0.01;
+        // Subtle breathing on ring opacity based on brain activity
+        if (ring.material && ring.material.opacity !== undefined) {
+            const baseOpacity = ring.material.userData?.baseOpacity || ring.material.opacity;
+            if (!ring.material.userData) ring.material.userData = {};
+            ring.material.userData.baseOpacity = ring.material.userData.baseOpacity || ring.material.opacity;
+            ring.material.opacity = ring.material.userData.baseOpacity * (0.8 + 0.4 * brainActivity);
+        }
     }
 
     if (brainActivity > 0.1 && Math.random() < signalChance) {
