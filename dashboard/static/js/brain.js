@@ -13,18 +13,18 @@ import { UnrealBloomPass } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/exam
 
 // ── CONFIG ──────────────────────────────────────────────
 const CFG = {
-    // Symmetric brain — both hemispheres EQUAL
-    LEFT_CENTER:  new THREE.Vector3(-1.2, 0, 0),
-    RIGHT_CENTER: new THREE.Vector3( 1.2, 0, 0),
-    HEMISPHERE_RADIUS: 1.6,
+    // Symmetric brain — both hemispheres IDENTICAL
+    LEFT_CENTER:  new THREE.Vector3(-1.1, 0, 0),
+    RIGHT_CENTER: new THREE.Vector3( 1.1, 0, 0),
+    HEMISPHERE_RADIUS: 1.5,
 
-    NODE_COUNT: 400,
-    BRIDGE_PARTICLE_COUNT: 60,
-    AMBIENT_PARTICLE_COUNT: 200,
+    NODE_COUNT: 450,
+    BRIDGE_PARTICLE_COUNT: 80,
+    AMBIENT_PARTICLE_COUNT: 150,
 
-    // Jarvis palette — all cyan/blue/white, matching hemispheres
-    LEFT_COLOR:   new THREE.Color(0x00d4ff),
-    RIGHT_COLOR:  new THREE.Color(0x00a8ff),  // Slightly different cyan, not orange
+    // Both hemispheres same color — unified Jarvis look
+    LEFT_COLOR:   new THREE.Color(0x00bbee),
+    RIGHT_COLOR:  new THREE.Color(0x00bbee),  // SAME color as left
     BRIDGE_COLOR: new THREE.Color(0x44bbff),
     ACTIVE_COLOR: new THREE.Color(0x00ffcc),
     RING_COLOR:   new THREE.Color(0x00d4ff),
@@ -164,19 +164,19 @@ function createHemisphere(side) {
         const phi = Math.acos(2 * Math.random() - 1);
         const r = CFG.HEMISPHERE_RADIUS * (0.5 + 0.5 * Math.random());
 
-        // Brain-like shape: taller, slight front-back elongation
-        const scaleY = 1.2;   // Taller
-        const scaleZ = 1.05;  // Slightly deeper front-to-back
+        // Brain-like shape: taller, rounder
+        const scaleY = 1.15;
+        const scaleZ = 1.0;
 
         let rawX = r * Math.sin(phi) * Math.cos(theta);
-        // Flatten inner face slightly (where hemispheres meet)
-        if (side === 'left' && rawX > 0) rawX *= 0.15;
-        if (side === 'right' && rawX < 0) rawX *= 0.15;
+        // Soften inner face (where hemispheres meet) — same for both sides
+        if (side === 'left' && rawX > 0.1) rawX = 0.1 + (rawX - 0.1) * 0.2;
+        if (side === 'right' && rawX < -0.1) rawX = -0.1 + (rawX + 0.1) * 0.2;
 
-        // Brain surface folds (sulci) — add organic waviness
-        const fold = 0.08 * Math.sin(theta * 8 + phi * 6) * Math.cos(phi * 3);
+        // Organic waviness for brain folds
+        const fold = 0.06 * Math.sin(theta * 7 + phi * 5);
 
-        const x = center.x + rawX + fold * 0.3;
+        const x = center.x + rawX;
         const y = center.y + (r + fold) * Math.sin(phi) * Math.sin(theta) * scaleY;
         const z = center.z + (r + fold) * Math.cos(phi) * scaleZ;
 
@@ -334,13 +334,13 @@ function createNeuralBridge() {
 function createConnections(side) {
     const nodes = side === 'left' ? leftNodes : rightNodes;
     const color = side === 'left' ? CFG.LEFT_COLOR : CFG.RIGHT_COLOR;
-    const maxDist = 0.7;
+    const maxDist = 0.55;
     const linePositions = [];
 
     for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
             const dist = nodes[i].position.distanceTo(nodes[j].position);
-            if (dist < maxDist && Math.random() < 0.4) {
+            if (dist < maxDist && Math.random() < 0.35) {
                 linePositions.push(
                     nodes[i].position.x, nodes[i].position.y, nodes[i].position.z,
                     nodes[j].position.x, nodes[j].position.y, nodes[j].position.z
