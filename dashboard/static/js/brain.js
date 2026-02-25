@@ -363,8 +363,9 @@ const apiTracker = {
 };
 
 // ── Token storage ──────────────────────────────────────
-function getToken()  { return localStorage.getItem('leon_session_token') || ''; }
-function setToken(t) { localStorage.setItem('leon_session_token', t); }
+const IS_LOCAL = (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+function getToken()  { return IS_LOCAL ? '__local__' : (localStorage.getItem('leon_session_token') || ''); }
+function setToken(t) { if (!IS_LOCAL) localStorage.setItem('leon_session_token', t); }
 
 // ── Auth overlay ───────────────────────────────────────
 function showAuth(msg) {
@@ -632,29 +633,70 @@ function updateUI() {
         }
     }
 
-    // Agents list
+    // Agents list — live terminal cards
     const al = document.getElementById('agents-list');
     if (al) {
         const agents = brainState.activeAgents || [];
         if (!agents.length) {
             al.innerHTML = '<div class="agents-empty">IDLE</div>';
+            _stopAgentLogPolling();
         } else {
-            al.innerHTML = agents.map(a => {
-                let elapsed = '';
-                if (a.startedAt) {
-                    const s = Math.max(0, Math.floor((Date.now() - new Date(a.startedAt).getTime()) / 1000));
-                    elapsed = `${Math.floor(s/60)}m${(s%60).toString().padStart(2,'0')}s`;
+            // Build terminal cards — preserve existing DOM nodes to avoid scroll reset
+            const currentIds = new Set(agents.map(a => a.id).filter(Boolean));
+            // Remove cards for agents that finished
+            al.querySelectorAll('.agent-terminal[data-id]').forEach(el => {
+                if (!currentIds.has(el.dataset.id)) el.remove();
+            });
+            // Add/update cards
+            agents.forEach(a => {
+                if (!a.id) return;
+                let card = al.querySelector(`.agent-terminal[data-id="${a.id}"]`);
+                if (!card) {
+                    card = document.createElement('div');
+                    card.className = 'agent-terminal';
+                    card.dataset.id = a.id;
+                    const proj = esc(a.project_name || a.projectName || '');
+                    const desc = esc((a.description || '...').substring(0, 40));
+                    card.innerHTML = `
+                        <div class="agent-terminal-header">
+                            <span class="agent-terminal-name" title="${desc}">${proj || desc}</span>
+                            <div class="agent-terminal-meta">
+                                <span class="agent-terminal-elapsed" data-started="${a.startedAt || ''}">0m00s</span>
+                                <div class="agent-terminal-dot"></div>
+                            </div>
+                        </div>
+                        <div class="agent-terminal-body" id="atbody-${a.id}">
+                            <div class="agent-terminal-line dim">Initializing...</div>
+                        </div>`;
+                    al.appendChild(card);
                 }
-                return `<div class="agent-card"><span class="agent-desc">${esc((a.description||'...').substring(0,26))}</span>${elapsed ? `<span class="agent-elapsed">${elapsed}</span>` : ''}</div>`;
-            }).join('');
+                // Update elapsed time
+                const elEl = card.querySelector('.agent-terminal-elapsed');
+                if (elEl && elEl.dataset.started) {
+                    const s = Math.max(0, Math.floor((Date.now() - new Date(elEl.dataset.started).getTime()) / 1000));
+                    elEl.textContent = `${Math.floor(s/60)}m${(s%60).toString().padStart(2,'0')}s`;
+                }
+            });
+            _startAgentLogPolling(agents);
         }
-        // If agents are running, nudge agents panel indicator
         const arc = document.getElementById('arc-agents');
         if (arc) arc.style.opacity = agents.length > 0 ? '0.8' : '0.38';
     }
 
     // Voice state → MIC arc — client micMuted is authoritative, never overridden by server push
     updateMicArc(micMuted ? 'muted' : 'active');
+
+    // Update banner — show when a new version is available
+    if (brainState.updateAvailable) {
+        const b = document.getElementById('update-banner');
+        if (b) {
+            b.style.display = 'block';
+            const msgEl = document.getElementById('update-msg');
+            if (msgEl) msgEl.textContent = `Update v${brainState.updateVersion} available`;
+            const linkEl = document.getElementById('update-link');
+            if (linkEl && brainState.updateUrl) linkEl.href = brainState.updateUrl;
+        }
+    }
 }
 
 // ── Health Polling ─────────────────────────────────────
@@ -702,8 +744,11 @@ async function pollHealth() {
             set('brain-role',      (d.leon.brain_role || 'unified').toUpperCase());
             set('notif-total',     d.leon.notifications?.total   || 0);
             set('notif-pending',   d.leon.notifications?.pending || 0);
-            set('screen-activity', `Activity: ${d.leon.screen?.activity   || '--'}`);
-            set('screen-app',      `App: ${d.leon.screen?.active_app      || '--'}`);
+            const sa   = d.leon.screen?.activity;
+            const sapp = d.leon.screen?.active_app;
+            set('screen-activity', `Activity: ${(sa   && sa   !== 'unknown') ? sa   : '--'}`);
+            set('screen-app',      `App: ${(sapp && sapp !== 'unknown') ? sapp : '--'}`);
+            if (d.leon.active_agents !== undefined) set('status-agents', `${d.leon.active_agents} AGENT${d.leon.active_agents !== 1 ? 'S' : ''} ACTIVE`);
         }
     } catch { /* silent */ }
 }
@@ -1227,14 +1272,58 @@ setInterval(tickClock, 1000);
 function tickAgentElapsed() {
     const agents = brainState.activeAgents || [];
     if (!agents.length) return;
-    document.querySelectorAll('.agent-card').forEach((card, i) => {
-        const a = agents[i]; if (!a?.startedAt) return;
-        const el = card.querySelector('.agent-elapsed'); if (!el) return;
-        const s = Math.max(0, Math.floor((Date.now() - new Date(a.startedAt).getTime()) / 1000));
+    document.querySelectorAll('.agent-terminal[data-id]').forEach(card => {
+        const el = card.querySelector('.agent-terminal-elapsed'); if (!el || !el.dataset.started) return;
+        const s = Math.max(0, Math.floor((Date.now() - new Date(el.dataset.started).getTime()) / 1000));
         el.textContent = `${Math.floor(s/60)}m${(s%60).toString().padStart(2,'0')}s`;
     });
 }
 setInterval(tickAgentElapsed, 1000);
+
+// ── Agent Log Polling ───────────────────────────────
+let _agentLogInterval = null;
+
+function _startAgentLogPolling(agents) {
+    if (_agentLogInterval) return; // already polling
+    _agentLogInterval = setInterval(() => _fetchAgentLogs(agents), 3000);
+    _fetchAgentLogs(agents); // immediate first fetch
+}
+
+function _stopAgentLogPolling() {
+    if (_agentLogInterval) { clearInterval(_agentLogInterval); _agentLogInterval = null; }
+}
+
+async function _fetchAgentLogs(agents) {
+    // Only poll when agents panel is open — no wasted requests
+    if (activePanel !== 'agents') return;
+    const currentAgents = brainState.activeAgents || [];
+    if (!currentAgents.length) { _stopAgentLogPolling(); return; }
+    for (const a of currentAgents) {
+        if (!a.id) continue;
+        const body = document.getElementById(`atbody-${a.id}`);
+        if (!body) continue;
+        try {
+            const r = await fetch(`/api/agent-log/${a.id}`);
+            if (!r.ok) continue;
+            const d = await r.json();
+            if (!d.lines || !d.lines.length) continue;
+            // Show last 20 lines
+            const lines = d.lines.slice(-20);
+            body.innerHTML = lines.map(l => {
+                const escaped = esc(l);
+                let cls = '';
+                if (l.startsWith('✓') || l.includes('completed') || l.includes('✅')) cls = 'ok';
+                else if (l.startsWith('✗') || l.toLowerCase().includes('error') || l.includes('❌')) cls = 'err';
+                else if (l.startsWith('→') || l.includes('Tool:') || l.includes('Bash(') || l.includes('Edit(') || l.includes('Write(') || l.includes('Read(')) cls = 'tool';
+                else if (l.startsWith('#') || l.includes('INFO') || l.startsWith('*')) cls = 'info';
+                else if (l.trim() === '' || l.startsWith('---')) cls = 'dim';
+                return `<div class="agent-terminal-line ${cls}">${escaped}</div>`;
+            }).join('');
+            // Auto-scroll to bottom
+            body.scrollTop = body.scrollHeight;
+        } catch (_) {}
+    }
+}
 
 // Connect and start
 connectWS();

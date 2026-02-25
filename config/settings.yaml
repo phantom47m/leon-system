@@ -1,6 +1,6 @@
 leon:
   version: "1.0"
-  name: "Leon"
+  name: ""   # set via setup wizard — do not edit manually
   personality_file: "config/personality.yaml"
   memory_file: "data/leon_memory.json"
   projects_file: "config/projects.yaml"
@@ -12,7 +12,7 @@ bridge:
   token: ""  # Loaded from LEON_BRIDGE_TOKEN env var or vault at runtime
   cert_path: "config/bridge_cert.pem"
   key_path: "config/bridge_key.pem"
-  server_url: "wss://192.168.68.81:9100/bridge"  # Left Brain address (used by Right Brain)
+  server_url: ""   # Left Brain address (used by Right Brain) — only needed for multi-PC setup
 
 api:
   provider: "anthropic"
@@ -68,6 +68,11 @@ voice:
   wake_words_enabled: true
   sleep_timeout: 120
   push_to_talk_key: "scroll_lock"
+
+update_check:
+  enabled: true
+  repo: "GITHUB_USERNAME/REPO_NAME"   # owner sets this before publishing
+  check_interval_hours: 12
 
 system:
   auto_start: true

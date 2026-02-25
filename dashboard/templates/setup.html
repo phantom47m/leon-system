@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup — AI Neural Interface</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: #000d1a;
+            color: #c0e8ff;
+            font-family: 'Rajdhani', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        /* Animated grid background */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+        }
+
+        .wizard {
+            width: 100%;
+            max-width: 560px;
+            background: rgba(0, 14, 32, 0.92);
+            border: 1px solid rgba(0, 212, 255, 0.25);
+            border-radius: 4px;
+            padding: 40px;
+            position: relative;
+            box-shadow: 0 0 60px rgba(0, 212, 255, 0.06), inset 0 0 40px rgba(0, 0, 0, 0.4);
+        }
+
+        .wizard::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+        }
+
+        .logo {
+            text-align: center;
+            margin-bottom: 36px;
+        }
+
+        .logo-hex {
+            color: #00d4ff;
+            font-size: 20px;
+            margin-right: 6px;
+        }
+
+        .logo-label {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 22px;
+            font-weight: 700;
+            color: #00d4ff;
+            letter-spacing: 6px;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+        }
+
+        .logo-sub {
+            display: block;
+            font-size: 11px;
+            color: rgba(0, 212, 255, 0.5);
+            letter-spacing: 3px;
+            margin-top: 6px;
+            text-transform: uppercase;
+        }
+
+        .section {
+            margin-bottom: 24px;
+        }
+
+        label {
+            display: block;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            color: rgba(0, 212, 255, 0.7);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .hint {
+            font-size: 12px;
+            color: rgba(192, 232, 255, 0.4);
+            margin-top: 5px;
+            letter-spacing: 0.5px;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            background: rgba(0, 212, 255, 0.04);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 3px;
+            color: #c0e8ff;
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 15px;
+            padding: 10px 14px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            border-color: rgba(0, 212, 255, 0.6);
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.08);
+        }
+
+        input::placeholder {
+            color: rgba(192, 232, 255, 0.2);
+        }
+
+        .radio-group {
+            display: flex;
+            gap: 12px;
+            flex-direction: column;
+        }
+
+        .radio-option {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            cursor: pointer;
+            padding: 12px 14px;
+            border: 1px solid rgba(0, 212, 255, 0.12);
+            border-radius: 3px;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .radio-option:hover {
+            border-color: rgba(0, 212, 255, 0.3);
+            background: rgba(0, 212, 255, 0.03);
+        }
+
+        .radio-option input[type="radio"] {
+            width: 16px;
+            height: 16px;
+            margin-top: 2px;
+            accent-color: #00d4ff;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        .radio-label {
+            font-size: 14px;
+            color: #c0e8ff;
+            line-height: 1.4;
+        }
+
+        .radio-label small {
+            display: block;
+            color: rgba(192, 232, 255, 0.4);
+            font-size: 12px;
+            margin-top: 2px;
+        }
+
+        #api-key-section {
+            display: none;
+            margin-top: 12px;
+        }
+
+        .divider {
+            border: none;
+            border-top: 1px solid rgba(0, 212, 255, 0.08);
+            margin: 28px 0;
+        }
+
+        .optional-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .optional-label label {
+            margin-bottom: 0;
+        }
+
+        .optional-tag {
+            font-size: 10px;
+            color: rgba(0, 212, 255, 0.4);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 2px;
+            padding: 1px 6px;
+            letter-spacing: 1px;
+        }
+
+        .launch-btn {
+            width: 100%;
+            margin-top: 32px;
+            padding: 14px;
+            background: transparent;
+            border: 1px solid #00d4ff;
+            border-radius: 3px;
+            color: #00d4ff;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 4px;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: background 0.2s, box-shadow 0.2s, color 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .launch-btn:hover:not(:disabled) {
+            background: rgba(0, 212, 255, 0.08);
+            box-shadow: 0 0 24px rgba(0, 212, 255, 0.15);
+        }
+
+        .launch-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .error-msg {
+            display: none;
+            margin-top: 16px;
+            padding: 10px 14px;
+            background: rgba(255, 50, 50, 0.08);
+            border: 1px solid rgba(255, 50, 50, 0.3);
+            border-radius: 3px;
+            font-size: 13px;
+            color: #ff6666;
+        }
+
+        .status-msg {
+            display: none;
+            margin-top: 16px;
+            padding: 10px 14px;
+            background: rgba(0, 212, 255, 0.05);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 3px;
+            font-size: 13px;
+            color: rgba(0, 212, 255, 0.8);
+            text-align: center;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+<div class="wizard">
+    <div class="logo">
+        <span class="logo-hex">◆</span>
+        <span class="logo-label">SETUP</span>
+        <span class="logo-sub">First-Run Configuration</span>
+    </div>
+
+    <form id="setup-form">
+
+        <!-- 1. AI Name -->
+        <div class="section">
+            <label for="ai-name">Name Your AI</label>
+            <input type="text" id="ai-name" name="ai_name" placeholder="e.g. ARIA, JARVIS, MAX" required autocomplete="off" spellcheck="false" />
+            <div class="hint">This is what you'll call your AI. You'll say "Hey [name]" to wake it.</div>
+        </div>
+
+        <!-- 2. Owner Name -->
+        <div class="section">
+            <label for="owner-name">Your Name</label>
+            <input type="text" id="owner-name" name="owner_name" placeholder="e.g. Alice" required autocomplete="off" />
+            <div class="hint">Used to personalise responses and address you correctly.</div>
+        </div>
+
+        <hr class="divider" />
+
+        <!-- 3. Claude Auth -->
+        <div class="section">
+            <label>Claude Authentication</label>
+            <div class="radio-group">
+                <label class="radio-option">
+                    <input type="radio" name="claude_auth" value="max" checked />
+                    <span class="radio-label">
+                        Claude Max subscription
+                        <small>Uses the local <code>claude</code> CLI — no API key needed.</small>
+                    </span>
+                </label>
+                <label class="radio-option">
+                    <input type="radio" name="claude_auth" value="api" />
+                    <span class="radio-label">
+                        Claude API key
+                        <small>Pay-per-use via the Anthropic API.</small>
+                    </span>
+                </label>
+            </div>
+            <div id="api-key-section">
+                <input type="password" id="claude-api-key" name="claude_api_key" placeholder="sk-ant-api03-..." autocomplete="off" />
+            </div>
+        </div>
+
+        <hr class="divider" />
+
+        <!-- 4. ElevenLabs -->
+        <div class="section">
+            <div class="optional-label">
+                <label for="elevenlabs-key">ElevenLabs API Key</label>
+                <span class="optional-tag">OPTIONAL</span>
+            </div>
+            <input type="password" id="elevenlabs-key" name="elevenlabs_api_key" placeholder="sk_..." autocomplete="off" />
+            <div class="hint">Natural voice output. Skip to use local TTS fallback.</div>
+        </div>
+
+        <!-- 5. Groq -->
+        <div class="section">
+            <div class="optional-label">
+                <label for="groq-key">Groq API Key</label>
+                <span class="optional-tag">OPTIONAL</span>
+            </div>
+            <input type="password" id="groq-key" name="groq_api_key" placeholder="gsk_..." autocomplete="off" />
+            <div class="hint">Fast speech-to-text via Whisper. Get a free key at console.groq.com.</div>
+        </div>
+
+        <div class="error-msg" id="error-msg"></div>
+        <div class="status-msg" id="status-msg">Initializing...</div>
+
+        <button type="submit" class="launch-btn">LAUNCH</button>
+
+    </form>
+</div>
+
+<script>
+    // Show/hide API key field based on auth selection
+    document.querySelectorAll('input[name="claude_auth"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const apiSection = document.getElementById('api-key-section');
+            apiSection.style.display = radio.value === 'api' && radio.checked ? 'block' : 'none';
+        });
+    });
+
+    document.getElementById('setup-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.querySelector('.launch-btn');
+        const errEl = document.getElementById('error-msg');
+        const statusEl = document.getElementById('status-msg');
+
+        errEl.style.display = 'none';
+        statusEl.style.display = 'block';
+        statusEl.textContent = 'Saving configuration...';
+        btn.disabled = true;
+
+        const data = {
+            ai_name: document.getElementById('ai-name').value.trim(),
+            owner_name: document.getElementById('owner-name').value.trim(),
+            claude_auth: document.querySelector('input[name="claude_auth"]:checked').value,
+            claude_api_key: document.getElementById('claude-api-key').value.trim(),
+            elevenlabs_api_key: document.getElementById('elevenlabs-key').value.trim(),
+            groq_api_key: document.getElementById('groq-key').value.trim(),
+        };
+
+        try {
+            const res = await fetch('/api/setup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data),
+            });
+            const json = await res.json();
+            if (!res.ok || !json.ok) {
+                throw new Error(json.error || 'Setup failed');
+            }
+            statusEl.textContent = `${data.ai_name.toUpperCase()} online. Launching...`;
+            setTimeout(() => { window.location.href = '/'; }, 800);
+        } catch (err) {
+            statusEl.style.display = 'none';
+            errEl.style.display = 'block';
+            errEl.textContent = err.message;
+            btn.disabled = false;
+        }
+    });
+</script>
+</body>
+</html>

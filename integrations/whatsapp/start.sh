@@ -11,7 +11,7 @@ cd "$SCRIPT_DIR"
 # Get API token from Leon's logs or ask for it
 if [ -z "$LEON_API_TOKEN" ]; then
     # Try to grab it from Leon's recent log output
-    TOKEN=$(grep "API token" /home/deansabr/leon-system/logs/leon_system.log 2>/dev/null | tail -1 | grep -oP '(?<=API token: )\S+')
+    TOKEN=$(grep "API token" "$SCRIPT_DIR/../../logs/leon_system.log" 2>/dev/null | tail -1 | grep -oP '(?<=API token: )\S+')
     if [ -n "$TOKEN" ]; then
         export LEON_API_TOKEN="$TOKEN"
         echo "[start] Found API token from Leon logs"
@@ -24,7 +24,7 @@ if [ -z "$LEON_API_TOKEN" ]; then
 fi
 
 export LEON_API_URL="${LEON_API_URL:-http://127.0.0.1:3000}"
-export LEON_WHATSAPP_ALLOWED="${LEON_WHATSAPP_ALLOWED:-17275427167}"
+export LEON_WHATSAPP_ALLOWED="${LEON_WHATSAPP_ALLOWED:-}"
 
 echo "[start] Bridge → $LEON_API_URL"
 echo "[start] Allowed: $LEON_WHATSAPP_ALLOWED"

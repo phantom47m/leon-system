@@ -1,34 +1,12 @@
-# Leon - Known Projects
-# Add your projects here so Leon knows where to work
+# Define your projects here. Each project is a codebase your AI can spawn agents on.
+# Example:
+# - name: "my-website"
+#   path: "/home/yourname/my-website"
+#   type: "web"
+#   aliases: ["website", "site"]
+#   tech_stack: ["React", "Node.js"]
 
-projects:
-  - name: "leon-system"
-    path: "/home/deansabr/leon-system"
-    type: "fullstack"
-    tech_stack:
-      - "Python"
-      - "aiohttp"
-      - "Three.js"
-      - "JavaScript"
-      - "HTML/CSS"
-
-  - name: "vape-shop"
-    path: "/home/deansabr/vape-shop"
-    type: "fullstack"
-    tech_stack:
-      - "Next.js 14"
-      - "TypeScript"
-      - "Prisma"
-      - "PostgreSQL"
-      - "Tailwind CSS"
-      - "Zustand"
-
-  - name: "terminal-rice"
-    path: "/home/deansabr/terminal-rice"
-    type: "config"
-    tech_stack:
-      - "Shell"
-      - "Dotfiles"
+projects: []
 
 default_preferences:
   coding_style: "clean, well-commented"

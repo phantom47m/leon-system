@@ -51,6 +51,18 @@ WS_AUTH_TIMEOUT = 5.0
 
 async def index(request):
     """Serve the main brain dashboard page."""
+    import yaml as _yaml
+    # Redirect to setup wizard if user_config.yaml is missing or incomplete
+    user_cfg_path = Path("config/user_config.yaml")
+    if not user_cfg_path.exists():
+        raise web.HTTPFound("/setup")
+    try:
+        _ucfg = _yaml.safe_load(user_cfg_path.read_text()) or {}
+        if not _ucfg.get("setup_complete"):
+            raise web.HTTPFound("/setup")
+    except Exception:
+        raise web.HTTPFound("/setup")
+
     index_path = TEMPLATES_DIR / "index.html"
     if not index_path.exists():
         logger.error(f"Dashboard template not found: {index_path}")
@@ -70,11 +82,80 @@ async def index(request):
         html = re.sub(r'dashboard\.css\?v=\w+', f'dashboard.css?v={css_v}', html)
     except OSError:
         pass  # Static files missing — serve HTML without cache-busting
+    # Patch AI name into dashboard branding
+    leon = request.app.get("leon_core")
+    ai_name = getattr(leon, 'ai_name', 'LEON').upper() if leon else 'LEON'
+    html = re.sub(r'(<span class="logo-text">)LEON(</span>)', rf'\g<1>{ai_name}\2', html)
+    html = re.sub(r'<title>LEON\b', f'<title>{ai_name}', html)
+    html = html.replace('LEON Neural Interface — Initialized. Ready.',
+                        f'{ai_name} Neural Interface — Initialized. Ready.')
     return web.Response(
         text=html,
         content_type="text/html",
         headers={"Cache-Control": "no-store"},
     )
+
+
+async def setup_page(request):
+    """Serve the first-run setup wizard."""
+    setup_path = TEMPLATES_DIR / "setup.html"
+    if not setup_path.exists():
+        return web.Response(text="Setup template not found", status=500)
+    return web.Response(
+        text=setup_path.read_text(),
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def api_setup(request):
+    """POST /api/setup — validate setup form and write config/user_config.yaml."""
+    import yaml as _yaml
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    ai_name = (body.get("ai_name") or "").strip()
+    owner_name = (body.get("owner_name") or "").strip()
+    if not ai_name or not owner_name:
+        return web.json_response({"error": "AI name and your name are required"}, status=400)
+
+    claude_auth = body.get("claude_auth", "max")
+    claude_api_key = (body.get("claude_api_key") or "").strip()
+    elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
+    groq_api_key = (body.get("groq_api_key") or "").strip()
+
+    cfg = {
+        "ai_name": ai_name,
+        "owner_name": owner_name,
+        "claude_auth": claude_auth,
+        "claude_api_key": claude_api_key,
+        "elevenlabs_api_key": elevenlabs_api_key,
+        "groq_api_key": groq_api_key,
+        "setup_complete": True,
+    }
+
+    user_cfg_path = Path("config/user_config.yaml")
+    user_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    user_cfg_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+    logger.info(f"Setup complete — AI: {ai_name}, Owner: {owner_name}")
+
+    # Set env vars for current session
+    if groq_api_key:
+        os.environ.setdefault("GROQ_API_KEY", groq_api_key)
+    if elevenlabs_api_key:
+        os.environ.setdefault("ELEVENLABS_API_KEY", elevenlabs_api_key)
+    if claude_api_key and claude_auth == "api":
+        os.environ.setdefault("ANTHROPIC_API_KEY", claude_api_key)
+
+    # Update leon_core ai_name/owner_name in current session
+    leon = request.app.get("leon_core")
+    if leon:
+        leon.ai_name = ai_name
+        leon.owner_name = owner_name
+
+    return web.json_response({"ok": True})
 
 
 async def health(request):
@@ -257,7 +338,8 @@ async def api_openclaw_url(request):
     Returns JSON: {"url": "http://127.0.0.1:18789/#token=..."} or {"error": "..."}
     """
     import socket as _socket
-    gw = "/home/deansabr/.openclaw/bin/openclaw"
+    from pathlib import Path as _Path
+    gw = str(_Path.home() / ".openclaw" / "bin" / "openclaw")
     if not os.path.exists(gw):
         return web.json_response({"error": "OpenClaw not installed"}, status=404)
 
@@ -1075,7 +1157,8 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
 
         elif cmd == "/openclaw":
             import subprocess, shutil
-            gw = "/home/deansabr/.openclaw/bin/openclaw"
+            from pathlib import Path as _Path
+            gw = str(_Path.home() / ".openclaw" / "bin" / "openclaw")
             if not shutil.which(gw) and not os.path.exists(gw):
                 return "OpenClaw not installed."
             # Check if already running
@@ -1175,23 +1258,30 @@ def _build_state(leon) -> dict:
         completed_count = tasks.get("completed", 0)
         max_concurrent = tasks.get("max_concurrent", 5)
 
-        # Normalize active tasks for dashboard (ensure startedAt and id exist)
+        # Build active tasks from agent_manager.active_agents — the real source of truth.
+        # task_queue.active_tasks can get out of sync with what's actually running.
         active_tasks = []
-        for agent_id, t in (tasks.get("active_tasks_by_id", {}) or {}).items():
-            agent = dict(t)
-            agent["id"] = agent_id
-            if "startedAt" not in agent:
-                agent["startedAt"] = agent.get("started_at") or agent.get("created_at", "")
-            active_tasks.append(agent)
-        # Fallback: raw_tasks list if active_tasks_by_id not available
-        if not active_tasks:
-            for t in raw_tasks:
-                agent = dict(t)
-                if "id" not in agent:
-                    agent["id"] = agent.get("agent_id") or agent.get("task_id") or ""
-                if "startedAt" not in agent:
-                    agent["startedAt"] = agent.get("started_at") or agent.get("created_at", "")
-                active_tasks.append(agent)
+        if hasattr(leon, 'agent_manager') and leon.agent_manager:
+            for agent_id, info in leon.agent_manager.active_agents.items():
+                # Cross-reference with task_queue for description/project
+                tq_entry = leon.task_queue.active_tasks.get(agent_id, {})
+                night_task = next(
+                    (t for t in leon.night_mode._backlog if t.get("agent_id") == agent_id),
+                    {}
+                )
+                desc = (tq_entry.get("description")
+                        or night_task.get("description")
+                        or info.get("description", "agent"))
+                proj = (tq_entry.get("project")
+                        or night_task.get("project")
+                        or info.get("project_name", ""))
+                active_tasks.append({
+                    "id": agent_id,
+                    "description": desc,
+                    "project_name": proj,
+                    "startedAt": info.get("started_at", ""),
+                })
+        active_count = len(active_tasks)
 
         # Build activity feed
         feed = []
@@ -1250,6 +1340,9 @@ def _build_state(leon) -> dict:
             "remoteAgents": remote_active,
             "rightBrainTasks": right_brain_status.get("active_tasks", []),
             "voice": status.get("voice", {}),
+            "updateAvailable": getattr(leon, '_update_available', False),
+            "updateVersion": getattr(leon.update_checker, 'latest_version', '') if getattr(leon, 'update_checker', None) else '',
+            "updateUrl": getattr(leon.update_checker, 'release_url', '') if getattr(leon, 'update_checker', None) else '',
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")
@@ -1366,6 +1459,8 @@ def create_app(leon_core=None) -> web.Application:
 
     # Routes
     app.router.add_get("/", index)
+    app.router.add_get("/setup", setup_page)
+    app.router.add_post("/api/setup", api_setup)
     app.router.add_get("/health", health)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/openclaw-url", api_openclaw_url)

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LEON — Neural Interface</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=41">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=45">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -43,6 +43,11 @@
             </div>
         </div>
     </header>
+
+    <!-- Update banner (hidden until update is available) -->
+    <div id="update-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#0a1628;border-bottom:1px solid #00d4ff;padding:8px 20px;font-family:monospace;font-size:12px;color:#00d4ff;text-align:center">
+        &#x2B06; <span id="update-msg"></span> &nbsp;|&nbsp; <a id="update-link" href="#" target="_blank" style="color:#ff8800">See release notes</a> &nbsp;|&nbsp; <code style="color:#ffcc00">git pull</code>
+    </div>
 
     <!-- Hub universe — full screen, hub centered, panels float around it -->
     <div id="hub-universe">
@@ -84,7 +89,7 @@
             <div class="ir"><span class="il">COMPLETED</span><span class="iv" id="stat-completed">0</span></div>
             <div class="ir"><span class="il">QUEUED</span><span class="iv" id="stat-queued">0</span></div>
             <div class="pdiv"></div>
-            <div class="panel-title-sm">ACTIVE</div>
+            <div class="panel-title-sm">ACTIVE AGENTS</div>
             <div id="agents-list" class="agents-list"></div>
         </div>
 
@@ -120,6 +125,8 @@
             </div>
             <div class="ir"><span class="il">ALERTS</span><span class="iv" id="notif-total">0</span></div>
             <div class="ir"><span class="il">PENDING</span><span class="iv" id="notif-pending">0</span></div>
+            <div class="pdiv"></div>
+            <div class="iv sm" id="status-agents" style="color:#ff7700">0 AGENTS ACTIVE</div>
             <div class="pdiv"></div>
             <div class="iv sm" id="screen-activity">Activity: --</div>
             <div class="iv sm" id="screen-app">App: --</div>
@@ -449,6 +456,6 @@
         </div>
     </div>
 
-    <script src="/static/js/brain.js?v=41"></script>
+    <script src="/static/js/brain.js?v=45"></script>
 </body>
 </html>

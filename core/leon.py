@@ -89,11 +89,37 @@ class Leon:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             logger.warning("ANTHROPIC_API_KEY not configured — use /setkey in dashboard or set env var")
 
+        # Load user config (written by setup wizard, git-ignored)
+        BASE_DIR = Path(config_path).parent.parent
+        user_cfg_path = BASE_DIR / "config" / "user_config.yaml"
+        if user_cfg_path.exists():
+            try:
+                ucfg = yaml.safe_load(user_cfg_path.read_text()) or {}
+                self.ai_name = ucfg.get("ai_name") or self.config.get("leon", {}).get("name") or "AI"
+                self.owner_name = ucfg.get("owner_name", "User")
+                if ucfg.get("groq_api_key"):
+                    os.environ.setdefault("GROQ_API_KEY", ucfg["groq_api_key"])
+                if ucfg.get("elevenlabs_api_key"):
+                    os.environ.setdefault("ELEVENLABS_API_KEY", ucfg["elevenlabs_api_key"])
+                if ucfg.get("claude_api_key") and ucfg.get("claude_auth") == "api":
+                    os.environ.setdefault("ANTHROPIC_API_KEY", ucfg["claude_api_key"])
+            except Exception as e:
+                logger.warning(f"Could not load user_config.yaml: {e}")
+                self.ai_name = self.config.get("leon", {}).get("name") or "AI"
+                self.owner_name = "User"
+        else:
+            self.ai_name = self.config.get("leon", {}).get("name") or "AI"
+            self.owner_name = "User"
+
         # Load personality
         personality_file = self.config["leon"]["personality_file"]
         try:
             with open(personality_file, "r") as f:
-                personality = yaml.safe_load(f)
+                personality_text = f.read()
+            # Apply user-defined name substitutions
+            personality_text = personality_text.replace("{AI_NAME}", self.ai_name)
+            personality_text = personality_text.replace("{OWNER_NAME}", self.owner_name)
+            personality = yaml.safe_load(personality_text)
             self.system_prompt = personality["system_prompt"]
             self._wake_responses = personality.get("wake_responses", ["Yeah?"])
             self._task_complete_phrases = personality.get("task_complete", ["Done."])
@@ -216,6 +242,22 @@ class Leon:
 
         # Overnight autonomous coding mode
         self.night_mode = NightMode(self)
+
+        # Update checker
+        from .update_checker import UpdateChecker
+        _update_cfg = self.config.get("update_check", {})
+        _repo = _update_cfg.get("repo", "")
+        _version_file = Path(config_path).parent.parent / "VERSION"
+        _current_version = _version_file.read_text().strip() if _version_file.exists() else "0.0.0"
+        _placeholder = "GITHUB_USERNAME/REPO_NAME"
+        if _repo and _repo != _placeholder and _update_cfg.get("enabled", True):
+            self.update_checker = UpdateChecker(_repo, _current_version)
+        else:
+            self.update_checker = None
+        self._update_available = False
+        self._update_mentioned = False
+        self._last_update_check: float = 0.0
+        self._update_interval = _update_cfg.get("check_interval_hours", 12) * 3600
 
         logger.info(f"Leon initialized — brain_role={self.brain_role}")
 
@@ -583,6 +625,15 @@ class Leon:
 
         # Hard filter — strip any "sir" the LLM snuck in, no exceptions
         response = self._strip_sir(response)
+
+        # Append one-time update notice
+        if self._update_available and not self._update_mentioned and self.update_checker:
+            self._update_mentioned = True
+            response += (
+                f"\n\nAlso — there's a new update available (v{self.update_checker.latest_version}). "
+                f"Run `git pull` in the leon-system folder to grab it. "
+                f"{self.update_checker.release_url}"
+            )
 
         self.memory.add_conversation(response, role="assistant")
 
@@ -1702,19 +1753,9 @@ spawned_by: Leon v1.0
         logger.info("Awareness loop started")
         while self.running:
             try:
-                # Ghost cleanup — only for processes that exited with a non-zero code
-                # (exit code 0 = completed normally, handled by check_status below)
-                for agent_id in list(self.agent_manager.active_agents.keys()):
-                    proc = self.agent_manager.active_agents[agent_id].get("process")
-                    exit_code = proc.poll() if proc else None
-                    if exit_code is not None and exit_code != 0:
-                        logger.warning(f"Ghost agent {agent_id} — crashed (exit {exit_code}), cleaning up")
-                        self.task_queue.fail_task(agent_id, f"Process crashed (exit {exit_code})")
-                        self.night_mode.mark_agent_failed(agent_id, f"Process crashed (exit {exit_code})")
-                        self.agent_manager.cleanup_agent(agent_id)
-                        asyncio.create_task(self.night_mode.try_dispatch())
-
                 # Monitor local agents
+                # check_status handles all state transitions including 500-error retries.
+                # Do NOT pre-clean failed agents here — that would bypass the retry logic.
                 agent_ids = list(self.agent_manager.active_agents.keys())
                 for agent_id in agent_ids:
                     status = await self.agent_manager.check_status(agent_id)
@@ -1844,6 +1885,33 @@ spawned_by: Leon v1.0
 
                 # Watchdog: check agent resource usage
                 await self._watchdog_check()
+
+                # Periodic update check
+                if self.update_checker:
+                    import time as _time
+                    now_ts = _time.monotonic()
+                    if now_ts - self._last_update_check >= self._update_interval:
+                        self._last_update_check = now_ts
+                        try:
+                            found = await self.update_checker.check()
+                            if found and self.update_checker.should_notify():
+                                self._update_available = True
+                                self._update_mentioned = False
+                                self.update_checker.mark_notified()
+                                # WhatsApp/dashboard notification
+                                msg = (
+                                    f"Update available: v{self.update_checker.latest_version}\n"
+                                    f"Run: cd ~/leon-system && git pull\n"
+                                    f"{self.update_checker.release_url}"
+                                )
+                                logger.info("Update notification: %s", msg)
+                                await self._broadcast_to_dashboard({
+                                    "type": "update_available",
+                                    "version": self.update_checker.latest_version,
+                                    "url": self.update_checker.release_url,
+                                })
+                        except Exception as e:
+                            logger.debug("Update check error: %s", e)
 
                 # Periodic save
                 self.memory.save()

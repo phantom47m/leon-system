@@ -20,3 +20,6 @@ data/.auth.json
 integrations/whatsapp/node_modules/
 integrations/whatsapp/.wwebjs_auth/
 integrations/whatsapp/.wwebjs_cache/
+config/api_token.txt
+config/bridge_*.pem
+config/user_config.yaml

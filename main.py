@@ -96,14 +96,15 @@ def _start_voice_thread(leon) -> threading.Thread:
         vloop = asyncio.new_event_loop()
         asyncio.set_event_loop(vloop)
         voice_cfg = leon.get_voice_config()
-        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
+        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
         voice.on_vad_event = vad_event_handler
         leon.set_voice_system(voice)
         vloop.run_until_complete(voice.start())
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    logger.info("🎤 Voice system active — say 'Hey Leon'")
+    ai_name = getattr(leon, 'ai_name', 'Leon')
+    logger.info(f"🎤 Voice system active — say 'Hey {ai_name}'")
     return thread
 
 
@@ -290,7 +291,7 @@ def run_headless():
         async def vad_event_handler(event: str, text: str):
             await broadcast_vad_event(event, text)
 
-        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
+        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
         voice.on_vad_event = vad_event_handler
         leon.set_voice_system(voice)
         vloop.run_until_complete(voice.start())

@@ -1,0 +1,7 @@
+ai_name: "ARIA"
+owner_name: "Alice"
+claude_auth: "max"        # "max" = Claude Max CLI auth, "api" = API key
+claude_api_key: ""
+elevenlabs_api_key: ""
+groq_api_key: ""
+setup_complete: true

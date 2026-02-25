@@ -1,11 +1,12 @@
 """
-Leon Voice System — Deepgram Nova-2 STT + ElevenLabs TTS
+Leon Voice System — Groq Whisper STT + ElevenLabs TTS
 
-Real-time streaming speech recognition with wake word detection
-and natural voice responses.
+Wake word detection + voice commands + natural voice responses.
 
 Flow:
-  Microphone -> Deepgram Nova-2 (streaming STT) -> Leon Brain -> ElevenLabs (TTS) -> Speaker
+  Microphone -> Energy VAD -> Groq Whisper (whisper-large-v3-turbo) -> Leon Brain -> ElevenLabs -> Speaker
+
+Falls back to Deepgram if DEEPGRAM_API_KEY is set (legacy).
 """
 
 import asyncio
@@ -35,6 +36,43 @@ _TIER_HIGH = 1.0
 _TIER_MEDIUM = 0.7
 _TIER_LOW = 0.5
 
+# ================================================================
+# AUTO-WAKE PATTERNS — trigger wake WITHOUT saying "hey leon"
+# These are phrases clearly directed at an AI assistant.
+# TV audio is usually fragments or third-person — these are first/second person.
+# ================================================================
+_AUTO_WAKE_PATTERNS = [
+    # Direct questions to an assistant
+    re.compile(r"\bcan you\b", re.IGNORECASE),
+    re.compile(r"\bcould you\b", re.IGNORECASE),
+    re.compile(r"\bwould you\b", re.IGNORECASE),
+    re.compile(r"\bwill you\b", re.IGNORECASE),
+    re.compile(r"\bare you able\b", re.IGNORECASE),
+    re.compile(r"\bdo you know\b", re.IGNORECASE),
+    re.compile(r"\btell me\b", re.IGNORECASE),
+    re.compile(r"\bshow me\b", re.IGNORECASE),
+    re.compile(r"\bhelp me\b", re.IGNORECASE),
+    re.compile(r"\bi want\b", re.IGNORECASE),
+    re.compile(r"\bi need\b", re.IGNORECASE),
+    re.compile(r"\bremind me\b", re.IGNORECASE),
+    re.compile(r"\blook up\b", re.IGNORECASE),
+    re.compile(r"\bsearch for\b", re.IGNORECASE),
+    re.compile(r"\bopen\s+\w+\b", re.IGNORECASE),
+    re.compile(r"\bplay\s+\w+\b", re.IGNORECASE),
+    re.compile(r"\bcheck\s+\w+\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s|\s+is|\s+are)\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+(?:do|does|can|much|many|long)\b", re.IGNORECASE),
+    re.compile(r"\bwhy\s+(?:is|are|does|do)\b", re.IGNORECASE),
+    re.compile(r"\bwhen\s+(?:is|are|does|do|will)\b", re.IGNORECASE),
+    re.compile(r"\bwho\s+(?:is|are)\b", re.IGNORECASE),
+    re.compile(r"\bset\s+(?:a|an|the|my)\b", re.IGNORECASE),
+    re.compile(r"\bturn\s+(?:on|off)\b", re.IGNORECASE),
+    re.compile(r"\bpause\b", re.IGNORECASE),
+    re.compile(r"\bstop\s+\w+\b", re.IGNORECASE),
+]
+# Min word count for auto-wake (filters out TV fragments like "on." or "right.")
+_AUTO_WAKE_MIN_WORDS = 4
+
 WAKE_PATTERNS = [
     # --- Tier 1: Standard greetings (high confidence) ---
     (re.compile(r"\bhey\s+leon\b", re.IGNORECASE), _TIER_HIGH),
@@ -62,7 +100,7 @@ WAKE_PATTERNS = [
     (re.compile(r"^leon[\s,]", re.IGNORECASE), _TIER_HIGH),
     (re.compile(r"^leon$", re.IGNORECASE), _TIER_HIGH),
 
-    # --- Tier 2: Common Deepgram mishears (medium confidence) ---
+    # --- Tier 2: Common Whisper/Deepgram mishears (medium confidence) ---
     (re.compile(r"\bhey\s+leo\b", re.IGNORECASE), _TIER_MEDIUM),
     (re.compile(r"\bhey\s+liam\b", re.IGNORECASE), _TIER_MEDIUM),
     (re.compile(r"\bhey\s+neon\b", re.IGNORECASE), _TIER_MEDIUM),
@@ -73,13 +111,88 @@ WAKE_PATTERNS = [
     (re.compile(r"\bhey\s+lion\b", re.IGNORECASE), _TIER_MEDIUM),
     (re.compile(r"\bhay\s+leon\b", re.IGNORECASE), _TIER_MEDIUM),
     (re.compile(r"\bhe\s+leon\b", re.IGNORECASE), _TIER_MEDIUM),
+    # Whisper-specific single-word collapses of "hey leon"
+    (re.compile(r"^heels?\.?$", re.IGNORECASE), _TIER_MEDIUM),
+    (re.compile(r"^hey\s+lee\.?$", re.IGNORECASE), _TIER_MEDIUM),
 
     # --- Tier 3: Filler words + loose matches (lower confidence) ---
     (re.compile(r"\b(?:um|uh|like)\s+(?:hey\s+)?leon\b", re.IGNORECASE), _TIER_LOW),
+
+    # --- Natural "are you there / awake" phrasings ---
+    (re.compile(r"\bare\s+you\s+(awake|there|listening|ready|online)\b", re.IGNORECASE), _TIER_HIGH),
+    (re.compile(r"\bhello\??\s*$", re.IGNORECASE), _TIER_LOW),
+    (re.compile(r"\bcan\s+you\s+hear\s+me\b", re.IGNORECASE), _TIER_HIGH),
+    (re.compile(r"\banswer\s+me\b", re.IGNORECASE), _TIER_HIGH),
+    (re.compile(r"\bwhy\s+didn.?t\s+you\s+answer\b", re.IGNORECASE), _TIER_HIGH),
+    (re.compile(r"\bwake\s+up\b", re.IGNORECASE), _TIER_MEDIUM),
 ]
 
 # Minimum confidence to accept a wake word match
 WAKE_CONFIDENCE_THRESHOLD = 0.5
+
+# ================================================================
+# SLEEP / STOP-LISTENING PATTERNS
+# ================================================================
+_SLEEP_PATTERNS = [
+    re.compile(r"\bstop\s+listening\b", re.IGNORECASE),
+    re.compile(r"\bgo\s+to\s+sleep\b", re.IGNORECASE),
+    re.compile(r"\bsleep\s+mode\b", re.IGNORECASE),
+    re.compile(r"\bstop\s+talking\b", re.IGNORECASE),
+    re.compile(r"\bquiet\s+(down\s+)?leon\b", re.IGNORECASE),
+    re.compile(r"\bleon\s+(go\s+to\s+)?sleep\b", re.IGNORECASE),
+    re.compile(r"\bthat'?s?\s+(all|enough)(\s+for\s+now)?\b", re.IGNORECASE),
+    re.compile(r"\bgoodbye\s+leon\b", re.IGNORECASE),
+    re.compile(r"\bbye\s+leon\b", re.IGNORECASE),
+]
+
+_SLEEP_RESPONSES = [
+    "Going quiet. Just say hey Leon when you need me.",
+    "Understood. I'll be here when you need me.",
+    "Standing by. Say hey Leon to wake me.",
+    "Roger that. Going silent.",
+]
+
+# ================================================================
+# QUICK ACKNOWLEDGMENTS — spoken immediately when a command is received
+# ================================================================
+_QUICK_ACKS = [
+    "On it.",
+    "Right away.",
+    "Sure thing.",
+    "Got it.",
+    "Of course.",
+    "Consider it done.",
+]
+
+# Words that indicate the response is an internal browser/agent action description
+# — these should never be spoken aloud, replace with a clean completion line
+_ACTION_NOISE_PREFIXES = (
+    "click", "type", "navigate", "fill", "scroll", "press", "select",
+    "wait for", "waiting for", "done —", "done—", "step ",
+    "completed ", "i clicked", "i typed", "i navigated", "i pressed",
+    "i scrolled", "i filled", "i selected", "clicked ", "typed ",
+    "navigated ", "pressed ", "scrolled ",
+)
+_ACTION_COMPLETIONS = [
+    "Done.",
+    "That's handled.",
+    "All done.",
+    "Done and dusted.",
+    "Sorted.",
+]
+
+# ================================================================
+# STARTUP GREETINGS
+# ================================================================
+_STARTUP_GREETINGS = [
+    "All systems active and ready.",
+    "Online and fully operational. Awaiting your command.",
+    "Good to be back online. All systems nominal.",
+    "Systems initialized. Ready to go.",
+    "Leon online. All subsystems green.",
+    "Startup complete. Voice, intelligence, and automation — all online.",
+    "I'm here. All systems are go.",
+]
 
 # ================================================================
 # DEEPGRAM CONSTANTS
@@ -102,8 +215,8 @@ _CACHEABLE_RESPONSES = {
     "working on it", "right away", "understood", "absolutely", "of course",
 }
 
-# Default sleep timeout
-DEFAULT_SLEEP_TIMEOUT = 30.0
+# Default sleep timeout — 120s of silence ends conversation mode
+DEFAULT_SLEEP_TIMEOUT = 120.0
 
 
 class VoiceState:
@@ -116,6 +229,7 @@ class VoiceState:
     SLEEPING = "sleeping"       # Timed out, going back to listening
     STOPPED = "stopped"         # System stopped
     DEGRADED = "degraded"       # Running in fallback mode
+    MUTED = "muted"             # Mic hardware muted, not listening
 
 
 class VoiceSystem:
@@ -127,11 +241,24 @@ class VoiceSystem:
     - TTS: ElevenLabs (natural voice) with pyttsx3 fallback
     """
 
-    def __init__(self, on_command: Optional[Callable] = None, config: Optional[dict] = None):
+    def __init__(self, on_command: Optional[Callable] = None, config: Optional[dict] = None, name: Optional[str] = None):
         self.on_command = on_command
-        self.wake_word = "hey leon"
+        self.on_vad_event: Optional[Callable] = None  # (event, text) → called for live transcription
+        _name = (name or "leon").lower()
+        self.wake_word = f"hey {_name}"
+        # Build name-specific wake patterns for the configured AI name
+        self._name_patterns = [
+            (re.compile(rf"\bhey\s+{re.escape(_name)}\b", re.IGNORECASE), _TIER_HIGH),
+            (re.compile(rf"^{re.escape(_name)}[\s,]", re.IGNORECASE), _TIER_HIGH),
+            (re.compile(rf"^{re.escape(_name)}$", re.IGNORECASE), _TIER_HIGH),
+            (re.compile(rf"\blisten\s+{re.escape(_name)}\b", re.IGNORECASE), _TIER_HIGH),
+            (re.compile(rf"\bwake\s+up\s+{re.escape(_name)}\b", re.IGNORECASE), _TIER_HIGH),
+            (re.compile(rf"\b{re.escape(_name)}\s+wake\s+up\b", re.IGNORECASE), _TIER_HIGH),
+        ]
         self.is_listening = False
         self.is_awake = False
+        self.is_muted = True   # Start muted — user must explicitly unmute
+        self._voice_volume = 1.0  # TTS output gain: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
         self._audio_queue: queue.Queue = queue.Queue()
         self._sleep_timer: Optional[asyncio.Task] = None
 
@@ -144,14 +271,15 @@ class VoiceSystem:
         self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
         self.voice_id = os.getenv(
             "LEON_VOICE_ID",
-            voice_cfg.get("voice_id", "onwK4e9ZLuTAKqWW03F9"),
+            voice_cfg.get("voice_id", "onwK4e9ZLuTAKqWW03F9"),  # Daniel — deep authoritative British
         )
         self.tts_model = "eleven_turbo_v2_5"
 
-        # Voice tuning
-        self.tts_stability = voice_cfg.get("stability", 0.6)
-        self.tts_similarity_boost = voice_cfg.get("similarity_boost", 0.85)
-        self.tts_style = voice_cfg.get("style", 0.2)
+        # Voice tuning — Jarvis spec: calm, intelligent, controlled, slightly deep
+        self.tts_stability = voice_cfg.get("stability", 0.55)         # natural variation
+        self.tts_similarity_boost = voice_cfg.get("similarity_boost", 0.75)  # clear but not locked
+        self.tts_style = voice_cfg.get("style", 0.18)                 # mild expression
+        self.tts_speed = voice_cfg.get("speed", 0.96)                 # slightly measured pace
 
         # Wake word config
         self.wake_words_enabled = voice_cfg.get("wake_words_enabled", True)
@@ -219,33 +347,347 @@ class VoiceSystem:
             "elevenlabs_degraded": self._elevenlabs_degraded,
         }
 
+    def force_wake(self):
+        """
+        Manually force the voice system awake (PTT button / dashboard activate).
+        Thread-safe: only sets simple flags — no async ops.
+        The VAD loop will pick up is_awake=True on next iteration.
+        """
+        if not self.is_listening:
+            return
+        self.is_awake = True
+        self._set_state(VoiceState.AWAKE)
+        logger.info("Voice system force-woken (manual activate)")
+
+    def mute(self):
+        """Hard mute — VAD keeps running but all audio is discarded. Thread-safe."""
+        self.is_muted = True
+        self._set_state(VoiceState.MUTED)
+        logger.info("Microphone muted")
+
+    def unmute(self):
+        """Unmute — resume normal VAD processing. Thread-safe."""
+        self.is_muted = False
+        self._set_state(VoiceState.AWAKE if self.is_awake else VoiceState.LISTENING)
+        logger.info("Microphone unmuted")
+
+    def set_voice_volume(self, pct: int) -> str:
+        """Set Leon's TTS output volume. pct = 0–200 (100 = normal). Thread-safe."""
+        pct = max(0, min(200, int(pct)))
+        self._voice_volume = pct / 100.0
+        logger.info("Voice volume set to %d%%", pct)
+        return f"Voice volume set to {pct}%."
+
     # ================================================================
     # MAIN LOOP
     # ================================================================
 
     async def start(self):
-        """Start the full voice pipeline."""
-        if not self.deepgram_api_key:
+        """Start the full voice pipeline. Uses Groq Whisper if no Deepgram key."""
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")
+
+        if not self.deepgram_api_key and not self.groq_api_key:
             logger.warning(
-                "DEEPGRAM_API_KEY not set — voice system disabled. "
-                "Set the env var and restart to enable voice."
+                "No STT key found — set GROQ_API_KEY (free) or DEEPGRAM_API_KEY in .env"
             )
             return
 
         logger.info("Voice system starting — say 'Hey Leon' to activate")
         self.is_listening = True
-        self._set_state(VoiceState.LISTENING)
+        self._set_state(VoiceState.MUTED if self.is_muted else VoiceState.LISTENING)
 
-        mic_thread = threading.Thread(target=self._capture_microphone, daemon=True)
-        mic_thread.start()
-
-        await self._stream_to_deepgram_with_reconnect()
+        if self.deepgram_api_key:
+            # Legacy Deepgram streaming path
+            mic_thread = threading.Thread(target=self._capture_microphone, daemon=True)
+            mic_thread.start()
+            await self._stream_to_deepgram_with_reconnect()
+        else:
+            # Groq Whisper path — energy VAD + batch transcription
+            await self._run_groq_whisper_loop()
 
     async def stop(self):
         """Stop the voice system."""
         self.is_listening = False
         self._cancel_sleep_timer()
         self._set_state(VoiceState.STOPPED)
+
+    # ================================================================
+    # GROQ WHISPER BACKEND (energy VAD + batch transcription)
+    # ================================================================
+
+    # VAD tuning
+    _VAD_SAMPLE_RATE   = 16000
+    _VAD_FRAME_SAMPLES = 480        # 30ms frames
+    _VAD_ENERGY_THRESH = 250        # RMS threshold — lower = more sensitive
+    _VAD_SPEECH_FRAMES = 2          # consecutive loud frames to start recording
+    _VAD_SILENCE_SEC   = 2.0        # seconds of silence to end utterance (longer = fewer mid-sentence cuts)
+    _VAD_MIN_DURATION  = 0.3        # ignore utterances shorter than this (seconds)
+    _VAD_MAX_DURATION  = 25.0       # hard cut — long enough for a full instruction
+
+    async def _run_groq_whisper_loop(self):
+        """Main loop: capture mic with VAD → Groq Whisper → wake word → command."""
+        logger.info("Groq Whisper voice backend started — say 'Hey Leon' to activate")
+        self._loop = asyncio.get_event_loop()
+        self._transcription_queue: asyncio.Queue = asyncio.Queue()
+
+        # VAD runs in a background thread, pushes utterances onto the queue
+        vad_thread = threading.Thread(
+            target=self._vad_capture_thread,
+            daemon=True,
+        )
+        vad_thread.start()
+
+        # Startup greeting — wait for VAD to calibrate (1.5s) then speak
+        asyncio.create_task(self._startup_greeting())
+
+        # Main async loop processes transcriptions
+        while self.is_listening:
+            try:
+                audio_bytes = await asyncio.wait_for(
+                    self._transcription_queue.get(), timeout=1.0
+                )
+                # Transcribe in background so VAD keeps running
+                asyncio.create_task(self._transcribe_and_handle(audio_bytes))
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error("Groq voice loop error: %s", e)
+
+    async def _startup_greeting(self):
+        """Play a startup line then go straight into awake/conversation mode."""
+        await asyncio.sleep(2.0)   # Let VAD calibrate + mic stream open
+        hour = time.localtime().tm_hour
+        # 5am–9am: still up from the night before
+        if 5 <= hour < 9:
+            greeting = "Why are you still up? Get some sleep."
+        else:
+            greeting = random.choice(_STARTUP_GREETINGS)
+        logger.info("Startup greeting: %s", greeting)
+        await self.speak(greeting)
+        # Start in awake/conversation mode right away — no need to say "hey leon" first
+        self.is_awake = True
+        self._set_state(VoiceState.AWAKE)
+        self._start_sleep_timer()
+        logger.info("Voice ready — conversation mode active")
+
+    async def _fire_vad_event(self, event: str, text: str):
+        """Fire a VAD event callback (transcription, recording start, etc.)."""
+        if self.on_vad_event:
+            try:
+                await self.on_vad_event(event, text)
+            except Exception:
+                pass
+
+    def _vad_capture_thread(self):
+        """Background thread: mic → energy VAD → push utterances to queue."""
+        try:
+            import pyaudio
+            import struct
+        except ImportError:
+            logger.error("pyaudio not installed — run: pip install pyaudio")
+            return
+
+        pa = pyaudio.PyAudio()
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self._VAD_SAMPLE_RATE,
+            input=True,
+            frames_per_buffer=self._VAD_FRAME_SAMPLES,
+        )
+        logger.info("VAD mic stream opened")
+
+        # Auto-calibrate: measure ambient noise for 1.5 seconds, set threshold to 4x ambient
+        cal_frames = int(1.5 * self._VAD_SAMPLE_RATE / self._VAD_FRAME_SAMPLES)
+        cal_rms_values = []
+        for _ in range(cal_frames):
+            try:
+                d = stream.read(self._VAD_FRAME_SAMPLES, exception_on_overflow=False)
+                s = struct.unpack_from(f"{self._VAD_FRAME_SAMPLES}h", d)
+                cal_rms_values.append((sum(x*x for x in s)/len(s))**0.5)
+            except Exception:
+                pass
+        if cal_rms_values:
+            # Use median (more robust to spikes during calibration)
+            cal_sorted = sorted(cal_rms_values)
+            ambient = cal_sorted[len(cal_sorted) // 2]
+            # Speech threshold: 1.5x ambient (start recording)
+            # Silence threshold: 1.25x ambient (end utterance — safely above ambient,
+            #   but well below speech. Avoids TV/background keeping silence_streak at 0.)
+            dynamic_thresh = max(self._VAD_ENERGY_THRESH, ambient * 1.5)
+            dynamic_silence_thresh = max(self._VAD_ENERGY_THRESH * 0.8, ambient * 1.25)
+            logger.info("VAD calibrated: ambient_rms=%.0f → speech=%.0f silence=%.0f",
+                        ambient, dynamic_thresh, dynamic_silence_thresh)
+        else:
+            dynamic_thresh = self._VAD_ENERGY_THRESH
+            dynamic_silence_thresh = self._VAD_ENERGY_THRESH * 0.8
+
+        silence_frames_needed = int(
+            self._VAD_SILENCE_SEC * self._VAD_SAMPLE_RATE / self._VAD_FRAME_SAMPLES
+        )
+        max_frames = int(
+            self._VAD_MAX_DURATION * self._VAD_SAMPLE_RATE / self._VAD_FRAME_SAMPLES
+        )
+        min_frames = int(
+            self._VAD_MIN_DURATION * self._VAD_SAMPLE_RATE / self._VAD_FRAME_SAMPLES
+        )
+
+        recording = False
+        loud_streak = 0
+        silence_streak = 0
+        frames: list[bytes] = []
+        rec_frame_count = 0   # total frames since recording started (includes middle-zone)
+        _diag_counter = 0
+        _speak_cooldown_until = 0.0  # don't record until this timestamp (prevents echo feedback)
+        _ambient_history: list[float] = []  # rolling ambient samples for re-calibration
+        _AMBIENT_WINDOW = 150   # ~30s of history
+
+        while self.is_listening:
+            try:
+                data = stream.read(self._VAD_FRAME_SAMPLES, exception_on_overflow=False)
+            except Exception:
+                continue
+
+            # Suppress mic while Leon is speaking or briefly after (echo prevention)
+            if self._state == VoiceState.SPEAKING:
+                _speak_cooldown_until = time.time() + 1.5
+                recording = False
+                frames = []
+                loud_streak = 0
+                silence_streak = 0
+                rec_frame_count = 0
+                continue
+            if time.time() < _speak_cooldown_until:
+                continue
+
+            # Hard mute — discard audio silently
+            if self.is_muted:
+                continue
+
+            # RMS energy
+            samples = struct.unpack_from(f"{self._VAD_FRAME_SAMPLES}h", data)
+            rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+
+            # Log RMS every ~3 seconds for diagnostics
+            _diag_counter += 1
+            if _diag_counter % 100 == 0:
+                logger.info("VAD rms=%.0f threshold=%.0f recording=%s", rms, dynamic_thresh, recording)
+
+            if not recording:
+                # Collect ambient samples for rolling re-calibration
+                _ambient_history.append(rms)
+                if len(_ambient_history) > _AMBIENT_WINDOW:
+                    _ambient_history.pop(0)
+                # Re-calibrate every ~30s of not-recording using recent ambient
+                if len(_ambient_history) == _AMBIENT_WINDOW and _diag_counter % 150 == 0:
+                    sorted_h = sorted(_ambient_history)
+                    new_ambient = sorted_h[len(sorted_h) // 2]
+                    new_thresh = max(self._VAD_ENERGY_THRESH, new_ambient * 1.5)
+                    new_sil = max(self._VAD_ENERGY_THRESH * 0.8, new_ambient * 1.25)
+                    if abs(new_thresh - dynamic_thresh) > 300:
+                        dynamic_thresh = new_thresh
+                        dynamic_silence_thresh = new_sil
+                        logger.info(
+                            "VAD re-calibrated: ambient=%.0f → speech=%.0f silence=%.0f",
+                            new_ambient, dynamic_thresh, dynamic_silence_thresh,
+                        )
+
+                # Waiting for speech — look for consecutive loud frames
+                if rms > dynamic_thresh:
+                    loud_streak += 1
+                    if loud_streak >= self._VAD_SPEECH_FRAMES:
+                        recording = True
+                        rec_frame_count = 0
+                        logger.info("VAD: speech started (rms=%.0f)", rms)
+                        if self.on_vad_event:
+                            asyncio.run_coroutine_threadsafe(
+                                self._fire_vad_event("recording", ""),
+                                self._loop,
+                            )
+                else:
+                    loud_streak = 0
+            else:
+                # Recording — always capture this frame regardless of RMS zone
+                frames.append(data)
+                rec_frame_count += 1
+
+                if rms > dynamic_thresh:
+                    loud_streak += 1
+                    silence_streak = 0
+                elif rms < dynamic_silence_thresh:
+                    silence_streak += 1
+                    loud_streak = 0
+                else:
+                    # Middle zone: not loud enough to be speech, not quiet enough to be silence.
+                    # Don't advance either streak — just accumulate time toward max_frames.
+                    loud_streak = 0
+
+                # End utterance: enough silence, OR hard max-duration cap
+                if silence_streak >= silence_frames_needed or rec_frame_count >= max_frames:
+                    if len(frames) >= min_frames:
+                        audio_bytes = b"".join(frames)
+                        asyncio.run_coroutine_threadsafe(
+                            self._transcription_queue.put(audio_bytes),
+                            self._loop,
+                        )
+                        logger.info("VAD: utterance queued (%d frames, %.1fs)",
+                                    len(frames), rec_frame_count * self._VAD_FRAME_SAMPLES / self._VAD_SAMPLE_RATE)
+                    frames = []
+                    recording = False
+                    silence_streak = 0
+                    loud_streak = 0
+                    rec_frame_count = 0
+
+        stream.stop_stream()
+        stream.close()
+        pa.terminate()
+        logger.info("VAD mic stream closed")
+
+    async def _transcribe_and_handle(self, audio_bytes: bytes):
+        """Convert raw PCM bytes to WAV, send to Groq Whisper, handle result."""
+        import io
+        import wave
+
+        # Wrap raw PCM in WAV container
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)   # 16-bit
+            wf.setframerate(self._VAD_SAMPLE_RATE)
+            wf.writeframes(audio_bytes)
+        wav_bytes = buf.getvalue()
+
+        try:
+            import aiohttp
+            form = aiohttp.FormData()
+            form.add_field("file", wav_bytes,
+                           filename="audio.wav", content_type="audio/wav")
+            form.add_field("model", "whisper-large-v3-turbo")
+            form.add_field("response_format", "json")
+            form.add_field("language", "en")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {self.groq_api_key}"},
+                    data=form,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data.get("text", "").strip()
+                        if text:
+                            logger.info("Whisper heard: %s", text)
+                            await self._fire_vad_event("transcription", text)
+                            await self._handle_transcription(text)
+                    elif resp.status == 429:
+                        logger.warning("Groq Whisper rate limited — pausing 5s")
+                        await asyncio.sleep(5)
+                    else:
+                        body = await resp.text()
+                        logger.warning("Groq Whisper error %d: %s", resp.status, body[:100])
+        except Exception as e:
+            logger.error("Transcription error: %s", e)
 
     # ================================================================
     # MICROPHONE CAPTURE
@@ -432,12 +874,45 @@ class VoiceSystem:
     # TRANSCRIPTION HANDLING
     # ================================================================
 
+    def _is_auto_wake_phrase(self, text_lower: str) -> bool:
+        """Return True if text looks like a user command even without a wake word.
+
+        Filters out short TV fragments and third-person speech.
+        Matches direct questions/commands clearly aimed at an assistant.
+        """
+        words = text_lower.split()
+        if len(words) < _AUTO_WAKE_MIN_WORDS:
+            return False
+        return any(p.search(text_lower) for p in _AUTO_WAKE_PATTERNS)
+
     async def _handle_transcription(self, text: str):
-        """Process transcribed text — check for wake word or command."""
+        """Process transcribed text — smart conversation mode.
+
+        When awake: process everything as commands.
+        When sleeping:
+          1. Explicit wake word → wake + optional inline command
+          2. Auto-wake: phrase looks like a direct command/question → wake silently + process
+          3. Everything else → ignore (TV audio, short fragments)
+        """
         text_lower = text.lower().strip()
         logger.debug("Heard: %s", text)
 
+        # Filter out very short noise (punctuation-only, single chars)
+        clean_text = text.strip().strip(".,!?-– ")
+        if len(clean_text) < 2:
+            return
+
+        # --- Sleep commands: always checked, even mid-conversation ---
+        if self.is_awake and any(p.search(text_lower) for p in _SLEEP_PATTERNS):
+            self.is_awake = False
+            self._cancel_sleep_timer()
+            self._set_state(VoiceState.LISTENING)
+            logger.info("Sleep command heard — going back to listening mode")
+            await self.speak(random.choice(_SLEEP_RESPONSES))
+            return
+
         if not self.is_awake:
+            # --- Explicit wake word check ---
             if self.wake_words_enabled:
                 confidence = self._wake_word_confidence(text_lower)
                 if confidence >= WAKE_CONFIDENCE_THRESHOLD:
@@ -446,12 +921,36 @@ class VoiceSystem:
                     self._start_sleep_timer()
                     logger.info("Wake word detected (confidence=%.2f): %s", confidence, text)
                     await self.speak(random.choice(self._wake_responses))
-
                     after_wake = self._strip_wake_word(text_lower)
                     if after_wake and len(after_wake) > 3:
                         await self._process_command(after_wake)
+                    return
+
+            # --- Smart auto-wake: looks like a direct command/question ---
+            if self._is_auto_wake_phrase(text_lower):
+                self.is_awake = True
+                self._set_state(VoiceState.AWAKE)
+                self._start_sleep_timer()
+                logger.info("Auto-wake triggered: %s", text)
+                await self._process_command(text)
+                return
+
+            logger.debug("Sleeping — ignoring: %s", text)
         else:
-            self._start_sleep_timer()
+            # Conversation mode — filter short noise, then process
+            words = text_lower.split()
+            # Single/two-word fragments are almost always TV or mic noise unless
+            # they're explicit control words (stop, pause, yes, no, etc.)
+            _OK_SHORT = {
+                "stop", "pause", "play", "resume", "mute", "unmute",
+                "yes", "no", "okay", "ok", "sure", "thanks", "done",
+                "quit", "exit", "help", "status", "go", "wait",
+            }
+            if len(words) <= 2:
+                clean = " ".join(w.strip(".,!?") for w in words)
+                if not any(w in _OK_SHORT for w in clean.split()):
+                    logger.debug("Awake — dropping short noise: %s", text)
+                    return
             await self._process_command(text)
 
     def _wake_word_confidence(self, text_lower: str) -> float:
@@ -460,6 +959,15 @@ class VoiceSystem:
         Returns 0.0 if no pattern matches.
         """
         best = 0.0
+        # Check name-specific patterns first (covers custom AI names)
+        for pattern, tier_score in self._name_patterns:
+            match = pattern.search(text_lower)
+            if match:
+                position_bonus = 0.1 if match.start() <= 3 else 0.0
+                score = min(1.0, tier_score + position_bonus)
+                if score > best:
+                    best = score
+        # Check generic patterns (universal phrases + "leon" mishear variants)
         for pattern, tier_score in WAKE_PATTERNS:
             match = pattern.search(text_lower)
             if match:
@@ -476,28 +984,45 @@ class VoiceSystem:
 
     def _strip_wake_word(self, text_lower: str) -> str:
         """Remove the wake word from the beginning of text, returning the rest."""
-        for pattern, _ in WAKE_PATTERNS:
+        for pattern, _ in (*self._name_patterns, *WAKE_PATTERNS):
             match = pattern.search(text_lower)
             if match:
                 remainder = text_lower[match.end():].strip(" ,.-")
                 return remainder
         return text_lower
 
+    def _is_action_noise(self, text: str) -> bool:
+        """Return True if text looks like an internal browser/agent step description
+        that should never be spoken aloud."""
+        t = text.lower().strip()
+        return any(t.startswith(p) for p in _ACTION_NOISE_PREFIXES)
+
     async def _process_command(self, command: str):
-        """Process a voice command through Leon's brain."""
+        """Process a voice command. Stays in conversation mode after responding."""
         self._set_state(VoiceState.PROCESSING)
         logger.info("Command: %s", command)
-        self.is_awake = False
         self._cancel_sleep_timer()
+
+        # Speak an acknowledgment immediately so user knows we heard them
+        await self.speak(random.choice(_QUICK_ACKS))
 
         if self.on_command:
             response = await self.on_command(command)
             if response:
-                await self.speak(response)
+                # Filter internal browser/agent action descriptions
+                if self._is_action_noise(response):
+                    logger.debug("Filtered action noise from TTS: %s", response[:60])
+                    await self.speak(random.choice(_ACTION_COMPLETIONS))
+                else:
+                    await self.speak(response)
         else:
             logger.warning("No command handler registered")
 
-        if self.is_listening:
+        # Stay awake — reset idle timer so user can reply naturally
+        if self.is_listening and self.is_awake:
+            self._set_state(VoiceState.AWAKE)
+            self._start_sleep_timer()
+        elif self.is_listening:
             self._set_state(VoiceState.LISTENING)
 
     # ================================================================
@@ -522,7 +1047,7 @@ class VoiceSystem:
                 self.is_awake = False
                 self._set_state(VoiceState.SLEEPING)
                 logger.info("No speech for %.0fs — going back to sleep", self.sleep_timeout)
-                # Transition back to listening after the sleep log
+                await self.speak(random.choice(_SLEEP_RESPONSES))
                 if self.is_listening:
                     self._set_state(VoiceState.LISTENING)
         except asyncio.CancelledError:
@@ -548,6 +1073,58 @@ class VoiceSystem:
         # Return to previous listening state
         if self.is_listening:
             self._set_state(VoiceState.AWAKE if self.is_awake else VoiceState.LISTENING)
+
+    async def generate_audio(self, text: str) -> Optional[bytes]:
+        """
+        Generate ElevenLabs audio bytes without playing them.
+        Returns raw MP3 bytes on success, None on failure.
+        Used for sending voice notes to WhatsApp.
+        """
+        if not text.strip() or not self.elevenlabs_api_key or self._elevenlabs_degraded:
+            return None
+
+        # Check cache first
+        cache_key = self._tts_cache_key(text)
+        cached = self._tts_cache.get(cache_key)
+        if cached and self._validate_audio(cached):
+            return cached
+
+        try:
+            import aiohttp as _aiohttp
+        except ImportError:
+            return None
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
+        headers = {
+            "xi-api-key": self.elevenlabs_api_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "text": text,
+            "model_id": self.tts_model,
+            "voice_settings": {
+                "stability": self.tts_stability,
+                "similarity_boost": self.tts_similarity_boost,
+                "style": self.tts_style,
+                "use_speaker_boost": True,
+                "speed": getattr(self, "tts_speed", 0.96),
+            },
+        }
+
+        try:
+            async with _aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        audio_bytes = await resp.read()
+                        if self._validate_audio(audio_bytes):
+                            logger.debug("Generated audio for WhatsApp voice note (%d bytes)", len(audio_bytes))
+                            return audio_bytes
+                    else:
+                        logger.warning("ElevenLabs generate_audio: HTTP %d", resp.status)
+        except Exception as e:
+            logger.warning("generate_audio failed: %s", e)
+
+        return None
 
     async def _speak_elevenlabs(self, text: str):
         """TTS via ElevenLabs with retry on 5xx, 429 handling, and caching."""
@@ -581,6 +1158,7 @@ class VoiceSystem:
                 "similarity_boost": self.tts_similarity_boost,
                 "style": self.tts_style,
                 "use_speaker_boost": True,
+                "speed": getattr(self, "tts_speed", 0.96),
             },
         }
 
@@ -703,20 +1281,52 @@ class VoiceSystem:
         return any(header[:len(h)] == h for h in valid_headers)
 
     async def _play_audio_bytes(self, audio_bytes: bytes) -> bool:
-        """Play audio bytes through speakers. Returns True on success."""
-        try:
-            import sounddevice as sd
-            import soundfile as sf
+        """Play audio bytes through speakers via paplay (PulseAudio). Returns True on success."""
+        import subprocess
+        import tempfile
+        import os
 
+        # Write to temp file and play via paplay — most reliable on PipeWire/PulseAudio
+        tmp_path = None
+        try:
+            import soundfile as sf
             audio_data, samplerate = sf.read(io.BytesIO(audio_bytes))
+
+            # Convert to 16-bit signed PCM for paplay, applying voice volume gain
+            import numpy as np
+            pcm = np.clip(audio_data * 32767 * self._voice_volume, -32768, 32767).astype(np.int16)
+            channels = 1 if pcm.ndim == 1 else pcm.shape[1]
+            raw_bytes = pcm.tobytes()
+
+            fmt = f"s{pcm.dtype.itemsize * 8}le"
+            cmd = [
+                "paplay", "--raw",
+                f"--rate={samplerate}",
+                f"--format={fmt}",
+                f"--channels={channels}",
+            ]
+            logger.info("Playing audio: %dHz %dch %d bytes via paplay", samplerate, channels, len(raw_bytes))
+            result = subprocess.run(cmd, input=raw_bytes, timeout=60)
+            if result.returncode == 0:
+                logger.info("Audio playback complete")
+                return True
+            logger.error("paplay exited %d", result.returncode)
+        except Exception as e:
+            logger.error("Audio playback error: %s", e)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        # Fallback: sounddevice
+        try:
+            import sounddevice as sd, soundfile as sf
+            audio_data, samplerate = sf.read(io.BytesIO(audio_bytes))
+            logger.info("Fallback: playing via sounddevice")
             sd.play(audio_data, samplerate)
             sd.wait()
             return True
-        except ImportError as e:
-            logger.warning("Audio library missing (%s) — using local TTS", e)
-            return False
         except Exception as e:
-            logger.error("Audio playback error: %s", e)
+            logger.error("sounddevice fallback error: %s", e)
             return False
 
     async def _speak_local(self, text: str):
