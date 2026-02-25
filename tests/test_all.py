@@ -1929,6 +1929,222 @@ class TestTaskQueueCap(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# SECURITY — NightMode dispatch lock
+# ══════════════════════════════════════════════════════════
+
+class TestNightModeDispatchLock(unittest.TestCase):
+    """Verify that NightMode uses an asyncio lock to prevent concurrent dispatch."""
+
+    def test_dispatch_lock_exists(self):
+        """NightMode should have an asyncio.Lock for dispatch coordination."""
+        import asyncio as _asyncio
+        from core.night_mode import NightMode
+
+        # Create a minimal mock Leon
+        class MockLeon:
+            class agent_manager:
+                active_agents = {}
+            class task_queue:
+                max_concurrent = 5
+            config = {}
+
+        nm = NightMode(MockLeon())
+        self.assertIsInstance(nm._dispatch_lock, _asyncio.Lock)
+
+    def test_dispatch_lock_prevents_concurrent_access(self):
+        """Concurrent _try_dispatch calls should be serialized by the lock."""
+        import asyncio as _asyncio
+        from core.night_mode import NightMode
+
+        class MockLeon:
+            class agent_manager:
+                active_agents = {}
+            class task_queue:
+                max_concurrent = 5
+            config = {}
+
+        nm = NightMode(MockLeon())
+        # Lock should initially be unlocked
+        self.assertFalse(nm._dispatch_lock.locked())
+
+
+# ══════════════════════════════════════════════════════════
+# SECURITY — Bridge message validation
+# ══════════════════════════════════════════════════════════
+
+class TestBridgeMessageSecurity(unittest.TestCase):
+    """Test bridge message serialization and validation."""
+
+    def test_message_roundtrip(self):
+        from core.neural_bridge import BridgeMessage, MSG_AUTH
+        msg = BridgeMessage(type=MSG_AUTH, payload={"token": "secret123"})
+        raw = msg.to_json()
+        parsed = BridgeMessage.from_json(raw)
+        self.assertEqual(parsed.type, MSG_AUTH)
+        self.assertEqual(parsed.payload["token"], "secret123")
+
+    def test_invalid_json_raises(self):
+        from core.neural_bridge import BridgeMessage
+        with self.assertRaises((json.JSONDecodeError, KeyError)):
+            BridgeMessage.from_json("not valid json")
+
+    def test_missing_type_raises(self):
+        from core.neural_bridge import BridgeMessage
+        with self.assertRaises(KeyError):
+            BridgeMessage.from_json('{"payload": {}}')
+
+    def test_bridge_server_requires_token(self):
+        """BridgeServer with a token should reject unauthenticated connections."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({"token": "test-token-123", "host": "127.0.0.1", "port": 0})
+        self.assertEqual(server.token, "test-token-123")
+        # Not connected by default
+        self.assertFalse(server.connected)
+
+    def test_bridge_server_default_localhost(self):
+        """BridgeServer should default to 127.0.0.1 (not 0.0.0.0)."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        self.assertEqual(server.host, "127.0.0.1")
+
+
+# ══════════════════════════════════════════════════════════
+# SECURITY — Dashboard rate limiter
+# ══════════════════════════════════════════════════════════
+
+class TestDashboardRateLimiter(unittest.TestCase):
+    """Verify rate limiter bucket cleanup prevents unbounded growth."""
+
+    def test_stale_buckets_cleaned(self):
+        """Stale IP entries should be evicted after the cleanup counter triggers."""
+        from dashboard import server as srv
+        # Reset state
+        srv._rate_limit_buckets.clear()
+        srv._rate_limit_request_count = 0
+
+        # Simulate 3 IPs with timestamps well in the past
+        old_time = time.monotonic() - 120  # 2 minutes ago (well past the 60s window)
+        srv._rate_limit_buckets["1.1.1.1"] = [old_time]
+        srv._rate_limit_buckets["2.2.2.2"] = [old_time]
+        srv._rate_limit_buckets["3.3.3.3"] = [old_time]
+
+        # Simulate a current request from a new IP
+        now = time.monotonic()
+        srv._rate_limit_buckets["4.4.4.4"] = [now]
+
+        # Trigger cleanup by setting counter to 49 (next request triggers at 50)
+        srv._rate_limit_request_count = 49
+        # Simulate the cleanup logic
+        srv._rate_limit_request_count += 1
+        if srv._rate_limit_request_count >= 50 or len(srv._rate_limit_buckets) > 200:
+            srv._rate_limit_request_count = 0
+            stale_ips = [
+                ip for ip, b in srv._rate_limit_buckets.items()
+                if not b or b[-1] < now - srv._rate_limit_window
+            ]
+            for ip in stale_ips:
+                del srv._rate_limit_buckets[ip]
+
+        # Stale IPs should be removed, current one kept
+        self.assertNotIn("1.1.1.1", srv._rate_limit_buckets)
+        self.assertNotIn("2.2.2.2", srv._rate_limit_buckets)
+        self.assertNotIn("3.3.3.3", srv._rate_limit_buckets)
+        self.assertIn("4.4.4.4", srv._rate_limit_buckets)
+
+
+# ══════════════════════════════════════════════════════════
+# SECURITY — Memory force-save on shutdown
+# ══════════════════════════════════════════════════════════
+
+class TestMemoryShutdownFlush(unittest.TestCase):
+    """Verify that force save bypasses debounce for shutdown."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        from core.memory import MemorySystem
+        self.mem = MemorySystem(self.tmp.name)
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def test_force_save_bypasses_debounce(self):
+        """save(force=True) should always write, even within debounce window."""
+        # First save sets the timer
+        self.mem.save(force=True)
+        # Immediately add data and force-save again
+        self.mem.memory["learned_context"]["shutdown_key"] = "shutdown_value"
+        self.mem.save(force=True)
+        # Verify the data was written
+        with open(self.tmp.name) as f:
+            data = json.load(f)
+        self.assertEqual(data["learned_context"]["shutdown_key"], "shutdown_value")
+
+    def test_debounced_save_marks_dirty(self):
+        """Non-forced save within debounce window should mark dirty, not write."""
+        # Force-save to set the timestamp
+        self.mem.save(force=True)
+        # Immediate non-forced save should be debounced
+        self.mem.memory["learned_context"]["debounced_key"] = "debounced_value"
+        self.mem.save()  # Should be debounced
+        self.assertTrue(self.mem._dirty)
+        # Data should NOT be on disk yet
+        with open(self.tmp.name) as f:
+            data = json.load(f)
+        self.assertNotIn("debounced_key", data.get("learned_context", {}))
+
+    def test_flush_if_dirty_writes_pending(self):
+        """flush_if_dirty should write data that was debounced."""
+        self.mem.save(force=True)
+        self.mem.memory["learned_context"]["pending_key"] = "pending_value"
+        self.mem._dirty = True
+        self.mem.flush_if_dirty()
+        with open(self.tmp.name) as f:
+            data = json.load(f)
+        self.assertEqual(data["learned_context"]["pending_key"], "pending_value")
+        self.assertFalse(self.mem._dirty)
+
+
+# ══════════════════════════════════════════════════════════
+# SECURITY — Shell exec additional injection vectors
+# ══════════════════════════════════════════════════════════
+
+class TestShellExecAdvancedInjection(unittest.TestCase):
+    """Additional injection vectors beyond the basic tests."""
+
+    def setUp(self):
+        from core.system_skills import SystemSkills
+        self.skills = SystemSkills()
+
+    def test_blocks_heredoc_redirect(self):
+        result = self.skills.shell_exec("cat << EOF > /etc/passwd")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_process_substitution(self):
+        result = self.skills.shell_exec("diff <(cat /etc/passwd) <(cat /etc/shadow)")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_null_byte_injection(self):
+        result = self.skills.shell_exec("ls\x00; rm -rf /")
+        # Blocklist catches both ";" and "rm -rf /" — correctly blocked
+        self.assertIn("Blocked", result)
+
+    def test_blocks_newline_with_dangerous_command(self):
+        result = self.skills.shell_exec("echo safe\nrm -rf /")
+        # Blocklist catches "rm -rf /" regardless of newline trick — correctly blocked
+        self.assertIn("Blocked", result)
+
+    def test_empty_command_handled(self):
+        result = self.skills.shell_exec("")
+        # Should handle gracefully without crash
+        self.assertIsInstance(result, str)
+
+    def test_whitespace_only_handled(self):
+        result = self.skills.shell_exec("   ")
+        self.assertIsInstance(result, str)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

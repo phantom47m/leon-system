@@ -14,8 +14,9 @@
  *   LEON_WHATSAPP_ALLOWED - Comma-separated allowed phone numbers (e.g. "15551234567")
  */
 
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
 const http = require("http");
 const https = require("https");
 
@@ -31,8 +32,10 @@ const ALLOWED_NUMBERS = new Set(
 
 const HTTP_TIMEOUT_MS = 120_000; // 2 min — AI responses can be slow
 const MAX_CHUNK = 4000; // WhatsApp message length limit
-const MAX_RECONNECTS = 5;
+const MAX_RECONNECTS = Infinity; // never give up
 const RECONNECT_DELAY_MS = 10_000;
+const MAX_RECONNECT_DELAY_MS = 5 * 60_000; // cap at 5 min between retries
+const KEEPALIVE_INTERVAL_MS = 10 * 60_000; // ping every 10 min to keep session alive
 
 if (!API_TOKEN) {
   console.error("[bridge] LEON_API_TOKEN is required. Check Leon dashboard output for the token.");
@@ -47,11 +50,21 @@ if (ALLOWED_NUMBERS.size === 0) {
 console.log(`[bridge] Allowed numbers: ${[...ALLOWED_NUMBERS].join(", ")}`);
 console.log(`[bridge] Leon API: ${API_URL}/api/message`);
 
-// Track message IDs sent by the bridge so we don't reply to our own responses
-const sentByBridge = new Set();
+// Track message IDs sent by the bridge so we don't reply to our own responses.
+// Uses a Map<id, timestamp> with TTL eviction to prevent unbounded growth.
+const sentByBridge = new Map();
+const SENT_TTL_MS = 5 * 60_000; // 5 minutes
 let myNumber = null;
 let processing = false; // Prevent overlapping/looping message handling
 let reconnectCount = 0;
+
+// Evict stale entries from sentByBridge every 2 minutes
+setInterval(() => {
+  const cutoff = Date.now() - SENT_TTL_MS;
+  for (const [id, ts] of sentByBridge) {
+    if (ts < cutoff) sentByBridge.delete(id);
+  }
+}, 2 * 60_000);
 
 // ── WhatsApp Client ─────────────────────────────────────
 const client = new Client({
@@ -74,14 +87,29 @@ const client = new Client({
 client.on("qr", (qr) => {
   console.log("\n[bridge] Scan this QR code with WhatsApp:\n");
   qrcode.generate(qr, { small: true });
+  // Also save as PNG so it's easy to open and scan
+  const pngPath = "/tmp/leon_whatsapp_qr.png";
+  QRCode.toFile(pngPath, qr, { scale: 8 }, (err) => {
+    if (!err) console.log(`[bridge] QR saved as image: ${pngPath}`);
+  });
 });
 
 client.on("ready", async () => {
   console.log("[bridge] WhatsApp client ready — listening for messages");
-  // Get our own number
   const info = client.info;
   myNumber = info.wid.user;
   console.log(`[bridge] My number: ${myNumber}`);
+
+  // Keepalive — fetch chats every 10 min to prevent session expiry
+  setInterval(async () => {
+    if (!clientReady) return;
+    try {
+      await client.getChats();
+      console.log("[bridge] Keepalive ping OK");
+    } catch (err) {
+      console.warn(`[bridge] Keepalive failed: ${err.message}`);
+    }
+  }, KEEPALIVE_INTERVAL_MS);
 });
 
 client.on("authenticated", () => {
@@ -96,19 +124,15 @@ client.on("disconnected", (reason) => {
   console.warn(`[bridge] Disconnected: ${reason}`);
   clientReady = false;
 
-  if (reconnectCount < MAX_RECONNECTS) {
-    reconnectCount++;
-    const delay = RECONNECT_DELAY_MS * reconnectCount;
-    console.log(`[bridge] Reconnecting in ${delay / 1000}s (attempt ${reconnectCount}/${MAX_RECONNECTS})...`);
-    setTimeout(() => {
-      console.log("[bridge] Attempting reconnect...");
-      client.initialize().catch((err) => {
-        console.error(`[bridge] Reconnect failed: ${err.message}`);
-      });
-    }, delay);
-  } else {
-    console.error(`[bridge] Max reconnect attempts (${MAX_RECONNECTS}) reached. Restart the bridge manually.`);
-  }
+  reconnectCount++;
+  const delay = Math.min(RECONNECT_DELAY_MS * reconnectCount, MAX_RECONNECT_DELAY_MS);
+  console.log(`[bridge] Reconnecting in ${delay / 1000}s (attempt ${reconnectCount})...`);
+  setTimeout(() => {
+    console.log("[bridge] Attempting reconnect...");
+    client.initialize().catch((err) => {
+      console.error(`[bridge] Reconnect failed: ${err.message}`);
+    });
+  }, delay);
 });
 
 // ── Message handler ─────────────────────────────────────
@@ -166,17 +190,39 @@ client.on("message_create", async (msg) => {
   console.log(`[bridge] Processing: "${text.substring(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
   try {
-    const response = await postToLeon(text);
-    console.log(`[bridge] Leon response: ${response.substring(0, 80)}${response.length > 80 ? "..." : ""}`);
+    const leonReply = await postToLeon(text);
+    const responseText = typeof leonReply === "string" ? leonReply : leonReply.response || "";
+    const audioBase64 = typeof leonReply === "object" ? leonReply.audio_base64 : null;
+    const audioMime = typeof leonReply === "object" ? leonReply.audio_mime : null;
 
-    // Split long responses into chunks and send
-    const chunks = splitMessage(response);
+    console.log(`[bridge] Leon response: ${responseText.substring(0, 80)}${responseText.length > 80 ? "..." : ""}`);
+
     const chat = await msg.getChat();
-    for (const chunk of chunks) {
-      const replyText = `[Leon] ${chunk}`;
-      const sent = await chat.sendMessage(replyText);
-      if (sent && sent.id && sent.id._serialized) {
-        sentByBridge.add(sent.id._serialized);
+
+    // Send text response (split if needed)
+    if (responseText) {
+      const chunks = splitMessage(responseText);
+      for (const chunk of chunks) {
+        const replyText = `[Leon] ${chunk}`;
+        const sent = await chat.sendMessage(replyText);
+        if (sent && sent.id && sent.id._serialized) {
+          sentByBridge.set(sent.id._serialized, Date.now());
+        }
+      }
+    }
+
+    // Send voice note if audio was generated
+    if (audioBase64 && audioMime) {
+      try {
+        const media = new MessageMedia(audioMime, audioBase64, "leon_response.mp3");
+        const voiceSent = await chat.sendMessage(media, { sendAudioAsVoice: true });
+        if (voiceSent && voiceSent.id && voiceSent.id._serialized) {
+          sentByBridge.set(voiceSent.id._serialized, Date.now());
+        }
+        console.log("[bridge] Voice note sent");
+      } catch (voiceErr) {
+        console.warn(`[bridge] Voice note failed: ${voiceErr.message}`);
+        // Not fatal — text was already sent
       }
     }
   } catch (err) {
@@ -217,9 +263,10 @@ function postToLeon(message) {
           if (res.statusCode === 200) {
             try {
               const parsed = JSON.parse(data);
-              resolve(parsed.response || parsed.message || data);
+              // Return full object so caller can access audio_base64, etc.
+              resolve(parsed);
             } catch {
-              resolve(data);
+              resolve({ response: data });
             }
           } else {
             reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
@@ -277,7 +324,7 @@ const outboundServer = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "WhatsApp not ready yet, try again in 30s" }));
           return;
         }
-        const { number, message } = JSON.parse(body);
+        const { number, message, audio_base64, audio_mime } = JSON.parse(body);
         if (!number || !message) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "number and message required" }));
@@ -285,10 +332,27 @@ const outboundServer = http.createServer(async (req, res) => {
         }
         // Send to the "Message Yourself" chat (self-chat) or a specific number
         const chatId = number.includes("@") ? number : `${number}@c.us`;
+
+        // Send text
         const sent = await client.sendMessage(chatId, `[Leon] ${message}`);
         if (sent && sent.id && sent.id._serialized) {
-          sentByBridge.add(sent.id._serialized);
+          sentByBridge.set(sent.id._serialized, Date.now());
         }
+
+        // Send voice note if audio provided
+        if (audio_base64 && audio_mime) {
+          try {
+            const media = new MessageMedia(audio_mime, audio_base64, "leon_update.mp3");
+            const voiceSent = await client.sendMessage(chatId, media, { sendAudioAsVoice: true });
+            if (voiceSent && voiceSent.id && voiceSent.id._serialized) {
+              sentByBridge.set(voiceSent.id._serialized, Date.now());
+            }
+            console.log(`[bridge] Outbound voice note sent to ${number}`);
+          } catch (voiceErr) {
+            console.warn(`[bridge] Outbound voice note failed: ${voiceErr.message}`);
+          }
+        }
+
         console.log(`[bridge] Outbound to ${number}: ${message.substring(0, 60)}...`);
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
@@ -296,6 +360,11 @@ const outboundServer = http.createServer(async (req, res) => {
         console.error(`[bridge] Outbound error: ${err.message}`);
         res.writeHead(500);
         res.end(JSON.stringify({ error: err.message }));
+        // Detached frame = Chrome page is dead — exit so watchdog restarts us clean
+        if (err.message && err.message.includes('detached Frame')) {
+          console.error('[bridge] Detached frame detected — exiting for clean restart');
+          setTimeout(() => process.exit(1), 500);
+        }
       }
     });
   } else if (req.method === "GET" && req.url === "/health") {

@@ -28,6 +28,7 @@ logger = logging.getLogger("leon.dashboard")
 _rate_limit_window = 60  # seconds
 _rate_limit_max = 20  # max requests per window per IP
 _rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
+_rate_limit_request_count = 0  # counter for periodic stale-IP cleanup
 
 DASHBOARD_DIR = Path(__file__).parent
 TEMPLATES_DIR = DASHBOARD_DIR / "templates"
@@ -323,9 +324,11 @@ async def api_message(request):
             )
         bucket.append(now_ts)
         # Purge stale IP entries periodically to prevent unbounded memory growth.
-        # Buckets for IPs that stopped connecting still hold old timestamps that
-        # never get pruned (pruning only runs when the same IP makes a new request).
-        if len(_rate_limit_buckets) > 200:
+        # Runs every 50 requests OR when >200 IPs accumulate, whichever comes first.
+        global _rate_limit_request_count
+        _rate_limit_request_count += 1
+        if _rate_limit_request_count >= 50 or len(_rate_limit_buckets) > 200:
+            _rate_limit_request_count = 0
             stale_ips = [
                 ip for ip, b in _rate_limit_buckets.items()
                 if not b or b[-1] < now_ts - _rate_limit_window

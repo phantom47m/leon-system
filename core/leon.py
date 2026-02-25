@@ -301,10 +301,14 @@ class Leon:
         # Watchdog — restart bridge if it dies
         asyncio.create_task(self._whatsapp_watchdog())
 
-        # Resume night mode if it was active before restart and has pending tasks
-        if self.night_mode.get_pending():
-            asyncio.create_task(self.night_mode.enable())
-            logger.info(f"Night mode auto-resumed: {len(self.night_mode.get_pending())} pending tasks")
+        # Resume night mode — always enable if there are pending tasks (including recovered ones)
+        pending = self.night_mode.get_pending()
+        if pending:
+            async def _resume_night():
+                await asyncio.sleep(15)  # wait for bridge to connect first
+                await self.night_mode.enable()
+                logger.info(f"Night mode auto-resumed: {len(pending)} pending task(s) dispatching")
+            asyncio.create_task(_resume_night())
 
         logger.info("Leon is now running — all systems active")
 
@@ -418,7 +422,8 @@ class Leon:
             self.vault.lock()
         if self.audit_log:
             self.audit_log.log("system_stop", "Leon stopped", "info")
-        self.memory.save()
+        # Force-flush memory (bypasses debounce) to ensure no data is lost
+        self.memory.save(force=True)
         logger.info("Leon stopped")
 
     async def _auto_daily_briefing(self):
@@ -450,10 +455,15 @@ class Leon:
         env = os.environ.copy()
         env["LEON_API_URL"] = "http://127.0.0.1:3000"
 
-        # Get API token from vault or env
-        api_token = os.environ.get("LEON_API_TOKEN", "")
+        # Get API token — token file is primary source of truth (persists across restarts)
+        _token_file = Path("config/api_token.txt")
+        api_token = _token_file.read_text().strip() if _token_file.exists() else ""
+        if not api_token:
+            api_token = os.environ.get("LEON_API_TOKEN", "")
         if not api_token and self.vault and self.vault._unlocked:
             api_token = self.vault.retrieve("LEON_API_TOKEN") or ""
+        if api_token:
+            os.environ["LEON_API_TOKEN"] = api_token  # keep env in sync
         env["LEON_API_TOKEN"] = api_token
 
         # Set allowed numbers from config
@@ -491,21 +501,51 @@ class Leon:
             self._whatsapp_process = None
 
     async def _whatsapp_watchdog(self):
-        """Restart the WhatsApp bridge automatically if it crashes."""
-        await asyncio.sleep(30)  # give bridge time to start up first
+        """Restart the WhatsApp bridge if it crashes or becomes unresponsive."""
+        await asyncio.sleep(30)
         wa_config = self.config.get("whatsapp", {})
         if not wa_config.get("enabled"):
             return
+        _fail_streak = 0
         while self.running:
-            await asyncio.sleep(30)
-            if self._whatsapp_process and self._whatsapp_process.poll() is not None:
-                logger.warning("WhatsApp bridge died — restarting...")
-                self._whatsapp_process = None
-                self._close_whatsapp_log()  # close leaked FD before restart
+            await asyncio.sleep(60)
+
+            # Check 1: process dead?
+            process_dead = bool(self._whatsapp_process and self._whatsapp_process.poll() is not None)
+
+            # Check 2: health endpoint probe (no message sending — avoids spam)
+            bridge_broken = False
+            if not process_dead:
+                try:
+                    import httpx as _httpx
+                    async with _httpx.AsyncClient(timeout=5.0) as cl:
+                        h = await cl.get("http://127.0.0.1:3001/health")
+                        health_data = h.json()
+                        if not health_data.get("whatsapp_ready"):
+                            bridge_broken = True
+                    _fail_streak = 0
+                except Exception:
+                    _fail_streak += 1
+                    if _fail_streak < 2:
+                        continue  # tolerate one transient blip
+                    bridge_broken = True
+
+            if process_dead or bridge_broken:
+                logger.warning(f"WhatsApp watchdog: unhealthy (dead={process_dead} broken={bridge_broken}) — restarting")
+                if self._whatsapp_process:
+                    try:
+                        self._whatsapp_process.kill()
+                    except Exception:
+                        pass
+                    self._whatsapp_process = None
+                self._close_whatsapp_log()
+                import subprocess as _sp
+                _sp.run(["pkill", "-9", "-f", "chrome.*wwebjs_auth"], capture_output=True)
                 await asyncio.sleep(5)
                 if not self.running:
                     break
                 self._start_whatsapp_bridge(wa_config)
+                _fail_streak = 0
                 logger.info("WhatsApp bridge restarted by watchdog")
 
     # ------------------------------------------------------------------
@@ -589,15 +629,22 @@ class Leon:
 
         # Enable night mode — flexible phrasing
         _nm_on = any(p in msg for p in [
-            "night mode on", "turn on night mode", "switch to night mode", "start night mode",
+            "night mode on", "turn on night mode", "auto mode on", "turn on auto mode",
+            "start auto mode", "enable auto mode", "switch to night mode", "start night mode",
             "enable night mode", "activate night mode", "autonomous mode", "go autonomous",
             "put it in night mode", "night mode:", "night mode,", "coding mode on",
             "work all night", "work through the night", "work overnight",
+            "keep working", "keep going", "work continuously", "continuously work",
+            "work until done", "keep coding", "dont stop working",
+            "continue working", "continue improving", "continue doing", "keep improving",
+            "keep at it", "continue where", "carry on", "continue until",
+            "keep on working", "keep on improving", "keep going until",
         ])
         # Disable night mode — flexible phrasing
         _nm_off = any(p in msg for p in [
-            "night mode off", "turn off night mode", "stop night mode", "disable night mode",
-            "pause night mode", "end night mode", "cancel night mode",
+            "night mode off", "turn off night mode", "auto mode off", "turn off auto mode",
+            "stop auto mode", "stop night mode", "disable night mode",
+            "pause night mode", "end night mode", "cancel night mode", "stop the agents",
         ])
 
         if _nm_on:
@@ -622,19 +669,31 @@ class Leon:
                 ) or (projects[0]["name"] if projects else "Motorev")
                 nm.add_task(_inline_task, project_name)
                 asyncio.create_task(nm.try_dispatch())
-                return f"Night mode on. Task queued for {project_name} — spawning agent now. I'll text you updates every 30 minutes."
+                return f"Auto mode on. Task queued for {project_name} — spawning agent now. I'll text you updates every 30 minutes."
+
+            # No colon-based trigger, but the message itself may describe the work.
+            # If it mentions a known project and has substance, treat the whole message as the task.
+            if not _inline_task and len(message) > 20:
+                _matched_proj = self._resolve_project("", message)
+                # Only use if a real match (not just the default fallback with no name in message)
+                if _matched_proj and _matched_proj["name"].lower() in msg:
+                    nm.add_task(message, _matched_proj["name"])
+                    asyncio.create_task(nm.try_dispatch())
+                    return f"Auto mode on. On it — queuing that for {_matched_proj['name']} and spawning an agent now."
+
             pending = nm.get_pending()
             if pending:
-                return f"Night mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
-            return "Night mode on. Queue is empty — send me the task and I'll get started."
+                asyncio.create_task(nm.try_dispatch())
+                return f"Auto mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
+            return "Auto mode on. Queue is empty — send me the task and I'll get started."
 
         # Disable night mode
         if _nm_off:
             await nm.disable()
             running = nm.get_running()
             if running:
-                return f"Night mode off. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
-            return "Night mode off."
+                return f"Auto mode off. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
+            return "Auto mode off."
 
         # Morning briefing / overnight report
         if any(p in msg for p in ["what did you do", "overnight report", "morning briefing", "what happened last night", "night report", "what got done"]):
@@ -663,7 +722,7 @@ class Leon:
                 task = nm.add_task(desc, project_name)
                 status = f"Queued [{task['id']}]: {desc[:60]} ({project_name})."
                 if not nm.active:
-                    status += " Night mode is off — say 'night mode on' when ready."
+                    status += " Auto mode is off — say 'auto mode on' or 'keep working' when ready."
                 else:
                     # Immediately try to dispatch if slot available
                     asyncio.create_task(nm.try_dispatch())
@@ -1376,9 +1435,17 @@ Vision: {vision_desc}
         tasks = analysis.get("tasks", [])
         project_names = analysis.get("projects", [])
         spawned = []
+        queued_to_night = []  # tasks deferred to night mode to avoid project conflicts
         use_right_brain = (
             self.brain_role == "left" and self.bridge and self.bridge.connected
         )
+
+        # Projects that already have a running agent (from task queue)
+        active_projects = {
+            t.get("project_name", "") for t in self.task_queue.active_tasks.values()
+        }
+        # Projects claimed in this batch (prevent same-project duplicates within one orchestration)
+        batch_projects: set[str] = set()
 
         for i, task_desc in enumerate(tasks):
             proj_name = project_names[i] if i < len(project_names) else "unknown"
@@ -1387,6 +1454,16 @@ Vision: {vision_desc}
             if not project:
                 spawned.append((None, task_desc, "No project matched", ""))
                 continue
+
+            # Per-project guard: never run two agents on the same codebase simultaneously.
+            # If this project already has a running agent (from this batch or the task queue),
+            # queue the task in night mode instead of spawning a new agent.
+            proj_key = project["name"]
+            if proj_key in active_projects or proj_key in batch_projects:
+                self.night_mode.add_task(task_desc, proj_name)
+                queued_to_night.append((task_desc, proj_key))
+                continue
+            batch_projects.add(proj_key)
 
             brief_path = await self._create_task_brief(task_desc, project)
 
@@ -1443,14 +1520,25 @@ Vision: {vision_desc}
                 spawned.append((agent_id, task_desc, project["name"], "local"))
 
         # Build response — conversational, not robotic
-        lines = [f"Right. Breaking that into {len(spawned)} tasks:\n"]
-        for idx, (aid, desc, proj, loc) in enumerate(spawned, 1):
-            if aid:
+        actual = [(aid, desc, proj, loc) for (aid, desc, proj, loc) in spawned if aid]
+        if not actual and not queued_to_night:
+            return "Couldn't match any of those to a project I know about."
+
+        lines = []
+        if actual:
+            lines.append(f"On it. Spawning {len(actual)} agent{'s' if len(actual) != 1 else ''}:\n")
+            for idx, (aid, desc, proj, loc) in enumerate(actual, 1):
                 where = f" [{loc}]" if loc and self.brain_role == "left" else ""
                 lines.append(f"{idx}. **{desc}** — {proj}{where}")
-            else:
-                lines.append(f"{idx}. **{desc}** — on it")
-        lines.append("\nAll running in parallel. I'll keep you posted.")
+        if queued_to_night:
+            if actual:
+                lines.append("")
+            lines.append(
+                f"{len(queued_to_night)} more task{'s' if len(queued_to_night) != 1 else ''} queued — "
+                f"will run after the current agent finishes (one at a time per codebase)."
+            )
+        if actual:
+            lines.append("\nI'll keep you posted.")
 
         return "\n".join(lines)
 
@@ -1614,6 +1702,18 @@ spawned_by: Leon v1.0
         logger.info("Awareness loop started")
         while self.running:
             try:
+                # Ghost cleanup — only for processes that exited with a non-zero code
+                # (exit code 0 = completed normally, handled by check_status below)
+                for agent_id in list(self.agent_manager.active_agents.keys()):
+                    proc = self.agent_manager.active_agents[agent_id].get("process")
+                    exit_code = proc.poll() if proc else None
+                    if exit_code is not None and exit_code != 0:
+                        logger.warning(f"Ghost agent {agent_id} — crashed (exit {exit_code}), cleaning up")
+                        self.task_queue.fail_task(agent_id, f"Process crashed (exit {exit_code})")
+                        self.night_mode.mark_agent_failed(agent_id, f"Process crashed (exit {exit_code})")
+                        self.agent_manager.cleanup_agent(agent_id)
+                        asyncio.create_task(self.night_mode.try_dispatch())
+
                 # Monitor local agents
                 agent_ids = list(self.agent_manager.active_agents.keys())
                 for agent_id in agent_ids:
@@ -1662,8 +1762,24 @@ spawned_by: Leon v1.0
                             agent_id, completion_msg
                         )
 
-                        # Night mode: mark done + immediately try to dispatch next task
+                        # Auto mode: mark done + spawn a self-directed continuation if queue is empty
                         self.night_mode.mark_agent_completed(agent_id, results.get("summary", ""))
+                        if self.night_mode.active and not self.night_mode.get_pending():
+                            # Find the project from the last completed task
+                            last_task = next((t for t in reversed(self.night_mode._backlog)
+                                             if t.get("status") == "completed"), None)
+                            if last_task:
+                                project_name = last_task.get("project", "unknown")
+                                continuation = (
+                                    f"Continue improving the {project_name} codebase. "
+                                    f"Read LEON_PROGRESS.md to see what has already been done, "
+                                    f"then find the next highest-value things to improve — "
+                                    f"performance, code quality, UI polish, bugs, anything that makes it better. "
+                                    f"Do not repeat work already done. Self-direct entirely. "
+                                    f"Commit your changes. Log progress to LEON_PROGRESS.md."
+                                )
+                                self.night_mode.add_task(continuation, project_name)
+                                logger.info(f"Auto mode: queued self-directed continuation for {project_name}")
                         asyncio.create_task(self.night_mode.try_dispatch())
 
                     elif status.get("failed"):

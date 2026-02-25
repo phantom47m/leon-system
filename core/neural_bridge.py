@@ -346,6 +346,11 @@ class BridgeClient:
             else:
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
+                logger.warning(
+                    "Bridge SSL verification DISABLED — no cert_path configured. "
+                    "Connection is vulnerable to MITM. Generate a self-signed cert "
+                    "and set bridge.cert_path in settings.yaml to fix this."
+                )
 
         logger.info(f"Connecting to Left Brain at {self.server_url}")
         async with self._session.ws_connect(self.server_url, ssl=ssl_ctx, heartbeat=20) as ws:

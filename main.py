@@ -23,6 +23,13 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+# ── Load .env file (API keys, DISPLAY, etc.) ─────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set externally
+
 # ── Logging ──────────────────────────────────────────────
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -43,6 +50,64 @@ logger = logging.getLogger("leon")
 
 
 # ═════════════════════════════════════════════════════════
+# SHARED HELPERS
+# ═════════════════════════════════════════════════════════
+
+def _start_dashboard_thread(leon) -> threading.Thread:
+    """Start the dashboard server in a background daemon thread.
+
+    Shared by run_cli() and run_gui() to avoid code duplication.
+    Returns the thread so callers can join() for graceful shutdown.
+    """
+    def _run():
+        from dashboard.server import create_app
+        from aiohttp import web
+        dash_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(dash_loop)
+        app = create_app(leon_core=leon)
+        runner = web.AppRunner(app)
+        dash_loop.run_until_complete(runner.setup())
+        site = web.TCPSite(runner, "127.0.0.1", 3000)
+        dash_loop.run_until_complete(site.start())
+        dash_loop.run_forever()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    logger.info("🧠 Brain Dashboard: http://localhost:3000")
+    return thread
+
+
+def _start_voice_thread(leon) -> threading.Thread:
+    """Start the voice system in a background daemon thread.
+
+    Shared by run_cli() and run_gui() to avoid code duplication.
+    Returns the thread so callers can join() for graceful shutdown.
+    """
+    def _run():
+        from core.voice import VoiceSystem
+        from dashboard.server import broadcast_vad_event
+
+        async def voice_command_handler(text: str) -> str:
+            return await leon.process_user_input(text)
+
+        async def vad_event_handler(event: str, text: str):
+            await broadcast_vad_event(event, text)
+
+        vloop = asyncio.new_event_loop()
+        asyncio.set_event_loop(vloop)
+        voice_cfg = leon.get_voice_config()
+        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
+        voice.on_vad_event = vad_event_handler
+        leon.set_voice_system(voice)
+        vloop.run_until_complete(voice.start())
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    logger.info("🎤 Voice system active — say 'Hey Leon'")
+    return thread
+
+
+# ═════════════════════════════════════════════════════════
 # CLI MODE
 # ═════════════════════════════════════════════════════════
 
@@ -57,39 +122,11 @@ def run_cli(enable_voice=False, enable_dashboard=False):
 
     # ── Start dashboard server in background ──
     if enable_dashboard:
-        def start_dashboard():
-            from dashboard.server import create_app
-            from aiohttp import web
-            dash_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(dash_loop)
-            app = create_app(leon_core=leon)
-            runner = web.AppRunner(app)
-            dash_loop.run_until_complete(runner.setup())
-            site = web.TCPSite(runner, "127.0.0.1", 3000)
-            dash_loop.run_until_complete(site.start())
-            dash_loop.run_forever()
-
-        dash_thread = threading.Thread(target=start_dashboard, daemon=True)
-        dash_thread.start()
-        logger.info("🧠 Brain Dashboard: http://localhost:3000")
+        _start_dashboard_thread(leon)
 
     # ── Start voice system in background ──
     if enable_voice:
-        async def voice_command_handler(text: str) -> str:
-            return await leon.process_user_input(text)
-
-        def start_voice():
-            from core.voice import VoiceSystem
-            vloop = asyncio.new_event_loop()
-            asyncio.set_event_loop(vloop)
-            voice_cfg = leon.get_voice_config()
-            voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
-            leon.set_voice_system(voice)
-            vloop.run_until_complete(voice.start())
-
-        voice_thread = threading.Thread(target=start_voice, daemon=True)
-        voice_thread.start()
-        logger.info("🎤 Voice system active — say 'Hey Leon'")
+        _start_voice_thread(leon)
 
     # ── Print banner ──
     print()
@@ -147,6 +184,8 @@ def run_cli(enable_voice=False, enable_dashboard=False):
     except KeyboardInterrupt:
         print("\n")
 
+    # Graceful shutdown — flush any pending memory writes before stopping
+    leon.memory.flush_if_dirty()
     loop.run_until_complete(leon.stop())
     print("Leon stopped. See you next time!")
 
@@ -190,34 +229,9 @@ def run_gui():
                     loop.run_until_complete(self.leon_core.start())
                 threading.Thread(target=start_leon, daemon=True).start()
 
-                # Start dashboard
-                def start_dashboard():
-                    from dashboard.server import create_app
-                    from aiohttp import web
-                    dash_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(dash_loop)
-                    app = create_app(leon_core=self.leon_core)
-                    runner = web.AppRunner(app)
-                    dash_loop.run_until_complete(runner.setup())
-                    site = web.TCPSite(runner, "127.0.0.1", 3000)
-                    dash_loop.run_until_complete(site.start())
-                    dash_loop.run_forever()
-                threading.Thread(target=start_dashboard, daemon=True).start()
-                logger.info("🧠 Brain Dashboard: http://localhost:3000")
-
-                # Start voice
-                def start_voice():
-                    from core.voice import VoiceSystem
-                    async def handler(text):
-                        return await self.leon_core.process_user_input(text)
-                    vloop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(vloop)
-                    voice_cfg = self.leon_core.get_voice_config()
-                    voice = VoiceSystem(on_command=handler, config=voice_cfg)
-                    self.leon_core.set_voice_system(voice)
-                    vloop.run_until_complete(voice.start())
-                threading.Thread(target=start_voice, daemon=True).start()
-                logger.info("🎤 Voice active — say 'Hey Leon'")
+                # Start dashboard and voice (shared helpers)
+                _start_dashboard_thread(self.leon_core)
+                _start_voice_thread(self.leon_core)
 
                 self.win = LeonWindow(self, self.leon_core)
             self.win.present()
@@ -233,7 +247,7 @@ def run_gui():
 def run_headless():
     """Left Brain headless mode — bridge + dashboard, no terminal input."""
     import os
-    os.environ["LEON_BRAIN_ROLE"] = "left"
+    os.environ["LEON_BRAIN_ROLE"] = "unified"
 
     from core.leon import Leon
     from dashboard.server import create_app
@@ -260,6 +274,39 @@ def run_headless():
     site = web.TCPSite(runner, "127.0.0.1", 3000)
     loop.run_until_complete(site.start())
     logger.info("Dashboard running on http://localhost:3000")
+
+    # Start voice system in background thread
+    import threading
+    def start_voice():
+        from core.voice import VoiceSystem
+        from dashboard.server import broadcast_vad_event
+        vloop = asyncio.new_event_loop()
+        asyncio.set_event_loop(vloop)
+        voice_cfg = leon.get_voice_config()
+
+        async def voice_command_handler(text: str) -> str:
+            return await leon.process_user_input(text)
+
+        async def vad_event_handler(event: str, text: str):
+            await broadcast_vad_event(event, text)
+
+        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg)
+        voice.on_vad_event = vad_event_handler
+        leon.set_voice_system(voice)
+        vloop.run_until_complete(voice.start())
+
+    voice_thread = threading.Thread(target=start_voice, daemon=True)
+    voice_thread.start()
+    logger.info("Voice system starting in background...")
+
+    # Start WhatsApp bridge AFTER dashboard (so API token is available)
+    wa_config = leon.config.get("whatsapp", {})
+    if wa_config.get("enabled") and not leon._whatsapp_process:
+        api_token = app.get("api_token", "")
+        if api_token:
+            import os as _os
+            _os.environ["LEON_API_TOKEN"] = api_token
+        leon._start_whatsapp_bridge(wa_config)
 
     try:
         loop.run_forever()

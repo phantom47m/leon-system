@@ -16,16 +16,29 @@
 5. **No Bluetooth intercom** — Voice channel buttons show "coming soon" alerts.
 6. **No push notifications** — No notification delivery system.
 
-### Resolved This Session (Phase 10)
-- ~~Hardcoded modifications data~~ → Modifications fully wired to store with add/remove/persist
-- ~~shell_exec command injection~~ → Uses shlex.split + shell=False with metachar blocklist
-- ~~API token logged in plaintext~~ → Masked to last 6 characters
-- ~~Phone number in version control~~ → Moved to env var
-- ~~Bridge binds to 0.0.0.0~~ → Defaults to 127.0.0.1
-- ~~Unbounded memory saves~~ → Debounced (5s interval) with flush_if_dirty()
-- ~~Uncapped completed tasks~~ → Capped at 200 during runtime + 500 on flush
+## Leon System Blockers
 
-### Resolved Earlier (Phase 2–9)
+### Medium
+7. **python_exec runs unsandboxed** — No confirmation or restricted execution.
+8. **--dangerously-skip-permissions** — All spawned agents run with full permissions.
+9. **Event loop threading** — Multiple event loops in threads (not thread-safe).
+
+### Low
+10. **leon.py is 1400+ lines** — Too many responsibilities in one class.
+11. **System skill routing costs tokens** — ~1000-token AI prompt per PC control command.
+12. **Stale stt_provider config** — Config says "deepgram" but code uses Groq Whisper.
+
+### Resolved This Session (Phase 11)
+- ~~WhatsApp watchdog zero-width space~~ → Uses /health endpoint only
+- ~~NightMode dispatch race condition~~ → asyncio.Lock guards _try_dispatch
+- ~~Duplicate dashboard startup code~~ → Shared _start_dashboard_thread() helper
+- ~~No graceful shutdown~~ → force-flush memory + coordinated stop
+- ~~Rate limiter unbounded dict~~ → Counter-based periodic cleanup
+- ~~Groq context silently truncated~~ → Debug log on truncation
+- ~~sentByBridge grows without bound~~ → Map with 5-minute TTL eviction
+- ~~SSL verification disabled silently~~ → Security warning logged
+
+### Resolved Earlier (Phase 2–10)
 - ~~33% unused dependencies~~ → Removed 10 packages
 - ~~No design tokens~~ → Full dark theme token system
 - ~~Zero button handlers~~ → Every button responds with feedback
@@ -34,3 +47,10 @@
 - ~~Stock photos reused~~ → Diversified images
 - ~~No GPS/ride tracking~~ → Full GPS tracking with Haversine calc
 - ~~No real weather API~~ → Open-Meteo integration
+- ~~Hardcoded modifications data~~ → Modifications fully wired to store with add/remove/persist
+- ~~shell_exec command injection~~ → Uses shlex.split + shell=False with metachar blocklist
+- ~~API token logged in plaintext~~ → Masked to last 6 characters
+- ~~Phone number in version control~~ → Moved to env var
+- ~~Bridge binds to 0.0.0.0~~ → Defaults to 127.0.0.1
+- ~~Unbounded memory saves~~ → Debounced (5s interval) with flush_if_dirty()
+- ~~Uncapped completed tasks~~ → Capped at 200 during runtime + 500 on flush

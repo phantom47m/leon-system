@@ -42,6 +42,7 @@ class NightMode:
         self._active = False
         self._loop_task: Optional[asyncio.Task] = None
         self._session_log: list[dict] = []
+        self._dispatch_lock = asyncio.Lock()
         self._backlog: list[dict] = self._load_backlog()
 
     # ─── Persistence ──────────────────────────────────────────────────────
@@ -50,7 +51,17 @@ class NightMode:
         if not self.BACKLOG_PATH.exists():
             return []
         try:
-            return json.loads(self.BACKLOG_PATH.read_text())
+            tasks = json.loads(self.BACKLOG_PATH.read_text())
+            # On startup, any "running" tasks have lost their process — reset to pending
+            recovered = 0
+            for t in tasks:
+                if t.get("status") == "running":
+                    t["status"] = "pending"
+                    t["agent_id"] = None
+                    recovered += 1
+            if recovered:
+                logger.info(f"Night mode: recovered {recovered} interrupted task(s) → pending")
+            return tasks
         except Exception:
             return []
 
@@ -179,7 +190,15 @@ class NightMode:
         await self._try_dispatch()
 
     async def _try_dispatch(self):
-        """Check capacity and dispatch pending tasks up to the concurrency limit."""
+        """Check capacity and dispatch pending tasks up to the concurrency limit.
+
+        Uses an asyncio lock to prevent concurrent calls from over-dispatching
+        (e.g. awareness loop + manual trigger racing each other).
+        """
+        async with self._dispatch_lock:
+            await self._try_dispatch_locked()
+
+    async def _try_dispatch_locked(self):
         pending = self.get_pending()
         if not pending:
             return
@@ -191,7 +210,23 @@ class NightMode:
             logger.debug(f"Night mode: {len(pending)} tasks pending, no capacity ({active_count}/{self.leon.task_queue.max_concurrent} agents running)")
             return
 
-        to_dispatch = pending[:capacity]
+        # Never run more than 1 agent per project — prevents git conflicts on same codebase
+        running_projects = {t.get("project") for t in self.get_running()}
+
+        to_dispatch = []
+        for task in pending:
+            if len(to_dispatch) >= capacity:
+                break
+            proj = task.get("project")
+            if proj in running_projects:
+                continue  # Already have an agent on this project, skip
+            to_dispatch.append(task)
+            running_projects.add(proj)  # Reserve this project slot
+
+        if not to_dispatch:
+            logger.debug(f"Night mode: {len(pending)} tasks pending but all projects already have running agents")
+            return
+
         logger.info(f"Night mode: dispatching {len(to_dispatch)} task(s), {capacity} slot(s) available")
         for task in to_dispatch:
             await self._dispatch_task(task)
