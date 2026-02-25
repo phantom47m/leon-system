@@ -18,9 +18,13 @@ if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 5000 ]; then
     echo "Log rotated."
 fi
 
+# Activate virtualenv if it exists
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+fi
+
 MODE="${1:---left-brain}"
 echo "Starting Leon $MODE..."
-# nice -n -5 gives Leon higher CPU priority (all resources go here)
 # Try higher CPU priority (requires root on some systems — falls back gracefully)
 if nice -n -5 true 2>/dev/null; then
     nice -n -5 python3 main.py $MODE >> "$LOG" 2>&1 &
