@@ -55,25 +55,43 @@ class AgentManager:
         stdout_fh = open(output_file, "w")
         stderr_fh = open(error_file, "w")
 
-        # Pipe brief via stdin to avoid argument length limits and shell injection
-        # Unset CLAUDECODE to allow spawning from within a Claude Code session
-        # Point at Leon's own Claude credentials (backup account)
-        spawn_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        leon_auth_dir = Path(__file__).parent.parent / "config" / "claude-auth"
-        if (leon_auth_dir / ".claude" / ".credentials.json").exists():
-            spawn_env["HOME"] = str(leon_auth_dir)
-        process = subprocess.Popen(
-            ["claude", "--print", "-"],
-            stdin=subprocess.PIPE,
-            stdout=stdout_fh,
-            stderr=stderr_fh,
-            cwd=project_path,
-            env=spawn_env,
-        )
+        try:
+            # Pipe brief via stdin to avoid argument length limits and shell injection
+            # Unset CLAUDECODE to allow spawning from within a Claude Code session
+            spawn_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            leon_auth_dir = Path(__file__).parent.parent / "config" / "claude-auth"
+            leon_creds = leon_auth_dir / ".claude" / ".credentials.json"
+            user_creds = Path.home() / ".claude" / ".credentials.json"
 
-        # Write the full brief to stdin and close it so the process can run
-        process.stdin.write(brief_content.encode())
-        process.stdin.close()
+            # Auto-refresh: if user's main credentials are newer/fresher, copy them over
+            if user_creds.exists() and self._credentials_valid(user_creds):
+                try:
+                    import shutil as _shutil
+                    (leon_auth_dir / ".claude").mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(str(user_creds), str(leon_creds))
+                    logger.debug("Auto-refreshed leon-auth credentials from main user")
+                except Exception as e:
+                    logger.warning("Could not auto-refresh leon-auth credentials: %s", e)
+
+            if leon_creds.exists() and self._credentials_valid(leon_creds):
+                spawn_env["HOME"] = str(leon_auth_dir)
+                logger.debug("Agent using leon-auth credentials")
+            process = subprocess.Popen(
+                ["claude", "--print", "--dangerously-skip-permissions", "-"],
+                stdin=subprocess.PIPE,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                cwd=project_path,
+                env=spawn_env,
+            )
+
+            # Write the full brief to stdin and close it so the process can run
+            process.stdin.write(brief_content.encode())
+            process.stdin.close()
+        except Exception:
+            stdout_fh.close()
+            stderr_fh.close()
+            raise
 
         self.active_agents[agent_id] = {
             "process": process,
@@ -220,6 +238,29 @@ class AgentManager:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _credentials_valid(creds_path: Path) -> bool:
+        """Return True if the claude credentials file exists and isn't expired."""
+        try:
+            import json as _json
+            from datetime import datetime as _dt
+            data = _json.loads(creds_path.read_text())
+            oauth = data.get("claudeAiOauth", {})
+            expires_ms = oauth.get("expiresAt", 0)
+            if not expires_ms:
+                return False
+            expires_dt = _dt.fromtimestamp(expires_ms / 1000)
+            valid = _dt.now() < expires_dt
+            if not valid:
+                logger.warning(
+                    "leon-auth credentials expired (%s) — agents will use main user credentials",
+                    expires_dt.strftime("%Y-%m-%d %H:%M")
+                )
+            return valid
+        except Exception as e:
+            logger.warning("Could not parse leon-auth credentials: %s", e)
+            return False
 
     def _close_file_handles(self, agent_id: str):
         """Close any open file handles for an agent."""

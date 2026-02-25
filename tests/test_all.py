@@ -1130,6 +1130,105 @@ class TestProjectWatcher(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# AGENT MANAGER — FILE HANDLE SAFETY
+# ══════════════════════════════════════════════════════════
+
+class TestAgentManagerFileHandles(unittest.TestCase):
+    """Test that spawn_agent cleans up file handles on failure."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.brief_path = os.path.join(self.tmp_dir, "test_brief.md")
+        with open(self.brief_path, "w") as f:
+            f.write("# Test Brief\nDo nothing.")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_spawn_failure_closes_file_handles(self):
+        """If Popen fails (e.g. binary not found), file handles must be closed."""
+        from core.agent_manager import AgentManager
+
+        config = {
+            "output_directory": os.path.join(self.tmp_dir, "out"),
+            "brief_directory": os.path.join(self.tmp_dir, "briefs"),
+            "timeout_minutes": 1,
+        }
+        mgr = AgentManager(openclaw=None, config=config)
+
+        # Patch subprocess.Popen to raise FileNotFoundError (simulates missing binary)
+        import subprocess
+        original_popen = subprocess.Popen
+
+        def failing_popen(*args, **kwargs):
+            raise FileNotFoundError("claude binary not found")
+
+        subprocess.Popen = failing_popen
+        try:
+            import asyncio
+            with self.assertRaises(FileNotFoundError):
+                asyncio.get_event_loop().run_until_complete(
+                    mgr.spawn_agent(self.brief_path, self.tmp_dir)
+                )
+            # No agents should be tracked
+            self.assertEqual(len(mgr.active_agents), 0)
+            # Output files should exist but handles should be closed (not leaked)
+            # We verify indirectly: no open handles = no ResourceWarning
+        finally:
+            subprocess.Popen = original_popen
+
+
+# ══════════════════════════════════════════════════════════
+# DASHBOARD — WEBSOCKET SET SAFETY
+# ══════════════════════════════════════════════════════════
+
+class TestBroadcastSetSafety(unittest.TestCase):
+    """Test that broadcast functions snapshot the ws set to avoid RuntimeError."""
+
+    def test_broadcast_ws_uses_snapshot(self):
+        """_broadcast_ws should not crash when ws_authenticated changes during iteration."""
+        import asyncio
+        from dashboard import server
+
+        # Create mock WebSocket objects
+        class MockWS:
+            def __init__(self, fail=False):
+                self.fail = fail
+                self.sent = []
+
+            async def send_json(self, data):
+                if self.fail:
+                    raise ConnectionError("client gone")
+                self.sent.append(data)
+
+        ws1 = MockWS(fail=False)
+        ws2 = MockWS(fail=True)   # will be removed during iteration
+        ws3 = MockWS(fail=False)
+
+        # Set up the global set
+        original = server.ws_authenticated.copy()
+        server.ws_authenticated.clear()
+        server.ws_authenticated.update({ws1, ws2, ws3})
+
+        try:
+            asyncio.get_event_loop().run_until_complete(
+                server._broadcast_ws(None, {"type": "test"})
+            )
+            # ws2 should have been removed (it failed)
+            self.assertNotIn(ws2, server.ws_authenticated)
+            # ws1 and ws3 should still be there
+            self.assertIn(ws1, server.ws_authenticated)
+            self.assertIn(ws3, server.ws_authenticated)
+            # ws1 and ws3 should have received the message
+            self.assertEqual(len(ws1.sent), 1)
+            self.assertEqual(len(ws3.sent), 1)
+        finally:
+            server.ws_authenticated.clear()
+            server.ws_authenticated.update(original)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

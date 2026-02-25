@@ -51,7 +51,18 @@ WS_AUTH_TIMEOUT = 5.0
 async def index(request):
     """Serve the main brain dashboard page."""
     html = (TEMPLATES_DIR / "index.html").read_text()
-    return web.Response(text=html, content_type="text/html")
+    # Inject file-mtime-based cache busters so the browser always gets fresh assets
+    # after any on-disk change — no manual version bumping required.
+    js_v  = int((STATIC_DIR / "js"  / "brain.js").stat().st_mtime)
+    css_v = int((STATIC_DIR / "css" / "dashboard.css").stat().st_mtime)
+    import re
+    html = re.sub(r'brain\.js\?v=\w+',      f'brain.js?v={js_v}',      html)
+    html = re.sub(r'dashboard\.css\?v=\w+', f'dashboard.css?v={css_v}', html)
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def health(request):
@@ -205,6 +216,58 @@ async def api_health(request):
     })
 
 
+async def api_openclaw_url(request):
+    """
+    GET /api/openclaw-url — Start OpenClaw gateway if needed; return authed dashboard URL.
+    Returns JSON: {"url": "http://127.0.0.1:18789/#token=..."} or {"error": "..."}
+    """
+    import socket as _socket
+    gw = "/home/deansabr/.openclaw/bin/openclaw"
+    if not os.path.exists(gw):
+        return web.json_response({"error": "OpenClaw not installed"}, status=404)
+
+    # Check if gateway is already listening on port 18789
+    running = False
+    try:
+        with _socket.create_connection(("127.0.0.1", 18789), timeout=0.5):
+            running = True
+    except Exception:
+        pass
+
+    if not running:
+        subprocess.Popen(
+            [gw, "gateway", "--port", "18789"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Wait up to 4 s for it to bind
+        for _ in range(8):
+            await asyncio.sleep(0.5)
+            try:
+                with _socket.create_connection(("127.0.0.1", 18789), timeout=0.5):
+                    running = True
+                    break
+            except Exception:
+                pass
+
+    if not running:
+        return web.json_response({"error": "Gateway failed to start"}, status=503)
+
+    # Get the dashboard URL with embedded auth token
+    try:
+        result = subprocess.run([gw, "dashboard"], capture_output=True, text=True, timeout=5)
+        url = ""
+        for line in result.stdout.splitlines():
+            if "Dashboard URL:" in line:
+                url = line.split("Dashboard URL:", 1)[1].strip()
+                break
+        if not url:
+            url = "http://127.0.0.1:18789"
+        return web.json_response({"url": url})
+    except Exception as e:
+        return web.json_response({"url": "http://127.0.0.1:18789", "error": str(e)})
+
+
 async def api_message(request):
     """
     POST /api/message — HTTP API for external integrations (WhatsApp bridge, etc.)
@@ -288,21 +351,63 @@ async def api_message(request):
         "direction": "outgoing",
     })
 
-    return web.json_response({
+    # ── Speak the response via TTS ──
+    audio_base64 = None
+    audio_mime = None
+    try:
+        vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+        response_mode = request.app.get("response_mode", "both")  # voice, text, both
+        should_speak = response_mode in ("voice", "both")
+        if vs and should_speak and response and not response.startswith("["):
+            import asyncio as _asyncio
+            if source == "whatsapp":
+                # For WhatsApp: generate audio to send as voice note, also play locally
+                audio_bytes = await vs.generate_audio(response)
+                if audio_bytes:
+                    import base64 as _base64
+                    audio_base64 = _base64.b64encode(audio_bytes).decode("utf-8")
+                    audio_mime = "audio/mpeg"
+                # Still play locally on the PC
+                _asyncio.create_task(vs.speak(response))
+            else:
+                _asyncio.create_task(vs.speak(response))
+    except Exception as e:
+        logger.debug(f"TTS speak error: {e}")
+
+    reply: dict = {
         "response": response,
         "timestamp": datetime.now().strftime("%H:%M"),
-    })
+    }
+    if audio_base64:
+        reply["audio_base64"] = audio_base64
+        reply["audio_mime"] = audio_mime
+
+    return web.json_response(reply)
 
 
 async def _broadcast_ws(app, data: dict):
     """Push a message to all authenticated WebSocket clients."""
     dead = set()
-    for ws in ws_authenticated:
+    for ws in set(ws_authenticated):  # snapshot to avoid RuntimeError during iteration
         try:
             await ws.send_json(data)
         except Exception:
             dead.add(ws)
     ws_authenticated.difference_update(dead)
+
+
+# Global app reference so voice thread can broadcast without passing app around
+_app_ref = None
+
+async def broadcast_vad_event(event: str, text: str):
+    """Called from voice thread to push live transcription to dashboard."""
+    if _app_ref is None:
+        return
+    await _broadcast_ws(_app_ref, {
+        "type": "vad_event",
+        "event": event,   # "recording" | "transcription"
+        "text": text,
+    })
 
 
 async def websocket_handler(request):
@@ -368,7 +473,9 @@ async def websocket_handler(request):
                     logger.warning("Received malformed JSON on WebSocket")
                     continue
                 # Handle commands from dashboard
-                if data.get("command") == "status":
+                if data.get("command") == "ping":
+                    await ws.send_json({"type": "pong"})
+                elif data.get("command") == "status":
                     if leon:
                         await ws.send_json(_build_state(leon))
                 elif data.get("command") == "input":
@@ -402,6 +509,44 @@ async def websocket_handler(request):
                             "message": f"[Demo] Received: {user_msg}",
                             "timestamp": datetime.now().strftime("%H:%M"),
                         })
+                elif data.get("command") == "voice_wake":
+                    vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+                    if vs and vs.is_listening:
+                        vs.force_wake()
+                        await ws.send_json({"type": "voice_wake_result", "success": True})
+                    else:
+                        await ws.send_json({"type": "voice_wake_result", "success": False,
+                                            "message": "Voice system not active"})
+                elif data.get("command") == "voice_mute":
+                    vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+                    if vs:
+                        vs.mute()
+                        await ws.send_json({"type": "voice_mute_result", "success": True, "muted": True})
+                elif data.get("command") == "voice_unmute":
+                    vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+                    if vs:
+                        vs.unmute()
+                        await ws.send_json({"type": "voice_mute_result", "success": True, "muted": False})
+                elif data.get("command") == "set_response_mode":
+                    mode = data.get("mode", "both")
+                    if mode in ("voice", "text", "both"):
+                        request.app["response_mode"] = mode
+                        await ws.send_json({"type": "settings_updated", "response_mode": mode})
+                elif data.get("command") == "set_voice_volume":
+                    pct = int(data.get("volume", 100))
+                    vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+                    if vs:
+                        vs.set_voice_volume(pct)
+                        request.app["voice_volume"] = pct
+                        await ws.send_json({"type": "settings_updated", "voice_volume": pct})
+                elif data.get("command") == "get_settings":
+                    vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
+                    await ws.send_json({
+                        "type": "settings",
+                        "response_mode": request.app.get("response_mode", "both"),
+                        "voice_volume": request.app.get("voice_volume", 100),
+                        "muted": vs.is_muted if vs else False,
+                    })
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"WebSocket error: {ws.exception()}")
     finally:
@@ -414,18 +559,17 @@ async def websocket_handler(request):
 
 async def broadcast_state(app):
     """Background task that broadcasts brain state to all connected clients."""
-    global ws_authenticated
     leon = app.get("leon_core")
     while True:
         if ws_authenticated and leon:
             state = _build_state(leon)
             dead = set()
-            for ws in ws_authenticated:
+            for ws in set(ws_authenticated):  # snapshot to avoid RuntimeError during iteration
                 try:
                     await ws.send_json(state)
                 except Exception:
                     dead.add(ws)
-            ws_authenticated -= dead
+            ws_authenticated.difference_update(dead)
 
         await asyncio.sleep(2)  # Update every 2 seconds
 
@@ -549,22 +693,73 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
 
         elif cmd == "/setkey":
             if not arg:
-                return "Usage: `/setkey <api_key>`"
-            # Store key in vault and set in environment
-            if leon.vault and leon.vault._unlocked:
-                leon.vault.store("ANTHROPIC_API_KEY", arg)
-                os.environ["ANTHROPIC_API_KEY"] = arg
-                if hasattr(leon, 'api') and hasattr(leon.api, 'set_api_key'):
-                    leon.api.set_api_key(arg)
-                if leon.audit_log:
-                    leon.audit_log.log("set_api_key", "API key updated via dashboard", "info")
-                return "API key stored in vault and activated. Leon can now respond to messages."
+                return (
+                    "Usage:\n"
+                    "- `/setkey <anthropic_key>` — Anthropic paid API\n"
+                    "- `/setkey groq <key>` — Groq free tier (get key at console.groq.com)\n\n"
+                    "**Free option:** Sign up at https://console.groq.com → API Keys → Create Key"
+                )
+
+            # Check for provider prefix: /setkey groq <key> | /setkey elevenlabs <key>
+            parts = arg.split(None, 1)
+            prefix = parts[0].lower()
+            if prefix == "groq" and len(parts) == 2:
+                vault_key = "GROQ_API_KEY"
+                env_key = "GROQ_API_KEY"
+                provider = "groq"
+                display = "Groq"
+                key_value = parts[1].strip()
+            elif prefix in ("elevenlabs", "11labs", "el") and len(parts) == 2:
+                vault_key = "ELEVENLABS_API_KEY"
+                env_key = "ELEVENLABS_API_KEY"
+                provider = "elevenlabs"
+                display = "ElevenLabs"
+                key_value = parts[1].strip()
             else:
-                # Vault not unlocked — just set env
-                os.environ["ANTHROPIC_API_KEY"] = arg
-                if hasattr(leon, 'api') and hasattr(leon.api, 'set_api_key'):
-                    leon.api.set_api_key(arg)
-                return "API key set in environment (vault locked — key not persisted). Leon can now respond."
+                vault_key = "ANTHROPIC_API_KEY"
+                env_key = "ANTHROPIC_API_KEY"
+                provider = "anthropic"
+                display = "Anthropic"
+                key_value = arg.strip()
+
+            # Store in vault and activate
+            if leon.vault and leon.vault._unlocked:
+                leon.vault.store(vault_key, key_value)
+            os.environ[env_key] = key_value
+            if provider == "elevenlabs":
+                # Update voice system directly
+                if leon.voice and hasattr(leon.voice, 'elevenlabs_api_key'):
+                    leon.voice.elevenlabs_api_key = key_value
+                    leon.voice.reset_elevenlabs()
+            elif hasattr(leon, 'api') and hasattr(leon.api, 'set_api_key'):
+                leon.api.set_api_key(key_value, provider=provider)
+            if leon.audit_log:
+                leon.audit_log.log("set_api_key", f"{display} key updated via dashboard", "info")
+            persisted = " and saved to vault" if (leon.vault and leon.vault._unlocked) else " (vault locked — not persisted)"
+            extra = " Voice will now use ElevenLabs TTS." if provider == "elevenlabs" else f" Leon is now using **{display}** for AI responses."
+            return f"{display} API key activated{persisted}.{extra}"
+
+        elif cmd == "/provider":
+            if hasattr(leon, 'api') and hasattr(leon.api, 'get_provider_info'):
+                info = leon.api.get_provider_info()
+                name = info.get("name", "Unknown")
+                model = info.get("model", "—")
+                cost = info.get("cost", "—")
+                auth = getattr(leon.api, '_auth_method', 'none')
+                lines = [
+                    f"**Active AI Provider:** {name}",
+                    f"**Model:** {model}",
+                    f"**Cost:** {cost}",
+                    "",
+                    "**Available options:**",
+                    f"- Groq free: `/setkey groq <key>` (console.groq.com)",
+                    f"- Anthropic paid: `/setkey <key>`",
+                    f"- Ollama local: install ollama + run `ollama serve`",
+                ]
+                if auth == "none":
+                    lines.insert(0, "⚠️ No AI provider configured — Leon can't respond to natural language.\n")
+                return "\n".join(lines)
+            return "API client not initialized."
 
         elif cmd == "/vault":
             if arg == "list" or not arg:
@@ -780,7 +975,7 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
             return "Memory system not available."
 
         elif cmd == "/voice":
-            if hasattr(leon, 'voice_system') and leon.hotkey_listener and leon.hotkey_listener.voice_system:
+            if leon and leon.hotkey_listener and leon.hotkey_listener.voice_system:
                 vs = leon.hotkey_listener.voice_system
                 state = vs.listening_state if hasattr(vs, 'listening_state') else {}
                 return (
@@ -795,6 +990,30 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                     f"- Push-to-talk: {leon.hotkey_listener.ptt_key_name}"
                 )
             return "Voice system not active. Start Leon with `--voice` or `--full` flag."
+
+        elif cmd == "/openclaw":
+            import subprocess, shutil
+            gw = "/home/deansabr/.openclaw/bin/openclaw"
+            if not shutil.which(gw) and not os.path.exists(gw):
+                return "OpenClaw not installed."
+            # Check if already running
+            check = subprocess.run(["pgrep", "-f", "openclaw-gatewa"], capture_output=True)
+            if check.returncode != 0:
+                subprocess.Popen(
+                    [gw, "gateway", "--port", "18789"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            # Get the authed URL
+            try:
+                r = subprocess.run([gw, "dashboard"], capture_output=True, text=True, timeout=5)
+                for line in r.stdout.splitlines():
+                    if "Dashboard URL:" in line:
+                        url = line.split("Dashboard URL:", 1)[1].strip()
+                        return f"OpenClaw ready — {url}"
+            except Exception:
+                pass
+            return "OpenClaw gateway started — opening at http://127.0.0.1:18789"
 
         elif cmd == "/restart":
             return (
@@ -843,7 +1062,8 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/export` — export conversation history to markdown\n"
                 "- `/context` — memory usage and context stats\n"
                 "- `/bridge` — Right Brain connection status\n"
-                "- `/setkey <key>` — store API key in vault\n"
+                "- `/setkey groq <key>` — set Groq free API key (console.groq.com)\n"
+                "- `/setkey <key>` — set Anthropic API key\n"
                 "- `/vault list` — show stored vault keys\n"
                 "- `/approve <action>` — grant temporary permission\n"
                 "- `/login <pin>` — authenticate as owner\n"
@@ -969,8 +1189,15 @@ def create_app(leon_core=None) -> web.Application:
     app = web.Application()
     app["leon_core"] = leon_core
 
-    # Generate session token for WebSocket authentication
-    token = secrets.token_hex(16)
+    # Persistent session token (survives restarts via vault or env)
+    token = None
+    if leon_core and hasattr(leon_core, "vault") and leon_core.vault and leon_core.vault._unlocked:
+        token = leon_core.vault.retrieve("LEON_SESSION_TOKEN")
+        if not token:
+            token = secrets.token_hex(16)
+            leon_core.vault.store("LEON_SESSION_TOKEN", token)
+    if not token:
+        token = os.environ.get("LEON_SESSION_TOKEN", secrets.token_hex(16))
     app["session_token"] = token
     print(f"\n  Dashboard session token: {token}\n", flush=True)
     logger.info(f"Dashboard session token: {token}")
@@ -986,6 +1213,8 @@ def create_app(leon_core=None) -> web.Application:
     if not api_token:
         api_token = os.environ.get("LEON_API_TOKEN", secrets.token_hex(24))
     app["api_token"] = api_token
+    app["response_mode"] = "both"   # voice, text, both
+    app["voice_volume"] = 100       # 0-200
     print(f"  API token (for WhatsApp bridge): {api_token}\n", flush=True)
     logger.info(f"API token: {api_token}")
 
@@ -993,12 +1222,15 @@ def create_app(leon_core=None) -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/api/health", api_health)
+    app.router.add_get("/api/openclaw-url", api_openclaw_url)
     app.router.add_post("/api/message", api_message)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
 
     # Background broadcaster
     async def start_broadcaster(app):
+        global _app_ref
+        _app_ref = app
         app["broadcaster"] = asyncio.create_task(broadcast_state(app))
 
     async def stop_broadcaster(app):

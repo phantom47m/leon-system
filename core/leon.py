@@ -35,6 +35,7 @@ from .hotkey_listener import HotkeyListener
 from .screen_awareness import ScreenAwareness
 from .notifications import NotificationManager, Priority
 from .project_watcher import ProjectWatcher
+from .night_mode import NightMode
 
 logger = logging.getLogger("leon")
 
@@ -211,6 +212,9 @@ class Leon:
         self._vision_task = None
         self._whatsapp_process = None
 
+        # Overnight autonomous coding mode
+        self.night_mode = NightMode(self)
+
         logger.info(f"Leon initialized — brain_role={self.brain_role}")
 
     # ------------------------------------------------------------------
@@ -229,6 +233,7 @@ class Leon:
             logger.info("Neural bridge server started (Left Brain mode)")
 
         self._awareness_task = asyncio.create_task(self._awareness_loop())
+        self._ram_watchdog_task = asyncio.create_task(self._ram_watchdog())
 
         # Start vision if camera available
         if self.vision:
@@ -290,6 +295,14 @@ class Leon:
         wa_config = self.config.get("whatsapp", {})
         if wa_config.get("enabled") and wa_config.get("auto_start"):
             self._start_whatsapp_bridge(wa_config)
+
+        # Watchdog — restart bridge if it dies
+        asyncio.create_task(self._whatsapp_watchdog())
+
+        # Resume night mode if it was active before restart and has pending tasks
+        if self.night_mode.get_pending():
+            asyncio.create_task(self.night_mode.enable())
+            logger.info(f"Night mode auto-resumed: {len(self.night_mode.get_pending())} pending tasks")
 
         logger.info("Leon is now running — all systems active")
 
@@ -383,6 +396,8 @@ class Leon:
             await self.screen_awareness.stop()
         if self.notifications:
             await self.notifications.stop()
+        if self.night_mode and self.night_mode.active:
+            await self.night_mode.disable()
         if self.bridge:
             await self.bridge.stop()
         if self.vault:
@@ -436,19 +451,41 @@ class Leon:
             return
 
         try:
-            self._whatsapp_process = subprocess.Popen(
-                ["node", "bridge.js"],
-                cwd=str(bridge_dir),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            logger.info(f"WhatsApp bridge started (PID {self._whatsapp_process.pid})")
+            log_path = Path("logs/whatsapp_bridge.log")
+            log_path.parent.mkdir(exist_ok=True)
+            wa_log = open(log_path, "a")
+            try:
+                self._whatsapp_process = subprocess.Popen(
+                    ["node", "bridge.js"],
+                    cwd=str(bridge_dir),
+                    env=env,
+                    stdout=wa_log,
+                    stderr=wa_log,
+                )
+            except Exception:
+                wa_log.close()
+                raise
+            logger.info(f"WhatsApp bridge started (PID {self._whatsapp_process.pid}), log → {log_path}")
             if self.audit_log:
                 self.audit_log.log("whatsapp_bridge_start", f"PID {self._whatsapp_process.pid}", "info")
         except Exception as e:
             logger.error(f"Failed to start WhatsApp bridge: {e}")
             self._whatsapp_process = None
+
+    async def _whatsapp_watchdog(self):
+        """Restart the WhatsApp bridge automatically if it crashes."""
+        await asyncio.sleep(30)  # give bridge time to start up first
+        wa_config = self.config.get("whatsapp", {})
+        if not wa_config.get("enabled"):
+            return
+        while True:
+            await asyncio.sleep(30)
+            if self._whatsapp_process and self._whatsapp_process.poll() is not None:
+                logger.warning("WhatsApp bridge died — restarting...")
+                self._whatsapp_process = None
+                await asyncio.sleep(5)
+                self._start_whatsapp_bridge(wa_config)
+                logger.info("WhatsApp bridge restarted by watchdog")
 
     # ------------------------------------------------------------------
     # Main input handler
@@ -483,8 +520,36 @@ class Leon:
         else:
             response = await self._orchestrate(message, analysis)
 
+        # Hard filter — strip any "sir" the LLM snuck in, no exceptions
+        response = self._strip_sir(response)
+
         self.memory.add_conversation(response, role="assistant")
+
+        # Self-memory: passively extract facts worth remembering
+        asyncio.create_task(self._extract_memory(message, response))
+
         return response
+
+    async def _extract_memory(self, user_msg: str, response: str):
+        """Background task: extract and persist any notable facts from this exchange."""
+        msg_lower = user_msg.lower()
+
+        # Explicit "remember" triggers — high confidence, store immediately
+        remember_triggers = ["remember that", "remember my", "my name is", "i am ",
+                             "i prefer ", "i like ", "i hate ", "i always ", "i never ",
+                             "my favorite", "my email is", "my phone", "note that",
+                             "keep in mind", "don't forget"]
+        if any(t in msg_lower for t in remember_triggers):
+            prompt = (
+                f"The user said: \"{user_msg}\"\n\n"
+                "Extract the key fact to remember as a short JSON object:\n"
+                "{\"key\": \"short_key\", \"value\": \"fact to remember\"}\n"
+                "Only respond with JSON. If nothing is worth remembering, return {}."
+            )
+            result = await self.api.analyze_json(prompt)
+            if result and result.get("key") and result.get("value"):
+                self.memory.learn(result["key"], result["value"])
+                logger.info(f"Self-memory: learned '{result['key']}' = '{result['value']}'")
 
     # ------------------------------------------------------------------
     # Special command routing (hardware, business, vision, security)
@@ -497,6 +562,113 @@ class Leon:
         # Help command — list available modules
         if msg.strip() in ("help", "what can you do", "commands", "modules"):
             return self._build_help_text()
+
+        # ── Night Mode / Autonomous Coding ──────────────────────────────
+        nm = self.night_mode
+
+        # Enable night mode
+        if any(p in msg for p in ["night mode on", "autonomous mode", "start night mode", "enable night mode", "go autonomous"]):
+            await nm.enable()
+            pending = nm.get_pending()
+            if pending:
+                return f"Night mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
+            return "Night mode on. Queue is empty — add tasks with 'queue task: [description] for [project]'."
+
+        # Disable night mode
+        if any(p in msg for p in ["night mode off", "stop night mode", "disable night mode", "pause night mode"]):
+            await nm.disable()
+            running = nm.get_running()
+            if running:
+                return f"Night mode paused. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
+            return "Night mode off."
+
+        # Morning briefing / overnight report
+        if any(p in msg for p in ["what did you do", "overnight report", "morning briefing", "what happened last night", "night report", "what got done"]):
+            briefing = nm.generate_morning_briefing()
+            return briefing
+
+        # Add task to backlog
+        queue_triggers = ["queue task:", "add task:", "add to backlog:", "tonight do:", "tonight work on:", "work on tonight:", "add to queue:"]
+        for trigger in queue_triggers:
+            if trigger in msg:
+                remainder = message[message.lower().index(trigger) + len(trigger):].strip()
+                # Parse "description for project" or "description in project"
+                project_name = None
+                desc = remainder
+                for sep in [" for ", " in ", " on "]:
+                    if sep in remainder.lower():
+                        parts = remainder.split(sep, 1)
+                        if len(parts) == 2:
+                            desc = parts[0].strip()
+                            project_name = parts[1].strip()
+                            break
+                if not project_name:
+                    # No project specified — use first project as default
+                    projects = self.projects_config.get("projects", [])
+                    project_name = projects[0]["name"] if projects else "unknown"
+                task = nm.add_task(desc, project_name)
+                status = f"Queued [{task['id']}]: {desc[:60]} ({project_name})."
+                if not nm.active:
+                    status += " Night mode is off — say 'night mode on' when ready."
+                else:
+                    # Immediately try to dispatch if slot available
+                    asyncio.create_task(nm.try_dispatch())
+                    status += " Dispatching now if a slot's free."
+                return status
+
+        # List backlog
+        if any(p in msg for p in ["backlog", "night queue", "task queue", "what's queued", "what's in the queue", "show queue", "list tasks"]):
+            backlog_text = nm.get_backlog_text()
+            status_line = nm.get_status_text()
+            return f"{status_line}\n\n{backlog_text}"
+
+        # Night mode status
+        if any(p in msg for p in ["night mode status", "night mode", "autonomous status"]) and "on" not in msg and "off" not in msg:
+            return nm.get_status_text()
+
+        # Clear backlog
+        if any(p in msg for p in ["clear backlog", "clear queue", "cancel all tasks", "empty the queue"]):
+            cleared = nm.clear_pending()
+            if cleared:
+                return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
+            return "Nothing pending to clear."
+
+        # ── Self-optimization / code review ─────────────────────────────
+        self_opt_triggers = [
+            "self optim", "self-optim", "optimize yourself", "review your code",
+            "fix your own code", "improve your code", "review your own", "self improve",
+            "self-improve", "check your code", "audit your code", "what's broken in your code",
+        ]
+        if any(p in msg for p in self_opt_triggers):
+            leon_path = str(Path(__file__).parent.parent)
+            project = {
+                "name": "Leon System",
+                "path": leon_path,
+                "tech_stack": ["Python", "aiohttp", "asyncio", "JavaScript", "Node.js"],
+                "description": "Leon's own source code",
+            }
+            task_desc = (
+                "Perform a self-improvement audit of the Leon AI system codebase. "
+                "Read the core Python files (core/leon.py, core/voice.py, dashboard/server.py, "
+                "core/agent_manager.py, core/task_queue.py, core/night_mode.py). "
+                "Identify: (1) bugs or error handling gaps, (2) code that could be more robust, "
+                "(3) anything that might cause unexpected behavior. "
+                "Fix the top 3 most impactful issues you find. Write a summary of what you changed."
+            )
+            brief_path = await self._create_task_brief(task_desc, project)
+            agent_id = await self.agent_manager.spawn_agent(
+                brief_path=brief_path,
+                project_path=leon_path,
+            )
+            task_obj = {
+                "id": agent_id,
+                "description": task_desc,
+                "project_name": "Leon System",
+                "brief_path": brief_path,
+            }
+            self.task_queue.add_task(agent_id, task_obj)
+            self.memory.add_active_task(agent_id, task_obj)
+            return "Running a self-audit now. I'll read my own code, find the top issues, and fix them. I'll let you know what I find."
 
         # 3D Printing
         if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti", "print job", "print queue"]):
@@ -580,11 +752,13 @@ class Leon:
         # Instead of 100 keyword checks, send to AI for smart classification
         system_hints = [
             "open ", "close ", "launch ", "start ", "kill ", "switch to",
+            "go to ", "navigate to ", "pull up ", "show me ",
             "cpu", "ram", "memory", "disk", "storage", "processes", "uptime",
             "ip address", "battery", "temperature", "temp",
             "play", "pause", "next track", "previous track", "volume", "mute",
             "now playing", "what's playing", "music",
-            "screenshot", "clipboard", "notify", "notification", "lock screen",
+            "screenshot", "take a screenshot", "screen",
+            "clipboard", "notify", "notification", "lock screen",
             "brightness", "find file", "recent files", "downloads", "trash",
             "wifi", "network", "speed test", "ping",
             "timer", "alarm", "set timer", "set alarm", "remind",
@@ -592,8 +766,28 @@ class Leon:
             "git status", "npm", "pip install", "port",
             "what's eating", "what's hogging", "what's running",
             "gpu", "graphics card", "vram", "cuda",
-            "clipboard history", "clipboard search", "what did i copy",
             "workspace", "tile", "minimize", "maximize", "snap",
+            "tab", "browser", "discord", "youtube", "reddit", "twitter",
+            "github", "spotify", "netflix", "twitch", "website", "site",
+            "schedule", "cron", "scheduled", "remind me every", "every hour",
+            "every day", "every morning", "every night", "run every", "recurring",
+            # terminal & code
+            "run command", "run script", "execute", "shell", "bash ", "terminal command",
+            "python ", "run python", "python code", "run code",
+            # OCR
+            "read the screen", "what's on screen", "whats on screen", "ocr",
+            "read screen", "extract text from screen",
+            # search
+            "search for ", "look up ", "look up", "fast search", "quick search",
+            "what is ", "who is ", "define ",
+            # notes
+            "note ", "notes", "save a note", "write a note", "remember this",
+            "my notes", "search notes", "delete note",
+            # home assistant
+            "turn on ", "turn off ", "turn the ", "lights ", "thermostat",
+            "home assistant", "smart home", "switch on", "switch off",
+            # telegram
+            "send telegram", "telegram message", "message on telegram",
         ]
         if any(hint in msg for hint in system_hints):
             skill_result = await self._route_to_system_skill(message)
@@ -603,48 +797,351 @@ class Leon:
         return None
 
     async def _route_to_system_skill(self, message: str) -> Optional[str]:
-        """Use AI to classify a message into a system skill call, then execute it."""
+        """Route PC control commands — browser agent via OpenClaw, system info via skills."""
+        msg = message.lower()
+
+        # ── Voice volume (Leon's TTS gain) — handle before AI router ──────────
+        _voice_vol_phrases = [
+            "your voice volume", "your volume up", "your volume down",
+            "turn your voice", "set your voice", "voice louder", "voice quieter",
+            "speak louder", "speak quieter", "speak softer", "speak up",
+            "talk louder", "talk quieter", "talk softer",
+        ]
+        if any(p in msg for p in _voice_vol_phrases):
+            vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
+            if vs:
+                import re as _re
+                pct_match = _re.search(r'(\d+)\s*%', msg)
+                if pct_match:
+                    return vs.set_voice_volume(int(pct_match.group(1)))
+                elif any(w in msg for w in ("up", "louder", "higher", "more")):
+                    new = min(200, int(vs._voice_volume * 100) + 20)
+                    return vs.set_voice_volume(new)
+                elif any(w in msg for w in ("down", "quieter", "lower", "softer", "less")):
+                    new = max(10, int(vs._voice_volume * 100) - 20)
+                    return vs.set_voice_volume(new)
+
+        # Direct cron dispatches — don't burn an AI call for unambiguous cron requests
+        cron_list_hints = ["list cron", "cron jobs", "scheduled tasks", "my schedules",
+                           "what's scheduled", "whats scheduled", "show schedules",
+                           "show cron", "cron list"]
+        if any(h in msg for h in cron_list_hints):
+            jobs = self.openclaw.cron.list_jobs(include_disabled=True)
+            return self.openclaw.cron.format_jobs(jobs)
+
         skill_list = self.system_skills.get_skill_list()
 
-        prompt = f"""You are a skill router. Given the user's message, determine which system skill to call.
+        prompt = f"""You are a PC control router for Leon AI. Classify the user's request.
 
 User message: "{message}"
 
-{skill_list}
-
 Respond with ONLY valid JSON (no markdown fences):
 {{
-  "skill": "skill_name",
-  "args": {{"arg1": "value1"}},
+  "action": "browser_open" | "browser_agent" | "browser_screenshot" | "cron_list" | "cron_add" | "cron_remove" | "cron_run" | "system_skill" | "none",
+  "url": "starting URL for browser actions (e.g. https://discord.com)",
+  "goal": "natural language goal for browser_agent tasks",
+  "skill": "skill_name if system_skill",
+  "args": {{}},
   "confidence": 0.0-1.0
 }}
 
-If NO skill matches, respond: {{"skill": null, "args": {{}}, "confidence": 0.0}}
+Rules:
+- "browser_open" = ONLY open a site with no further interaction needed
+- "browser_agent" = anything that requires interacting with a page (clicking, typing, searching, filling forms, sending messages, etc.)
+- "browser_screenshot" = user wants to see/screenshot the current browser page
+- "cron_list" = list scheduled/recurring tasks
+- "cron_add" = schedule a new recurring task: args must include name, message, and ONE of: every (e.g. "1h", "30m"), cron (cron expr), at (e.g. "+10m" or ISO)
+- "cron_remove" = delete a scheduled task: args must include id
+- "cron_run" = run a scheduled task right now: args must include id
+- "system_skill" = system info, media control, file search, timers (NOT browser tasks)
+- "none" = not a PC control request
 
-Examples:
-- "what's eating my RAM" -> {{"skill": "top_processes", "args": {{"n": 10}}, "confidence": 0.95}}
-- "open Firefox" -> {{"skill": "open_app", "args": {{"name": "firefox"}}, "confidence": 0.99}}
-- "pause the music" -> {{"skill": "play_pause", "args": {{}}, "confidence": 0.95}}
-- "how's the weather" -> {{"skill": "weather", "args": {{}}, "confidence": 0.9}}
-- "set a timer for 5 minutes" -> {{"skill": "set_timer", "args": {{"minutes": 5, "label": "Timer"}}, "confidence": 0.95}}
-- "take a screenshot" -> {{"skill": "screenshot", "args": {{}}, "confidence": 0.99}}
-- "what's my IP" -> {{"skill": "ip_address", "args": {{}}, "confidence": 0.95}}"""
+Browser examples:
+- "open discord" -> {{"action": "browser_open", "url": "https://discord.com", "confidence": 0.99}}
+- "open youtube" -> {{"action": "browser_open", "url": "https://youtube.com", "confidence": 0.99}}
+- "play love sosa on youtube" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for Love Sosa, click the first video result to play it, then mark done immediately", "confidence": 0.99}}
+- "play [song] on youtube" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for [song], click the first video result to start playing it, mark done after clicking", "confidence": 0.99}}
+- "search youtube for lofi music" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for lofi music and open the first result", "confidence": 0.99}}
+- "google how to make pasta" -> {{"action": "browser_agent", "url": "https://google.com", "goal": "search for how to make pasta", "confidence": 0.99}}
+- "send a message on discord" -> {{"action": "browser_agent", "url": "https://discord.com", "goal": "send a message on discord", "confidence": 0.95}}
+- "click the subscribe button" -> {{"action": "browser_agent", "url": null, "goal": "click the subscribe button on the current page", "confidence": 0.95}}
+- "log into github" -> {{"action": "browser_agent", "url": "https://github.com/login", "goal": "log into github", "confidence": 0.95}}
+- "show me the screen" -> {{"action": "browser_screenshot", "confidence": 0.9}}
+- "open a new terminal" -> {{"action": "system_skill", "skill": "open_app", "args": {{"name": "terminal"}}, "confidence": 0.95}}
 
-        result = await self.api.analyze_json(prompt)
-        if not result or not result.get("skill"):
+Cron examples:
+- "remind me every morning at 9am to check email" -> {{"action": "cron_add", "args": {{"name": "morning email reminder", "message": "remind me to check email", "cron": "0 9 * * *"}}, "confidence": 0.95}}
+- "check the weather every hour" -> {{"action": "cron_add", "args": {{"name": "hourly weather", "message": "what's the weather", "every": "1h"}}, "confidence": 0.95}}
+- "run a task in 30 minutes" -> {{"action": "cron_add", "args": {{"name": "30min task", "message": "do the task", "at": "+30m"}}, "confidence": 0.95}}
+- "show my scheduled tasks" -> {{"action": "cron_list", "confidence": 0.95}}
+- "delete cron job abc123" -> {{"action": "cron_remove", "args": {{"id": "abc123"}}, "confidence": 0.95}}
+
+System skill examples:
+{skill_list}
+- "what's eating my RAM" -> {{"action": "system_skill", "skill": "top_processes", "args": {{"n": 10}}, "confidence": 0.95}}
+- "pause the music" -> {{"action": "system_skill", "skill": "play_pause", "args": {{}}, "confidence": 0.95}}
+- "turn my volume up" -> {{"action": "system_skill", "skill": "volume_up", "args": {{"step": 10}}, "confidence": 0.99}}
+- "turn my volume down" -> {{"action": "system_skill", "skill": "volume_down", "args": {{"step": 10}}, "confidence": 0.99}}
+- "set my volume to 50%" -> {{"action": "system_skill", "skill": "volume_set", "args": {{"pct": 50}}, "confidence": 0.99}}
+- "mute my pc" -> {{"action": "system_skill", "skill": "mute", "args": {{}}, "confidence": 0.99}}
+- "set a timer for 5 minutes" -> {{"action": "system_skill", "skill": "set_timer", "args": {{"minutes": 5, "label": "Timer"}}, "confidence": 0.95}}
+- "run ls -la" -> {{"action": "system_skill", "skill": "shell_exec", "args": {{"command": "ls -la"}}, "confidence": 0.95}}
+- "run this python: print(2+2)" -> {{"action": "system_skill", "skill": "python_exec", "args": {{"code": "print(2+2)"}}, "confidence": 0.95}}
+- "what's on my screen" -> {{"action": "system_skill", "skill": "ocr_screen", "args": {{}}, "confidence": 0.95}}
+- "search for what is a black hole" -> {{"action": "system_skill", "skill": "fast_search", "args": {{"query": "what is a black hole"}}, "confidence": 0.9}}
+- "save a note: buy milk" -> {{"action": "system_skill", "skill": "note_add", "args": {{"content": "buy milk"}}, "confidence": 0.95}}
+- "show my notes" -> {{"action": "system_skill", "skill": "note_list", "args": {{}}, "confidence": 0.95}}
+- "search notes for grocery" -> {{"action": "system_skill", "skill": "note_search", "args": {{"query": "grocery"}}, "confidence": 0.95}}
+- "turn on the bedroom light" -> {{"action": "system_skill", "skill": "ha_set", "args": {{"entity_id": "light.bedroom", "service": "turn_on"}}, "confidence": 0.9}}
+- "what's the bedroom light status" -> {{"action": "system_skill", "skill": "ha_get", "args": {{"entity_id": "light.bedroom"}}, "confidence": 0.9}}
+- "send telegram: hey call me" -> {{"action": "system_skill", "skill": "send_telegram", "args": {{"message": "hey call me"}}, "confidence": 0.95}}"""
+
+        result = await self.api.analyze_json(prompt, smart=True)
+        if not result:
             return None
 
+        action = result.get("action", "none")
         confidence = result.get("confidence", 0)
-        if confidence < 0.7:
+
+        if confidence < 0.7 or action == "none":
             return None
 
-        skill_name = result["skill"]
-        args = result.get("args", {})
+        logger.info(f"PC control: action={action} confidence={confidence}")
 
-        logger.info(f"System skill: {skill_name}({args}) confidence={confidence}")
+        if action == "browser_open":
+            url = result.get("url", "")
+            if url:
+                return self.openclaw.browser.open_url(url)
+            return None
 
-        skill_result = await self.system_skills.execute(skill_name, args)
-        return skill_result
+        if action == "browser_agent":
+            goal = result.get("goal", message)
+            url = result.get("url")
+            return await self._execute_browser_agent(goal, start_url=url)
+
+        if action == "browser_screenshot":
+            path = self.openclaw.browser.screenshot()
+            return f"Screenshot saved to {path}." if path else "Couldn't take screenshot."
+
+        if action == "cron_list":
+            jobs = self.openclaw.cron.list_jobs(include_disabled=True)
+            return self.openclaw.cron.format_jobs(jobs)
+
+        if action == "cron_add":
+            args = result.get("args", {})
+            name = args.get("name", "Leon task")
+            message = args.get("message", "")
+            every = args.get("every")
+            cron_expr = args.get("cron")
+            at = args.get("at")
+            tz = args.get("tz")
+            if not message:
+                return "Couldn't schedule — no task message specified."
+            job = self.openclaw.cron.add_job(name, message, every=every, cron=cron_expr, at=at, tz=tz)
+            if job.get("ok") is False:
+                return f"Failed to schedule: {job.get('error', 'unknown error')}"
+            job_id = job.get("id", "?")
+            sched = every or cron_expr or at or "?"
+            return f"Scheduled '{name}' ({sched}) — ID: {job_id}"
+
+        if action == "cron_remove":
+            job_id = result.get("args", {}).get("id", "")
+            if not job_id:
+                return "Which cron job? Tell me the ID (use 'show my scheduled tasks' to list them)."
+            return self.openclaw.cron.remove_job(job_id)
+
+        if action == "cron_run":
+            job_id = result.get("args", {}).get("id", "")
+            if not job_id:
+                return "Which cron job? Tell me the ID."
+            return self.openclaw.cron.run_now(job_id)
+
+        if action == "system_skill":
+            skill_name = result.get("skill")
+            args = result.get("args", {})
+            if not skill_name:
+                return None
+            return await self.system_skills.execute(skill_name, args)
+
+        return None
+
+    async def _execute_browser_agent(self, goal: str, start_url: str = None, max_steps: int = 8) -> str:
+        """
+        Agentic browser loop — reads the page, decides next action, executes, repeats.
+        Gives Leon the full power of OpenClaw's browser control.
+        """
+        browser = self.openclaw.browser
+        history = []
+
+        logger.info(f"Browser agent: goal='{goal}' start_url={start_url}")
+
+        # Ensure browser is running (sessions persist in ~/.openclaw/browser/openclaw/user-data/)
+        browser.ensure_running()
+        await asyncio.sleep(1.0)
+
+        # Navigate to starting URL — reuse existing tab (navigate) instead of
+        # open_url (which spawns a new 300MB renderer tab every time)
+        if start_url:
+            browser.navigate(start_url)
+            logger.info(f"Browser agent: navigated to {start_url}")
+            await asyncio.sleep(2.5)  # Let page load
+
+        for step in range(max_steps):
+            # Get current page state
+            snapshot = browser.snapshot()
+            if not snapshot:
+                return "Browser isn't responding — is it running?"
+
+            # Truncate snapshot to avoid token overflow
+            snap_truncated = snapshot[:4000] if len(snapshot) > 4000 else snapshot
+
+            history_summary = "\n".join(
+                f"Step {h['step']}: {h['action']} — {h['reason']}"
+                for h in history[-5:]  # Last 5 steps
+            )
+
+            prompt = f"""You are controlling a browser to accomplish this goal: "{goal}"
+
+Current page (accessibility tree — element refs are numbers like [1], [23], etc.):
+{snap_truncated}
+
+Steps taken so far:
+{history_summary or "None yet"}
+
+What is the SINGLE best next action? Respond with ONLY valid JSON (no markdown):
+{{
+  "action": "click" | "type" | "press" | "navigate" | "scroll" | "fill" | "select" | "evaluate" | "wait" | "download" | "dialog" | "done",
+  "ref": "element ref number — required for click/type/select/download/fill",
+  "text": "text to type — required for type",
+  "key": "key name — required for press (Enter, Tab, Escape, ArrowDown, etc.)",
+  "url": "full URL — required for navigate; also used for wait",
+  "fields": [{{"ref": "12", "value": "text"}}, ...],
+  "values": ["option1", "option2"],
+  "fn": "JS function string e.g. '() => document.title' — for evaluate",
+  "wait_text": "text to wait for — for wait action",
+  "wait_load": "load|domcontentloaded|networkidle — for wait action",
+  "download_path": "/tmp/openclaw/downloads/filename.ext",
+  "dialog_accept": true,
+  "reason": "one sentence explaining this action",
+  "done": true | false
+}}
+
+Action guide:
+- click: click a button, link, or element
+- type: type text into an input (use fill for multiple fields at once)
+- fill: fill several form fields at once (more efficient than click+type per field)
+- select: pick an option from a <select> dropdown
+- press: keyboard shortcut (Enter to submit, Tab to advance, Escape to close)
+- navigate: go to a new URL
+- scroll: scroll down the page
+- evaluate: run JS to read data from the page (e.g. get text that's not in snapshot)
+- wait: wait for text/URL/load before next action (use after navigation)
+- download: click a download link and save the file
+- dialog: accept or dismiss a browser popup/alert
+- done: goal fully accomplished
+
+Rules:
+- Use element refs from the page snapshot (numbers in brackets like [42])
+- "done" = true only when the goal is fully accomplished
+- For search boxes: type the search text, then press Enter
+- After clicking links or buttons that load new pages, prefer wait action next
+- If stuck after 3+ steps, try a different approach
+- AUTH RULE: The browser is pre-authenticated with saved sessions for GitHub, Google, Railway, Discord, Reddit and more. NEVER enter passwords or credentials. If you see a login page, navigate directly to the dashboard/home URL instead (e.g. https://github.com, https://railway.app/dashboard).
+- AUTH RULE: If a page asks to log in, assume you ARE logged in and navigate to the main app URL — the session cookie will kick in automatically.
+- MEDIA RULE: For goals involving playing a song/video/audio — mark done=true immediately after clicking the video/song. Do NOT keep looping to verify it's playing.
+- MEDIA RULE: If a video/song is already playing on the current page, immediately return done=true.
+- Do NOT navigate away from a page if the goal has already been accomplished on that page."""
+
+            result = await self.api.analyze_json(prompt, smart=True)
+            if not result:
+                logger.warning("Browser agent: AI returned no result")
+                break
+
+            action = result.get("action", "done")
+            reason = result.get("reason", "")
+            is_done = result.get("done", False)
+
+            history.append({"step": step + 1, "action": action, "reason": reason})
+            logger.info(f"Browser agent step {step+1}: {action} — {reason}")
+
+            if action == "done" or is_done:
+                # Return the reason if it's a natural sentence, otherwise generic done
+                _action_words = ("click", "type", "navigate", "fill", "scroll",
+                                 "press", "select", "wait", "step ")
+                if reason and not any(reason.lower().startswith(w) for w in _action_words):
+                    return reason
+                return "Done."
+
+            elif action == "click":
+                ref = str(result.get("ref", ""))
+                if ref:
+                    browser.click(ref)
+                    await asyncio.sleep(1.5)
+
+            elif action == "type":
+                ref = str(result.get("ref", ""))
+                text = result.get("text", "")
+                if ref and text:
+                    browser.type_text(ref, text)
+                    await asyncio.sleep(0.5)
+
+            elif action == "press":
+                key = result.get("key", "Enter")
+                browser.press(key)
+                await asyncio.sleep(1.5)
+
+            elif action == "navigate":
+                url = result.get("url", "")
+                if url:
+                    browser.navigate(url)
+                    await asyncio.sleep(2.5)
+
+            elif action == "scroll":
+                browser.press("PageDown")
+                await asyncio.sleep(0.8)
+
+            elif action == "fill":
+                fields = result.get("fields", [])
+                if fields:
+                    browser.fill(fields)
+                    await asyncio.sleep(0.5)
+
+            elif action == "select":
+                ref = str(result.get("ref", ""))
+                values = result.get("values", [])
+                if ref and values:
+                    browser.select(ref, *values)
+                    await asyncio.sleep(0.5)
+
+            elif action == "evaluate":
+                fn = result.get("fn", "() => document.title")
+                ref = result.get("ref")
+                eval_result = browser.evaluate(fn, ref=ref)
+                # Inject result into next step's history so AI can use it
+                history[-1]["reason"] += f" | result: {eval_result[:200]}"
+                await asyncio.sleep(0.3)
+
+            elif action == "wait":
+                wait_text = result.get("wait_text")
+                wait_url = result.get("url")
+                wait_load = result.get("wait_load")
+                browser.wait(text=wait_text, url=wait_url, load=wait_load or ("load" if not wait_text and not wait_url else None))
+                await asyncio.sleep(0.5)
+
+            elif action == "download":
+                ref = str(result.get("ref", ""))
+                path = result.get("download_path", "/tmp/openclaw/downloads/download")
+                if ref:
+                    saved = browser.download(ref, path)
+                    history[-1]["reason"] += f" | saved: {saved}"
+                await asyncio.sleep(1.0)
+
+            elif action == "dialog":
+                accept = result.get("dialog_accept", True)
+                browser.dialog(accept=accept)
+                await asyncio.sleep(0.5)
+
+        return "Done."
 
     def _check_sensitive_permissions(self, message: str) -> Optional[str]:
         """Check if the message requests a sensitive action that needs approval."""
@@ -752,11 +1249,21 @@ Rules:
         # Inject memory context into system prompt
         vision_desc = self.vision.describe_scene() if self.vision and self.vision._running else "Vision inactive"
 
+        learned = self.memory.memory.get("learned_context", {})
+        learned_str = "\n".join(f"  {k}: {v}" for k, v in learned.items()) if learned else "None"
+
+        now = datetime.now()
         context_block = f"""
+## Current Time
+{now.strftime("%A, %B %d, %Y — %I:%M %p %Z")} (user is in Florida, Eastern Time)
+
 ## Current State
 Active tasks: {json.dumps(list(active.values()), default=str) if active else "None"}
 Known projects: {json.dumps([{'name': p['name'], 'status': p.get('status')} for p in projects], default=str) if projects else "None"}
 Vision: {vision_desc}
+
+## What I know about the user
+{learned_str}
 """
 
         messages = [{"role": m["role"], "content": m["content"]} for m in recent]
@@ -774,10 +1281,7 @@ Vision: {vision_desc}
         project = self._resolve_project(project_name, message)
 
         if not project:
-            return (
-                "Not sure which project this is for. "
-                "Which one should I target?"
-            )
+            return await self._respond_conversationally(message)
 
         brief_path = await self._create_task_brief(task_desc, project)
 
@@ -803,10 +1307,9 @@ Vision: {vision_desc}
             str(self.agent_manager.output_dir / f"{agent_id}.log"),
         )
 
-        location = " Ran locally since Right Brain's not available." if self.brain_role == "left" else ""
         return (
             f"On it. Spinning up an agent for **{task_desc}** "
-            f"in {project['name']}.{location}\n\n"
+            f"in {project['name']}.\n\n"
             f"I'll let you know when it's done."
         )
 
@@ -888,7 +1391,7 @@ Vision: {vision_desc}
                 where = f" [{loc}]" if loc and self.brain_role == "left" else ""
                 lines.append(f"{idx}. **{desc}** — {proj}{where}")
             else:
-                lines.append(f"{idx}. **{desc}** — need to know which project for this one")
+                lines.append(f"{idx}. **{desc}** — on it")
         lines.append("\nAll running in parallel. I'll keep you posted.")
 
         return "\n".join(lines)
@@ -929,7 +1432,8 @@ Keep it focused and actionable. The agent should be able to start immediately.""
 
         brief_content = await self.api.quick_request(prompt)
 
-        # Add metadata header
+        # Add metadata header + skills manifest
+        skills_section = self._get_skills_manifest()
         header = f"""---
 agent_task_id: {task_id}
 project: {project['name']}
@@ -937,10 +1441,43 @@ created: {datetime.now().isoformat()}
 spawned_by: Leon v1.0
 ---
 
+{skills_section}
 """
         brief_path.write_text(header + brief_content)
         logger.info(f"Created task brief: {brief_path}")
         return str(brief_path)
+
+    def _get_skills_manifest(self) -> str:
+        """Return a concise tools/skills section to inject into task briefs."""
+        skills_dir = Path.home() / ".openclaw" / "workspace" / "skills"
+        skill_names = []
+        if skills_dir.exists():
+            skill_names = sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
+
+        # Key skills relevant to coding tasks
+        coding_skills = [
+            s for s in skill_names
+            if any(k in s for k in [
+                "github", "docker", "cloud", "frontend", "debug", "clean-code",
+                "security", "database", "sql", "drizzle", "research", "search",
+                "in-depth", "senior-dev", "spark", "jarvis", "task-dev", "self-improving",
+                "kubernetes", "jenkins", "mlops", "linux",
+            ])
+        ]
+
+        lines = ["## Available Tools\n"]
+        lines.append("You have full bash access. You can also leverage these installed OpenClaw skills")
+        lines.append(f"(323 total) — invoke via `~/.openclaw/bin/openclaw agent` or use their expertise")
+        lines.append(f"directly since their knowledge is available to you:\n")
+        if coding_skills:
+            lines.append("**Relevant skills for this task:**")
+            for s in coding_skills[:20]:
+                lines.append(f"  - `{s}`")
+        lines.append("\n**Always:**")
+        lines.append("  - Write tests for any code you add")
+        lines.append("  - Commit changes with descriptive git messages")
+        lines.append("  - Leave the codebase in a working state\n")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Project resolution
@@ -964,15 +1501,55 @@ spawned_by: Leon v1.0
             if p["name"].lower() in combined:
                 return p
 
-        # Default to first project if only one
-        if len(projects) == 1:
-            return projects[0]
-
-        return None
+        # Default to first project if only one, otherwise just pick first
+        return projects[0] if projects else None
 
     # ------------------------------------------------------------------
     # Background awareness loop
     # ------------------------------------------------------------------
+
+    async def _ram_watchdog(self):
+        """Monitor RAM every 60s. If above 80%, kill runaway OpenClaw renderer tabs."""
+        import subprocess as _sp
+        while self.running:
+            try:
+                await asyncio.sleep(60)
+                with open("/proc/meminfo") as f:
+                    info = {k.strip(): v.strip() for k, v in
+                            (line.split(":", 1) for line in f if ":" in line)}
+                total = int(info.get("MemTotal", "0 kB").split()[0])
+                avail = int(info.get("MemAvailable", "0 kB").split()[0])
+                used_pct = (total - avail) / total * 100 if total else 0
+
+                if used_pct > 80:
+                    # Find OpenClaw renderer PIDs
+                    r = _sp.run(
+                        ["pgrep", "-f", "remote-debugging-port=18800"],
+                        capture_output=True, text=True
+                    )
+                    pids = r.stdout.strip().split()
+                    # Keep 2, kill the rest (oldest first = lowest PIDs)
+                    pids_sorted = sorted(int(p) for p in pids if p.isdigit())
+                    to_kill = pids_sorted[:-2] if len(pids_sorted) > 2 else []
+                    if to_kill:
+                        for pid in to_kill:
+                            try:
+                                _sp.run(["kill", str(pid)], check=False)
+                            except Exception:
+                                pass
+                        logger.warning(
+                            "RAM watchdog: %.0f%% used — killed %d OpenClaw renderer(s)",
+                            used_pct, len(to_kill)
+                        )
+                        # Notify via voice if available
+                        vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
+                        if vs and vs.is_listening:
+                            asyncio.create_task(vs.speak(
+                                f"Heads up — RAM hit {used_pct:.0f}%. "
+                                "Cleaned up some browser processes to free memory."
+                            ))
+            except Exception as e:
+                logger.debug("RAM watchdog error: %s", e)
 
     async def _awareness_loop(self):
         """Continuously monitor active agents and update state."""
@@ -1026,6 +1603,10 @@ spawned_by: Leon v1.0
                             agent_id, completion_msg
                         )
 
+                        # Night mode: mark done + immediately try to dispatch next task
+                        self.night_mode.mark_agent_completed(agent_id, results.get("summary", ""))
+                        asyncio.create_task(self.night_mode.try_dispatch())
+
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
                         raw_error = results.get("errors", "unknown error")
@@ -1052,6 +1633,12 @@ spawned_by: Leon v1.0
                         self.notifications.push_agent_failed(
                             agent_id, failure_msg
                         )
+
+                        # Night mode: mark failed + try to dispatch next task
+                        self.night_mode.mark_agent_failed(agent_id, raw_error)
+                        asyncio.create_task(self.night_mode.try_dispatch())
+
+                # --- Per-cycle operations (outside per-agent loop) ---
 
                 # Poll Right Brain status if Left Brain
                 if self.brain_role == "left" and self.bridge and self.bridge.connected:
@@ -1106,6 +1693,19 @@ spawned_by: Leon v1.0
         # Fallback: truncate and present simply
         short = raw_error[:120].rstrip(".")
         return f"Something went wrong — {short}"
+
+    @staticmethod
+    def _strip_sir(text: str) -> str:
+        """
+        Hard post-processing filter — remove every form of 'sir' the LLM might generate.
+        This runs on 100% of outgoing responses. No exceptions.
+        """
+        import re
+        # Remove patterns like ", sir.", ", sir!", " sir.", " sir,", "Sir,"
+        text = re.sub(r',?\s*\bsir\b\.?', '', text, flags=re.IGNORECASE)
+        # Clean up any double spaces or leading/trailing whitespace left behind
+        text = re.sub(r'  +', ' ', text).strip()
+        return text
 
     def _pick_completion_phrase(self, summary: str = "") -> str:
         """Pick a random task completion phrase, optionally with summary."""
