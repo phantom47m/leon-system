@@ -50,14 +50,25 @@ WS_AUTH_TIMEOUT = 5.0
 
 async def index(request):
     """Serve the main brain dashboard page."""
-    html = (TEMPLATES_DIR / "index.html").read_text()
+    index_path = TEMPLATES_DIR / "index.html"
+    if not index_path.exists():
+        logger.error(f"Dashboard template not found: {index_path}")
+        return web.Response(text="Dashboard template not found", status=500)
+    try:
+        html = index_path.read_text()
+    except OSError as e:
+        logger.error(f"Failed to read dashboard template: {e}")
+        return web.Response(text="Failed to load dashboard", status=500)
     # Inject file-mtime-based cache busters so the browser always gets fresh assets
     # after any on-disk change — no manual version bumping required.
-    js_v  = int((STATIC_DIR / "js"  / "brain.js").stat().st_mtime)
-    css_v = int((STATIC_DIR / "css" / "dashboard.css").stat().st_mtime)
     import re
-    html = re.sub(r'brain\.js\?v=\w+',      f'brain.js?v={js_v}',      html)
-    html = re.sub(r'dashboard\.css\?v=\w+', f'dashboard.css?v={css_v}', html)
+    try:
+        js_v  = int((STATIC_DIR / "js"  / "brain.js").stat().st_mtime)
+        css_v = int((STATIC_DIR / "css" / "dashboard.css").stat().st_mtime)
+        html = re.sub(r'brain\.js\?v=\w+',      f'brain.js?v={js_v}',      html)
+        html = re.sub(r'dashboard\.css\?v=\w+', f'dashboard.css?v={css_v}', html)
+    except OSError:
+        pass  # Static files missing — serve HTML without cache-busting
     return web.Response(
         text=html,
         content_type="text/html",
@@ -75,6 +86,47 @@ async def health(request):
         "clients": len(ws_authenticated),
         "leon_core": leon is not None,
     })
+
+
+_gpu_cache: dict = {}
+_gpu_cache_time: float = 0
+_GPU_CACHE_TTL = 10  # seconds
+
+
+def _get_gpu_info() -> dict:
+    """Get GPU info from nvidia-smi with 10s caching."""
+    global _gpu_cache, _gpu_cache_time
+    import shutil as _shutil
+
+    now = time.monotonic()
+    if now - _gpu_cache_time < _GPU_CACHE_TTL and _gpu_cache:
+        return _gpu_cache
+
+    gpu = {}
+    if _shutil.which("nvidia-smi"):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts = [p.strip() for p in result.stdout.strip().split(",")]
+                if len(parts) >= 5:
+                    gpu = {
+                        "name": parts[0],
+                        "usage": f"{parts[1]}%",
+                        "vram_used": f"{parts[2]} MB",
+                        "vram_total": f"{parts[3]} MB",
+                        "temp": f"{parts[4]}°C",
+                        "vram_pct": f"{100 * int(parts[2]) / max(int(parts[3]), 1):.0f}%",
+                    }
+        except Exception:
+            pass
+
+    _gpu_cache = gpu
+    _gpu_cache_time = now
+    return gpu
 
 
 async def api_health(request):
@@ -125,28 +177,8 @@ async def api_health(request):
     except Exception:
         pass
 
-    # GPU
-    gpu = {}
-    if shutil.which("nvidia-smi"):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                parts = [p.strip() for p in result.stdout.strip().split(",")]
-                if len(parts) >= 5:
-                    gpu = {
-                        "name": parts[0],
-                        "usage": f"{parts[1]}%",
-                        "vram_used": f"{parts[2]} MB",
-                        "vram_total": f"{parts[3]} MB",
-                        "temp": f"{parts[4]}°C",
-                        "vram_pct": f"{100 * int(parts[2]) / max(int(parts[3]), 1):.0f}%",
-                    }
-        except Exception:
-            pass
+    # GPU — cache nvidia-smi results for 10s to avoid frequent subprocess calls
+    gpu = _get_gpu_info()
 
     # Network (quick)
     net = {}
@@ -429,41 +461,54 @@ async def websocket_handler(request):
 
     session_token = request.app.get("session_token", "")
 
-    # ── Require authentication as first message ──
+    # ── Localhost = auto-trusted, no token needed ──
+    # If the connection is from 127.0.0.1 or ::1 (your own machine), skip auth entirely.
+    # Remote connections (someone else's IP) still require a valid token.
+    client_ip = request.remote or ""
+    is_local = client_ip in ("127.0.0.1", "::1", "localhost")
+
     ws_clients.add(ws)
-    logger.info(f"Dashboard client connected, awaiting auth ({len(ws_clients)} pending)")
 
     authenticated = False
-    try:
-        # Wait for auth message within timeout
-        auth_msg = await asyncio.wait_for(ws.receive(), timeout=WS_AUTH_TIMEOUT)
-        if auth_msg.type == web.WSMsgType.TEXT:
-            try:
-                data = json.loads(auth_msg.data)
-            except (json.JSONDecodeError, ValueError):
-                data = {}
+    if is_local:
+        # Auto-approve — you're on your own machine
+        authenticated = True
+        ws_authenticated.add(ws)
+        await ws.send_json({"type": "auth_result", "success": True})
+        logger.info(f"Dashboard client auto-authenticated (localhost, {len(ws_authenticated)} total)")
+    else:
+        logger.info(f"Dashboard client connected from {client_ip}, awaiting auth")
+        try:
+            auth_msg = await asyncio.wait_for(ws.receive(), timeout=WS_AUTH_TIMEOUT)
+            if auth_msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(auth_msg.data)
+                except (json.JSONDecodeError, ValueError):
+                    data = {}
 
-            if (data.get("command") == "auth"
-                    and data.get("token") == session_token):
-                authenticated = True
-                ws_authenticated.add(ws)
-                await ws.send_json({"type": "auth_result", "success": True})
-                logger.info(f"Dashboard client authenticated ({len(ws_authenticated)} total)")
+                if (data.get("command") == "auth"
+                        and data.get("token") == session_token):
+                    authenticated = True
+                    ws_authenticated.add(ws)
+                    await ws.send_json({"type": "auth_result", "success": True})
+                    logger.info(f"Dashboard client authenticated ({len(ws_authenticated)} total)")
+                else:
+                    await ws.send_json({"type": "auth_result", "success": False,
+                                        "message": "Invalid token"})
+                    logger.warning(f"Dashboard auth failed from {client_ip}")
+                    await ws.close()
+                    return ws
             else:
-                await ws.send_json({"type": "auth_result", "success": False,
-                                    "message": "Invalid token"})
-                logger.warning("Dashboard client failed authentication")
                 await ws.close()
                 return ws
-        else:
+        except asyncio.TimeoutError:
+            logger.warning(f"Dashboard client {client_ip} did not authenticate within timeout")
+            await ws.send_json({"type": "auth_result", "success": False,
+                                "message": "Auth timeout"})
             await ws.close()
             return ws
-    except asyncio.TimeoutError:
-        logger.warning("Dashboard client did not authenticate within timeout")
-        await ws.send_json({"type": "auth_result", "success": False,
-                            "message": "Auth timeout"})
-        await ws.close()
-        return ws
+    try:
+        pass  # auth block done, continue to message loop below
     finally:
         ws_clients.discard(ws)
 
@@ -479,10 +524,17 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
+                # Guard against oversized messages
+                if len(msg.data) > 10_000:
+                    logger.warning(f"WebSocket message too large ({len(msg.data)} bytes), dropping")
+                    await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
+                    continue
                 try:
                     data = json.loads(msg.data)
                 except (json.JSONDecodeError, ValueError):
                     logger.warning("Received malformed JSON on WebSocket")
+                    continue
+                if not isinstance(data, dict):
                     continue
                 # Handle commands from dashboard
                 if data.get("command") == "ping":
@@ -491,7 +543,22 @@ async def websocket_handler(request):
                     if leon:
                         await ws.send_json(_build_state(leon))
                 elif data.get("command") == "input":
-                    user_msg = data.get("message", "").strip()
+                    user_msg = data.get("message", "")
+                    if not isinstance(user_msg, str):
+                        await ws.send_json({
+                            "type": "input_response",
+                            "message": "Invalid message format",
+                            "timestamp": datetime.now().strftime("%H:%M"),
+                        })
+                        continue
+                    user_msg = user_msg.strip()
+                    if len(user_msg) > 4000:
+                        await ws.send_json({
+                            "type": "input_response",
+                            "message": "Message too long (max 4000 characters)",
+                            "timestamp": datetime.now().strftime("%H:%M"),
+                        })
+                        continue
 
                     # Slash commands — handled directly, no API call
                     if user_msg.startswith("/") and leon:
@@ -1194,11 +1261,47 @@ def _build_state(leon) -> dict:
         }
 
 
+# ── Security Middleware ──────────────────────────────────
+
+@web.middleware
+async def security_headers_middleware(request, handler):
+    """Add security headers to all responses."""
+    response = await handler(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "connect-src 'self' ws: wss:; "
+        "img-src 'self' data:; "
+    )
+    return response
+
+
+@web.middleware
+async def error_handling_middleware(request, handler):
+    """Catch unhandled exceptions and return clean JSON errors."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise  # Let aiohttp handle HTTP errors normally
+    except Exception as e:
+        logger.error(f"Unhandled error on {request.method} {request.path}: {e}", exc_info=True)
+        return web.json_response(
+            {"error": "Internal server error"},
+            status=500,
+        )
+
+
 # ── App Setup ────────────────────────────────────────────
 
 def create_app(leon_core=None) -> web.Application:
     """Create the dashboard web application."""
-    app = web.Application()
+    app = web.Application(middlewares=[security_headers_middleware, error_handling_middleware])
     app["leon_core"] = leon_core
 
     # Persistent session token (survives restarts via vault or env)
@@ -1248,8 +1351,25 @@ def create_app(leon_core=None) -> web.Application:
     async def stop_broadcaster(app):
         app["broadcaster"].cancel()
 
+    async def cleanup_websockets(app):
+        """Gracefully close all WebSocket connections on shutdown."""
+        for ws in set(ws_authenticated):
+            try:
+                await ws.close(code=1001, message=b"Server shutting down")
+            except Exception:
+                pass
+        ws_authenticated.clear()
+        for ws in set(ws_clients):
+            try:
+                await ws.close(code=1001, message=b"Server shutting down")
+            except Exception:
+                pass
+        ws_clients.clear()
+        logger.info("All WebSocket connections closed")
+
     app.on_startup.append(start_broadcaster)
     app.on_cleanup.append(stop_broadcaster)
+    app.on_cleanup.append(cleanup_websockets)
 
     return app
 

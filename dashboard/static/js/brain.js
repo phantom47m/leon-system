@@ -428,9 +428,19 @@ function setLoading(on) {
 }
 
 // ── WebSocket ──────────────────────────────────────────
+let _wsRetryCount = 0;
+const _WS_MAX_RETRIES = 50;
+
 function connectWS() {
     const token = getToken();
     if (!token) { showAuth(''); setStatus('demo'); startDemo(); return; }
+
+    if (_wsRetryCount >= _WS_MAX_RETRIES) {
+        setStatus('disconnected');
+        feed(now(), 'Connection lost — too many retries. Reload page to reconnect.', 'feed-agent-fail');
+        return;
+    }
+
     setStatus('reconnecting');
     try {
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -440,6 +450,7 @@ function connectWS() {
         ws.onopen = () => {
             if (wsCountdownTimer) { clearInterval(wsCountdownTimer); wsCountdownTimer = null; }
             wsReconnectDelay = 1000;
+            _wsRetryCount = 0;
             ws.send(JSON.stringify({ command: 'auth', token }));
         };
         ws.onmessage = (ev) => {
@@ -450,6 +461,7 @@ function connectWS() {
                     if (demoInterval) { clearInterval(demoInterval); demoInterval = null; }
                     // Sync initial mute state — UI starts muted, tell server
                     ws.send(JSON.stringify({ command: micMuted ? 'voice_mute' : 'voice_unmute' }));
+                    feed(now(), 'Connected to Leon', 'feed-system');
                 } else {
                     wsAuthenticated = false;
                     localStorage.removeItem('leon_session_token');
@@ -520,6 +532,7 @@ function connectWS() {
         }, 10000);
         ws.onclose = () => { clearInterval(_pingInterval);
             wsConnection = null; wsAuthenticated = false; setStatus('reconnecting');
+            _wsRetryCount++;
             // Countdown in status text
             if (wsCountdownTimer) clearInterval(wsCountdownTimer);
             const delay = wsReconnectDelay;
@@ -534,9 +547,23 @@ function connectWS() {
             wsReconnectTimer = setTimeout(connectWS, delay);
             wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30000);
         };
-        ws.onerror = () => { wsConnection = null; wsAuthenticated = false; setStatus('demo'); startDemo(); };
+        ws.onerror = () => {
+            // Don't immediately fall back to demo — let onclose handle retry
+            if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) return;
+            wsConnection = null; wsAuthenticated = false;
+        };
     } catch { setStatus('demo'); startDemo(); }
 }
+
+// Reconnect on visibility change — if tab comes back from background and WS is dead, reconnect fast
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !wsConnection && getToken()) {
+        if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+        wsReconnectDelay = 1000;
+        _wsRetryCount = 0;
+        connectWS();
+    }
+});
 
 // ── Demo mode ──────────────────────────────────────────
 function startDemo() {

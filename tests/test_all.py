@@ -1588,6 +1588,227 @@ class TestOpenClawCron(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# DASHBOARD SERVER
+# ══════════════════════════════════════════════════════════
+
+class TestDashboardServer(unittest.TestCase):
+    """Tests for dashboard server improvements."""
+
+    def test_create_app_without_leon(self):
+        """App creates successfully without a Leon core (demo mode)."""
+        from dashboard.server import create_app
+        app = create_app(leon_core=None)
+        self.assertIsNotNone(app)
+        self.assertIsNone(app.get("leon_core"))
+        self.assertIn("session_token", app)
+        self.assertIn("api_token", app)
+
+    def test_create_app_has_middlewares(self):
+        """App should have security and error handling middlewares."""
+        from dashboard.server import create_app
+        app = create_app(leon_core=None)
+        # Middleware list should have at least 2 entries (our custom ones)
+        self.assertGreaterEqual(len(app.middlewares), 2)
+
+    def test_build_state_fallback(self):
+        """_build_state returns valid dict even with no Leon core."""
+        from dashboard.server import _build_state
+        # Pass None-like object — should hit except branch
+        class FakeLeon:
+            def get_status(self):
+                raise RuntimeError("Not running")
+        state = _build_state(FakeLeon())
+        self.assertIn("leftActive", state)
+        self.assertIn("agentCount", state)
+        self.assertEqual(state["agentCount"], 0)
+
+    def test_gpu_cache(self):
+        """GPU info cache returns same result within TTL."""
+        from dashboard.server import _get_gpu_info
+        result1 = _get_gpu_info()
+        result2 = _get_gpu_info()
+        # Should be the exact same dict object (cached)
+        self.assertIs(result1, result2)
+
+    def test_slash_command_help(self):
+        """Help slash command returns help text."""
+        from dashboard.server import _handle_slash_command
+
+        class FakeLeon:
+            agent_manager = type('AM', (), {'active_agents': {}})()
+            task_queue = type('TQ', (), {'get_status_summary': lambda s: {}})()
+            permissions = None
+            vault = None
+            owner_auth = None
+            brain_role = "unified"
+            bridge = None
+            _right_brain_status = {}
+            audit_log = None
+
+        result = _handle_slash_command("/help", FakeLeon())
+        self.assertIn("Dashboard Commands", result)
+        self.assertIn("/agents", result)
+        self.assertIn("/status", result)
+
+    def test_slash_command_unknown(self):
+        """Unknown slash commands return error message."""
+        from dashboard.server import _handle_slash_command
+
+        class FakeLeon:
+            agent_manager = type('AM', (), {'active_agents': {}})()
+            task_queue = type('TQ', (), {'get_status_summary': lambda s: {}})()
+            permissions = None
+            vault = None
+            owner_auth = None
+            brain_role = "unified"
+            bridge = None
+            _right_brain_status = {}
+            audit_log = None
+
+        result = _handle_slash_command("/nonexistent", FakeLeon())
+        self.assertIn("Unknown command", result)
+
+
+class TestDashboardServerAsync(unittest.TestCase):
+    """Async tests for dashboard server endpoints using aiohttp AppRunner."""
+
+    @staticmethod
+    def _run(coro):
+        """Run async test coroutine in a fresh event loop."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def _make_server(self):
+        """Create app + runner + site on a random port, return (app, port, runner)."""
+        from dashboard.server import create_app
+        from aiohttp import web
+        import socket
+
+        # Find free port
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        app = create_app(leon_core=None)
+        return app, port
+
+    def test_health_endpoint(self):
+        """Health endpoint returns valid JSON."""
+        from aiohttp import web, ClientSession
+
+        async def _test():
+            app, port = self._make_server()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", port)
+            await site.start()
+            try:
+                async with ClientSession() as session:
+                    async with session.get(f"http://127.0.0.1:{port}/health") as resp:
+                        self.assertEqual(resp.status, 200)
+                        data = await resp.json()
+                        self.assertEqual(data["status"], "ok")
+                        self.assertIn("uptime", data)
+            finally:
+                await runner.cleanup()
+
+        self._run(_test())
+
+    def test_api_health_endpoint(self):
+        """API health endpoint returns detailed system info."""
+        from aiohttp import web, ClientSession
+
+        async def _test():
+            app, port = self._make_server()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", port)
+            await site.start()
+            try:
+                async with ClientSession() as session:
+                    async with session.get(f"http://127.0.0.1:{port}/api/health") as resp:
+                        self.assertEqual(resp.status, 200)
+                        data = await resp.json()
+                        self.assertEqual(data["status"], "ok")
+                        self.assertIn("cpu", data)
+                        self.assertIn("memory", data)
+                        self.assertIn("disk", data)
+            finally:
+                await runner.cleanup()
+
+        self._run(_test())
+
+    def test_security_headers(self):
+        """Responses include security headers."""
+        from aiohttp import web, ClientSession
+
+        async def _test():
+            app, port = self._make_server()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", port)
+            await site.start()
+            try:
+                async with ClientSession() as session:
+                    async with session.get(f"http://127.0.0.1:{port}/health") as resp:
+                        self.assertEqual(resp.headers.get("X-Content-Type-Options"), "nosniff")
+                        self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+                        self.assertIn("Content-Security-Policy", resp.headers)
+            finally:
+                await runner.cleanup()
+
+        self._run(_test())
+
+    def test_api_message_requires_auth(self):
+        """POST /api/message without auth returns 401."""
+        from aiohttp import web, ClientSession
+
+        async def _test():
+            app, port = self._make_server()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", port)
+            await site.start()
+            try:
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"http://127.0.0.1:{port}/api/message",
+                        json={"message": "hello"},
+                    ) as resp:
+                        self.assertEqual(resp.status, 401)
+            finally:
+                await runner.cleanup()
+
+        self._run(_test())
+
+    def test_api_message_invalid_token(self):
+        """POST /api/message with wrong token returns 403."""
+        from aiohttp import web, ClientSession
+
+        async def _test():
+            app, port = self._make_server()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", port)
+            await site.start()
+            try:
+                async with ClientSession() as session:
+                    async with session.post(
+                        f"http://127.0.0.1:{port}/api/message",
+                        json={"message": "hello"},
+                        headers={"Authorization": "Bearer wrong-token"},
+                    ) as resp:
+                        self.assertEqual(resp.status, 403)
+            finally:
+                await runner.cleanup()
+
+        self._run(_test())
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
