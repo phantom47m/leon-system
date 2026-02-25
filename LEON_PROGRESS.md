@@ -19,16 +19,24 @@
 - **Diversified stock photos** — stopped reusing same 2 images across all screens
 - **28 new tests** across 6 test files. Total: 15 suites, 66 tests passing.
 
+### Phase 8: Decomposition, Dead Code Cleanup & Rider Polish
+- **Deleted 5 dead components** — ClanCard, ClansList, NearbyRiders, GroupsList, EventsList (replaced in earlier phases but never cleaned up)
+- **Decomposed profile.tsx** — extracted ChallengeCard + AchievementCard (287 → 175 LOC, 39% reduction)
+- **Decomposed safety.tsx** — extracted ChecklistItem + ContactCard + ResourceCard (231 → 155 LOC, 33% reduction)
+- **Rider authenticity** — "XP" → "Miles to Level Up", Trophy → MapPin for Location Sharing, 8 rotating safety tips
+- **Performance** — `useMemo` on profile/safety/dashboard computed values, `React.memo` on all 5 new components
+- **5 new test files** with 17 tests. Total: 17 suites, 72 tests passing.
+
 ## Current Scores (Estimated)
 
 | Category | Before | After |
 |----------|--------|-------|
-| Code Architecture | 8/10 | 9/10 |
-| Rider Authenticity | 6/10 | 8/10 |
-| UI/UX Quality | 8/10 | 9/10 |
-| Interactivity | 7/10 | 8/10 |
+| Code Architecture | 9/10 | 9.5/10 |
+| Rider Authenticity | 8/10 | 9/10 |
+| UI/UX Quality | 9/10 | 9/10 |
+| Interactivity | 8/10 | 8/10 |
 | Data Persistence | 6/10 | 6/10 |
-| Dead Code | Low | Minimal |
+| Dead Code | Minimal | Zero |
 
 ## Next Actions
 
