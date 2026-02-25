@@ -33,6 +33,9 @@ _rate_limit_request_count = 0  # counter for periodic stale-IP cleanup
 DASHBOARD_DIR = Path(__file__).parent
 TEMPLATES_DIR = DASHBOARD_DIR / "templates"
 STATIC_DIR = DASHBOARD_DIR / "static"
+BASE_DIR = DASHBOARD_DIR.parent          # leon-system/
+CONFIG_DIR = BASE_DIR / "config"         # leon-system/config/
+USER_CONFIG = CONFIG_DIR / "user_config.yaml"
 
 # Connected WebSocket clients (unauthenticated, waiting for auth)
 ws_clients: set[web.WebSocketResponse] = set()
@@ -53,7 +56,7 @@ async def index(request):
     """Serve the main brain dashboard page."""
     import yaml as _yaml
     # Redirect to setup wizard if user_config.yaml is missing or incomplete
-    user_cfg_path = Path("config/user_config.yaml")
+    user_cfg_path = USER_CONFIG
     if not user_cfg_path.exists():
         raise web.HTTPFound("/setup")
     try:
@@ -158,77 +161,80 @@ async def api_setup(request):
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
-    ai_name = (body.get("ai_name") or "").strip()
-    owner_name = (body.get("owner_name") or "").strip()
-    if not ai_name or not owner_name:
-        return web.json_response({"error": "AI name and your name are required"}, status=400)
+    try:
+        ai_name = (body.get("ai_name") or "").strip()
+        owner_name = (body.get("owner_name") or "").strip()
+        if not ai_name or not owner_name:
+            return web.json_response({"error": "AI name and your name are required"}, status=400)
 
-    claude_auth = body.get("claude_auth", "max")
-    claude_api_key = (body.get("claude_api_key") or "").strip()
-    elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
-    elevenlabs_voice_id = (body.get("elevenlabs_voice_id") or "").strip()
-    groq_api_key = (body.get("groq_api_key") or "").strip()
+        claude_auth = body.get("claude_auth", "max")
+        claude_api_key = (body.get("claude_api_key") or "").strip()
+        elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
+        elevenlabs_voice_id = (body.get("elevenlabs_voice_id") or "").strip()
+        groq_api_key = (body.get("groq_api_key") or "").strip()
 
-    # Validate: if "max" selected, check claude CLI is actually installed
-    if claude_auth == "max":
-        import shutil as _shutil
-        if not _shutil.which("claude"):
+        # Validate: if "max" selected, check claude CLI is actually installed
+        if claude_auth == "max":
+            import shutil as _shutil
+            if not _shutil.which("claude"):
+                return web.json_response({
+                    "error": (
+                        "claude CLI not found. Install it from https://claude.ai/download "
+                        "and run 'claude' once to log in. Or switch to API key mode."
+                    )
+                }, status=400)
+
+        # Validate: if "api" selected, key must be provided
+        if claude_auth == "api" and not claude_api_key:
+            return web.json_response({"error": "Please enter your Anthropic API key."}, status=400)
+
+        # Validate: must have at least one AI provider
+        if claude_auth not in ("max", "api") and not groq_api_key:
             return web.json_response({
-                "error": (
-                    "Claude CLI not found. Install it first:\n"
-                    "https://claude.ai/download\n\n"
-                    "Or switch to 'API key' mode and enter an Anthropic API key."
-                )
+                "error": "You need at least one AI provider — Claude Max, an API key, or a Groq key."
             }, status=400)
 
-    # Validate: if "api" selected, key must be provided
-    if claude_auth == "api" and not claude_api_key:
-        return web.json_response({"error": "Please enter your Anthropic API key."}, status=400)
+        cfg = {
+            "ai_name": ai_name,
+            "owner_name": owner_name,
+            "claude_auth": claude_auth,
+            "claude_api_key": claude_api_key,
+            "elevenlabs_api_key": elevenlabs_api_key,
+            "elevenlabs_voice_id": elevenlabs_voice_id,
+            "groq_api_key": groq_api_key,
+            "setup_complete": True,
+        }
 
-    # Validate: must have at least one AI provider
-    if claude_auth not in ("max", "api") and not groq_api_key:
-        return web.json_response({
-            "error": "You need at least one AI provider — Claude Max, an API key, or a Groq key."
-        }, status=400)
+        USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        USER_CONFIG.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+        logger.info(f"Setup complete — AI: {ai_name}, Owner: {owner_name}")
 
-    cfg = {
-        "ai_name": ai_name,
-        "owner_name": owner_name,
-        "claude_auth": claude_auth,
-        "claude_api_key": claude_api_key,
-        "elevenlabs_api_key": elevenlabs_api_key,
-        "elevenlabs_voice_id": elevenlabs_voice_id,
-        "groq_api_key": groq_api_key,
-        "setup_complete": True,
-    }
+        # Set env vars for current session — direct assignment so these win over .env
+        if groq_api_key:
+            os.environ["GROQ_API_KEY"] = groq_api_key
+        if elevenlabs_api_key:
+            os.environ["ELEVENLABS_API_KEY"] = elevenlabs_api_key
+        if elevenlabs_voice_id:
+            os.environ["LEON_VOICE_ID"] = elevenlabs_voice_id
+        if claude_api_key and claude_auth == "api":
+            os.environ["ANTHROPIC_API_KEY"] = claude_api_key
 
-    user_cfg_path = Path("config/user_config.yaml")
-    user_cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    user_cfg_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
-    logger.info(f"Setup complete — AI: {ai_name}, Owner: {owner_name}")
+        # Update leon_core in current session (no restart needed)
+        leon = request.app.get("leon_core")
+        if leon:
+            leon.ai_name = ai_name
+            leon.owner_name = owner_name
+            if leon.voice:
+                if elevenlabs_api_key:
+                    leon.voice.elevenlabs_api_key = elevenlabs_api_key
+                if elevenlabs_voice_id:
+                    leon.voice.voice_id = elevenlabs_voice_id
+                if hasattr(leon.voice, 'reset_elevenlabs'):
+                    leon.voice.reset_elevenlabs()
 
-    # Set env vars for current session — direct assignment so these win over .env
-    if groq_api_key:
-        os.environ["GROQ_API_KEY"] = groq_api_key
-    if elevenlabs_api_key:
-        os.environ["ELEVENLABS_API_KEY"] = elevenlabs_api_key
-    if elevenlabs_voice_id:
-        os.environ["LEON_VOICE_ID"] = elevenlabs_voice_id
-    if claude_api_key and claude_auth == "api":
-        os.environ["ANTHROPIC_API_KEY"] = claude_api_key
-
-    # Update leon_core in current session (no restart needed)
-    leon = request.app.get("leon_core")
-    if leon:
-        leon.ai_name = ai_name
-        leon.owner_name = owner_name
-        if leon.voice:
-            if elevenlabs_api_key:
-                leon.voice.elevenlabs_api_key = elevenlabs_api_key
-            if elevenlabs_voice_id:
-                leon.voice.voice_id = elevenlabs_voice_id
-            if hasattr(leon.voice, 'reset_elevenlabs'):
-                leon.voice.reset_elevenlabs()
+    except Exception as e:
+        logger.exception("api_setup failed")
+        return web.json_response({"error": f"Setup failed: {e}"}, status=500)
 
     return web.json_response({"ok": True})
 
