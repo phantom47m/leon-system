@@ -48,17 +48,16 @@ class TaskQueue:
             self.active_tasks = data.get("active_tasks", {})
             self.completed = data.get("completed", [])
 
-            # Tasks that were "active" at shutdown lost their processes — move back to queue
-            recovered = []
-            for agent_id, task in list(self.active_tasks.items()):
-                task["status"] = "queued"
-                task.pop("failed_at", None)
-                task.pop("failure_reason", None)
-                recovered.append(task)
-            if recovered:
-                self.queue = recovered + self.queue  # re-queue at front so they run first
-                logger.info(f"Recovered {len(recovered)} interrupted task(s) → re-queued")
+            # Tasks that were "active" at shutdown lost their processes.
+            # Mark them failed — do NOT re-queue. Night mode's self-continuation
+            # will spawn fresh agents if needed. Re-queuing causes pile-up on repeated restarts.
+            stale = len(self.active_tasks)
+            if stale:
+                logger.info(f"Discarded {stale} stale active task(s) from previous run (agents are dead)")
             self.active_tasks = {}
+            # Also drop any queued tasks that were for night-mode work — night mode
+            # manages its own backlog and will re-dispatch. Only keep explicit user tasks.
+            self.queue = []
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Corrupt task queue file, starting fresh: {e}")

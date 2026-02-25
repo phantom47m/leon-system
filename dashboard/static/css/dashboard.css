@@ -301,12 +301,105 @@ html, body {
     margin: 4px 0 10px;
 }
 
-/* Agents list */
-.agents-list { margin-top: 4px; max-height: 90px; overflow-y: auto; }
-.agent-card { font-size: 8px; padding: 4px 6px; margin-bottom: 3px; border-left: 2px solid var(--green); background: rgba(0,255,170,0.03); border-radius: 3px; }
-.agent-desc { color: var(--white); font-size: 8px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-elapsed { color: var(--green); font-family: var(--font-mono); font-size: 7px; }
-.agents-empty { font-size: 7px; color: rgba(0,212,255,0.2); text-align: center; font-family: var(--font-hud); letter-spacing: 2px; padding: 6px; }
+/* ── Agent Terminal Panel ───────────────────────────── */
+.agents-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 420px;
+    overflow-y: auto;
+    padding-right: 4px;
+    margin-top: 4px;
+}
+
+.agent-terminal {
+    background: rgba(0,0,0,0.5);
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.agent-terminal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 8px;
+    background: rgba(0, 212, 255, 0.08);
+    border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+}
+
+.agent-terminal-name {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    color: #00d4ff;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+}
+
+.agent-terminal-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.agent-terminal-elapsed {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 9px;
+    color: rgba(255,255,255,0.4);
+}
+
+.agent-terminal-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #00ffaa;
+    animation: agent-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+@keyframes agent-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.agent-terminal-body {
+    padding: 6px 8px;
+    max-height: 120px;
+    overflow-y: auto;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    color: rgba(255,255,255,0.75);
+    scrollbar-width: none;
+}
+
+.agent-terminal-body::-webkit-scrollbar { display: none; }
+
+.agent-terminal-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.agent-terminal-line.dim { color: rgba(255,255,255,0.3); }
+.agent-terminal-line.tool { color: #00d4ff; }
+.agent-terminal-line.ok   { color: #00ffaa; }
+.agent-terminal-line.err  { color: #ff4466; }
+.agent-terminal-line.info { color: #ffaa00; }
+
+.agents-empty {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    color: rgba(255,255,255,0.2);
+    text-align: center;
+    padding: 20px 0;
+    letter-spacing: 0.1em;
+}
 
 /* ── Activity feed ───────────────────────────────── */
 #activity-feed {

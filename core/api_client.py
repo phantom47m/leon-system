@@ -86,38 +86,33 @@ class AnthropicAPI:
             except ImportError:
                 logger.warning("anthropic package not installed — skipping Anthropic SDK")
 
-        # --- 2. Groq free tier ---
+        # --- 2. Claude CLI (subscription) — preferred over free Groq ---
+        # Subprocess strips CLAUDECODE so it works even inside Claude Code.
         if self._auth_method == "none":
-            groq_key = os.environ.get("GROQ_API_KEY", "")
-            if not groq_key and vault and vault._unlocked:
-                groq_key = vault.retrieve("GROQ_API_KEY") or ""
-                if groq_key:
-                    os.environ["GROQ_API_KEY"] = groq_key
-                    logger.info("Groq API key loaded from vault")
+            if _has_claude_cli():
+                self._auth_method = "claude_cli"
+                logger.info("API client: Claude CLI (subscription auth)")
 
+        # --- 3. Groq free tier (fallback if no Claude subscription) ---
+        # Load the key regardless so it's available if needed later
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        if not groq_key and vault and vault._unlocked:
+            groq_key = vault.retrieve("GROQ_API_KEY") or ""
             if groq_key:
-                self._groq_key = groq_key
-                self._auth_method = "groq"
-                logger.info(f"API client: Groq free tier ({GROQ_DEFAULT_MODEL})")
+                os.environ["GROQ_API_KEY"] = groq_key
+        if groq_key:
+            self._groq_key = groq_key
+        if self._auth_method == "none" and groq_key:
+            self._auth_method = "groq"
+            logger.info(f"API client: Groq free tier ({GROQ_DEFAULT_MODEL})")
 
-        # --- 3. Ollama (local, completely free) ---
+        # --- 4. Ollama (local, completely free) ---
         if self._auth_method == "none":
             ollama_model = _check_ollama()
             if ollama_model:
                 self._ollama_model = ollama_model
                 self._auth_method = "ollama"
                 logger.info(f"API client: Ollama local ({ollama_model})")
-
-        # --- 4. Claude CLI fallback ---
-        # Skip if we're inside an active Claude Code session (would conflict/hang)
-        inside_claude_code = bool(os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"))
-        if self._auth_method == "none":
-            if _has_claude_cli() and not inside_claude_code:
-                self._auth_method = "claude_cli"
-                logger.info("API client: Claude CLI fallback (claude --print)")
-            else:
-                if inside_claude_code:
-                    logger.warning("Skipping claude_cli: inside active Claude Code session (would conflict)")
                 logger.warning(
                     "No AI provider configured. "
                     "Options:\n"
@@ -252,39 +247,36 @@ class AnthropicAPI:
             logger.error(f"Ollama request failed: {e}")
             return f"Ollama error: {e}"
 
-    async def _claude_cli_request(self, prompt: str) -> str:
-        """Send a prompt through claude --print (subscription fallback)."""
+    async def _claude_cli_request(self, prompt: str, model: str = "claude-haiku-4-5-20251001") -> str:
+        """Send a prompt through claude --print using the subscription auth."""
+        # Strip all Claude Code session env vars so the subprocess doesn't think it's nested
+        _strip = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
+                  "CLAUDE_CODE_OTEL_EXPORTER", "CLAUDE_CODE_API_KEY_HELPER",
+                  "PARENT_CLAUDE_SESSION", "CLAUDE_PARENT_SESSION"}
+        env = {k: v for k, v in os.environ.items() if k not in _strip}
         try:
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
             proc = await asyncio.create_subprocess_exec(
-                "claude", "--print", "-p", prompt,
+                "claude", "--print", "--model", model, "-p", prompt,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
             if proc.returncode == 0 and stdout:
                 return stdout.decode().strip()
             err = stderr.decode().strip() if stderr else f"exit code {proc.returncode}"
-            logger.error(f"Claude CLI error: {err}")
-            # If it's a nested session error, mark CLI as unavailable
-            if "nested" in err.lower() or "cannot be launched" in err.lower():
-                self._auth_method = "none"
-                return (
-                    "Claude CLI can't run inside an active Claude Code session.\n\n"
-                    "**Set a free Groq key to fix this:**\n"
-                    "`/setkey groq <key>` — get a free key at console.groq.com"
-                )
-            return f"Error: {err}"
+            logger.error(f"Claude CLI error: {err[:200]}")
+            # Nested session / conflict — fall back to Groq for this request
+            if any(k in err.lower() for k in ("nested", "cannot be launched", "already running")):
+                logger.warning("Claude CLI conflict — falling back to Groq for this request")
+                if self._groq_key:
+                    return await self._groq_request([], prompt)
+            return f"Error: {err[:100]}"
         except asyncio.TimeoutError:
-            logger.error("Claude CLI request timed out (30s)")
-            self._auth_method = "none"
-            return (
-                "Claude CLI timed out — it conflicts with the active Claude Code session.\n\n"
-                "**Set a free Groq key:**\n"
-                "`/setkey groq <key>` — get a free key at console.groq.com"
-            )
+            logger.error("Claude CLI request timed out")
+            if self._groq_key:
+                return await self._groq_request([], prompt)
+            return "Request timed out."
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
             return f"Error: {e}"

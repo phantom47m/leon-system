@@ -143,6 +143,26 @@ class AgentManager:
             completed = False
 
         # Auto-retry on failure
+        # Anthropic 500 errors don't count against retry budget — wait 30s and try again
+        # Check BOTH stdout (.log) and stderr (.err) since claude prints 500s to stdout
+        if failed and not is_running:
+            combined_text = (output or "") + (errors or "")
+            errors_text = errors or ""
+            is_api_500 = ('"type":"api_error"' in combined_text or
+                          "Internal server error" in combined_text or
+                          "API Error: 500" in combined_text)
+            if is_api_500 and agent.get("api500_retries", 0) < 5:
+                agent["api500_retries"] = agent.get("api500_retries", 0) + 1
+                logger.warning(f"Agent {agent_id} hit Anthropic 500 (attempt {agent['api500_retries']}/5) — waiting 30s then retrying")
+                await asyncio.sleep(30)
+                new_id = await self._retry_agent(agent_id)
+                agent["status"] = "retrying"
+                agent["last_check"] = datetime.now().isoformat()
+                return {"running": False, "completed": False, "failed": False,
+                        "retrying": True, "new_agent_id": new_id,
+                        "output_preview": "", "errors": errors_text[-200:],
+                        "duration_seconds": elapsed}
+
         if failed and self.auto_retry and agent["retries"] < self.retry_attempts:
             logger.info(
                 f"Agent {agent_id} failed (attempt {agent['retries'] + 1}/{self.retry_attempts}), retrying..."
@@ -188,8 +208,9 @@ class AgentManager:
             project_path=agent["project_path"],
         )
 
-        # Carry over retry count
+        # Carry over retry counts (both regular and 500-specific)
         self.active_agents[new_id]["retries"] = retry_count
+        self.active_agents[new_id]["api500_retries"] = agent.get("api500_retries", 0)
 
         # Remove old agent from tracking
         self.active_agents.pop(agent_id, None)
