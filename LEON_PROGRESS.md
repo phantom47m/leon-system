@@ -1,37 +1,34 @@
 # Leon System — Motorev Task Progress
 
 **Task:** Continuously improve Motorev app — rider-first redesign
-**Agent:** `agent_372570f8`
+**Agent:** `agent_4b67a997`
 **Date:** 2026-02-25
 
 ## Completed This Session
 
-### Phase 6: Data Layer, Auth & Component Architecture
-- **AsyncStorage persistence** — Created centralized store (`useStore.ts`) with AsyncStorage. Profile, settings, safety checks, and onboarding state all persist between sessions.
-- **Onboarding screen** — New welcome flow (`onboarding.tsx`) where users enter their name on first launch. Store-driven routing in root layout.
-- **Component decomposition** — Extracted 4 memoized components from connect.tsx: RiderCard, GroupCard, EventCard, ClanCard. Screen reduced from 363 → 193 LOC.
-- **Performance** — `useCallback` on all handlers, `React.memo` on card components, store uses module-level cache with subscriber pattern.
-- **Safety tab dynamic** — Status computed from actual checklist state. Call buttons use `Linking.openURL` for real calls.
-- **Profile uses store** — Profile displays user-entered name, XP, level, stats from persisted store. Settings toggles persist.
-- **Dashboard uses store** — Greeting shows user's actual name. Stats read from store.
-- **23 new tests** across 5 test files. Total: 9 suites, 38 tests passing.
+### Phase 7: UI Polish, Performance & Rider Authenticity
+- **Renamed "Clans" → "Clubs"** — created ClubCard.tsx, replaced XP with Total Miles, updated all labels to real moto terminology
+- **Removed misleading features** — fake stats row (127 Nearby Riders), voice channel buttons from dashboard, cosmetic Discover Routes tab
+- **Functional search bars** — all 3 search bars (Connect, Rides, Garage) now filter content in real-time with empty state messages
+- **Initials avatar** — profile shows user initials instead of random stock photo
+- **Fixed sign-out border** — invisible `dangerLight` border changed to visible `danger`
+- **Performance** — `useCallback` on all rides/garage handlers, `useMemo` for all filtered lists
+- **Decomposed rides.tsx** — extracted LiveRideCard + HistoryRideCard (258 → 153 LOC, 41% reduction)
+- **Decomposed garage.tsx** — extracted BikeCard + MaintenanceCard + ModCard (278 → 130 LOC, 53% reduction)
+- **Rider-authentic challenges** — "Social Butterfly" → "Pack Rider", "500 XP" → "500 Miles"
+- **Diversified stock photos** — stopped reusing same 2 images across all screens
+- **28 new tests** across 6 test files. Total: 15 suites, 66 tests passing.
 
 ## Current Scores (Estimated)
 
 | Category | Before | After |
 |----------|--------|-------|
-| Code Architecture | 7/10 | 8/10 |
-| Rider Authenticity | 5/10 | 6/10 |
-| UI/UX Quality | 7/10 | 8/10 |
-| Interactivity | 5/10 | 7/10 |
-| Data Persistence | 0/10 | 6/10 |
-| Dead Code | Low | Low |
-
-## Blockers Resolved This Session
-- ~~No data persistence~~ → AsyncStorage store with profile, settings, safety checks
-- ~~No user authentication~~ → Onboarding flow with name entry, store-driven routing
-- ~~Hardcoded user name~~ → Name from store, entered during onboarding
-- ~~Large monolith files~~ → connect.tsx decomposed into 4 focused components
+| Code Architecture | 8/10 | 9/10 |
+| Rider Authenticity | 6/10 | 8/10 |
+| UI/UX Quality | 8/10 | 9/10 |
+| Interactivity | 7/10 | 8/10 |
+| Data Persistence | 6/10 | 6/10 |
+| Dead Code | Low | Minimal |
 
 ## Next Actions
 
