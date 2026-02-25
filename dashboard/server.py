@@ -87,14 +87,16 @@ async def api_health(request):
     leon = request.app.get("leon_core")
     uptime = int(time.monotonic() - _start_time)
 
-    # System stats
+    # System stats — use load average for a responsive CPU metric
+    # (single /proc/stat read gives cumulative-since-boot, not current usage)
     cpu_line = ""
     try:
-        with open("/proc/stat") as f:
-            parts = f.readline().split()
-        idle = int(parts[4])
-        total = sum(int(x) for x in parts[1:])
-        cpu_line = f"{100.0 * (1 - idle / total):.1f}%"
+        with open("/proc/loadavg") as f:
+            load1 = float(f.read().split()[0])
+        import os as _os
+        ncpu = _os.cpu_count() or 1
+        cpu_pct = min(100.0, 100.0 * load1 / ncpu)
+        cpu_line = f"{cpu_pct:.1f}%"
     except Exception:
         cpu_line = "unknown"
 
@@ -276,18 +278,28 @@ async def api_message(request):
     Requires: Authorization: Bearer <token>
     Returns JSON: {"response": "leon's reply", "timestamp": "HH:MM"}
     """
-    # ── Rate limiting ──
+    # ── Rate limiting (localhost is exempt) ──
     client_ip = request.remote or "unknown"
-    now_ts = time.monotonic()
-    bucket = _rate_limit_buckets[client_ip]
-    # Prune old entries
-    bucket[:] = [t for t in bucket if now_ts - t < _rate_limit_window]
-    if len(bucket) >= _rate_limit_max:
-        return web.json_response(
-            {"error": f"Rate limited — max {_rate_limit_max} requests per {_rate_limit_window}s"},
-            status=429,
-        )
-    bucket.append(now_ts)
+    if client_ip not in ("127.0.0.1", "::1"):
+        now_ts = time.monotonic()
+        bucket = _rate_limit_buckets[client_ip]
+        bucket[:] = [t for t in bucket if now_ts - t < _rate_limit_window]
+        if len(bucket) >= _rate_limit_max:
+            return web.json_response(
+                {"error": f"Rate limited — max {_rate_limit_max} requests per {_rate_limit_window}s"},
+                status=429,
+            )
+        bucket.append(now_ts)
+        # Purge stale IP entries periodically to prevent unbounded memory growth.
+        # Buckets for IPs that stopped connecting still hold old timestamps that
+        # never get pruned (pruning only runs when the same IP makes a new request).
+        if len(_rate_limit_buckets) > 200:
+            stale_ips = [
+                ip for ip, b in _rate_limit_buckets.items()
+                if not b or b[-1] < now_ts - _rate_limit_window
+            ]
+            for ip in stale_ips:
+                del _rate_limit_buckets[ip]
 
     # ── Auth check ──
     auth_header = request.headers.get("Authorization", "")
@@ -1202,17 +1214,17 @@ def create_app(leon_core=None) -> web.Application:
     print(f"\n  Dashboard session token: {token}\n", flush=True)
     logger.info(f"Dashboard session token: {token}")
 
-    # Persistent API token (survives restarts via vault)
+    # Persistent API token — always loaded from config/api_token.txt so it never changes across restarts
+    _token_file = Path(__file__).parent.parent / "config" / "api_token.txt"
     api_token = None
-    if leon_core and hasattr(leon_core, "vault") and leon_core.vault and leon_core.vault._unlocked:
-        api_token = leon_core.vault.retrieve("LEON_API_TOKEN")
-        if not api_token:
-            api_token = secrets.token_hex(24)
-            leon_core.vault.store("LEON_API_TOKEN", api_token)
-            logger.info("Generated new persistent API token and stored in vault")
+    if _token_file.exists():
+        api_token = _token_file.read_text().strip()
     if not api_token:
-        api_token = os.environ.get("LEON_API_TOKEN", secrets.token_hex(24))
+        api_token = secrets.token_hex(24)
+        _token_file.write_text(api_token)
+        logger.info("Generated new persistent API token and saved to config/api_token.txt")
     app["api_token"] = api_token
+    os.environ["LEON_API_TOKEN"] = api_token  # ensure bridge subprocess picks up correct token
     app["response_mode"] = "both"   # voice, text, both
     app["voice_volume"] = 100       # 0-200
     print(f"  API token (for WhatsApp bridge): {api_token}\n", flush=True)

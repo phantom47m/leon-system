@@ -209,8 +209,10 @@ class Leon:
 
         self.running = False
         self._awareness_task = None
+        self._ram_watchdog_task = None
         self._vision_task = None
         self._whatsapp_process = None
+        self._whatsapp_log_fh = None  # track log file handle to avoid FD leak
 
         # Overnight autonomous coding mode
         self.night_mode = NightMode(self)
@@ -371,11 +373,22 @@ class Leon:
 
         logger.info(f"Health checks: {checks_passed}/{checks_total} passed")
 
+    def _close_whatsapp_log(self):
+        """Close the WhatsApp bridge log file handle if open."""
+        if self._whatsapp_log_fh and not self._whatsapp_log_fh.closed:
+            try:
+                self._whatsapp_log_fh.close()
+            except Exception:
+                pass
+            self._whatsapp_log_fh = None
+
     async def stop(self):
         logger.info("Stopping Leon...")
         self.running = False
         if self._awareness_task:
             self._awareness_task.cancel()
+        if self._ram_watchdog_task:
+            self._ram_watchdog_task.cancel()
         if self._vision_task:
             self._vision_task.cancel()
         if self.vision:
@@ -388,6 +401,7 @@ class Leon:
             except subprocess.TimeoutExpired:
                 self._whatsapp_process.kill()
             self._whatsapp_process = None
+        self._close_whatsapp_log()
         if self.hotkey_listener:
             self.hotkey_listener.stop()
         if self.project_watcher:
@@ -451,6 +465,9 @@ class Leon:
             return
 
         try:
+            # Close any previous log file handle to prevent FD leak on restart
+            self._close_whatsapp_log()
+
             log_path = Path("logs/whatsapp_bridge.log")
             log_path.parent.mkdir(exist_ok=True)
             wa_log = open(log_path, "a")
@@ -465,6 +482,7 @@ class Leon:
             except Exception:
                 wa_log.close()
                 raise
+            self._whatsapp_log_fh = wa_log  # store handle so we can close it later
             logger.info(f"WhatsApp bridge started (PID {self._whatsapp_process.pid}), log → {log_path}")
             if self.audit_log:
                 self.audit_log.log("whatsapp_bridge_start", f"PID {self._whatsapp_process.pid}", "info")
@@ -478,12 +496,15 @@ class Leon:
         wa_config = self.config.get("whatsapp", {})
         if not wa_config.get("enabled"):
             return
-        while True:
+        while self.running:
             await asyncio.sleep(30)
             if self._whatsapp_process and self._whatsapp_process.poll() is not None:
                 logger.warning("WhatsApp bridge died — restarting...")
                 self._whatsapp_process = None
+                self._close_whatsapp_log()  # close leaked FD before restart
                 await asyncio.sleep(5)
+                if not self.running:
+                    break
                 self._start_whatsapp_bridge(wa_config)
                 logger.info("WhatsApp bridge restarted by watchdog")
 
@@ -566,20 +587,53 @@ class Leon:
         # ── Night Mode / Autonomous Coding ──────────────────────────────
         nm = self.night_mode
 
-        # Enable night mode
-        if any(p in msg for p in ["night mode on", "autonomous mode", "start night mode", "enable night mode", "go autonomous"]):
+        # Enable night mode — flexible phrasing
+        _nm_on = any(p in msg for p in [
+            "night mode on", "turn on night mode", "switch to night mode", "start night mode",
+            "enable night mode", "activate night mode", "autonomous mode", "go autonomous",
+            "put it in night mode", "night mode:", "night mode,", "coding mode on",
+            "work all night", "work through the night", "work overnight",
+        ])
+        # Disable night mode — flexible phrasing
+        _nm_off = any(p in msg for p in [
+            "night mode off", "turn off night mode", "stop night mode", "disable night mode",
+            "pause night mode", "end night mode", "cancel night mode",
+        ])
+
+        if _nm_on:
             await nm.enable()
+            # Check if task content included in the same message
+            _task_triggers = [
+                "your tasks are:", "here's the task:", "the task is:", "tasks are:",
+                "task for tonight:", "work on this:", "here is the task:", "the tasks:",
+            ]
+            _inline_task = None
+            for tc in _task_triggers:
+                if tc in msg:
+                    idx = msg.index(tc) + len(tc)
+                    candidate = message[idx:].strip()
+                    if len(candidate) > 30:
+                        _inline_task = candidate
+                        break
+            if _inline_task:
+                projects = self.projects_config.get("projects", [])
+                project_name = next(
+                    (p["name"] for p in projects if "motorev" in p["name"].lower()), None
+                ) or (projects[0]["name"] if projects else "Motorev")
+                nm.add_task(_inline_task, project_name)
+                asyncio.create_task(nm.try_dispatch())
+                return f"Night mode on. Task queued for {project_name} — spawning agent now. I'll text you updates every 30 minutes."
             pending = nm.get_pending()
             if pending:
                 return f"Night mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
-            return "Night mode on. Queue is empty — add tasks with 'queue task: [description] for [project]'."
+            return "Night mode on. Queue is empty — send me the task and I'll get started."
 
         # Disable night mode
-        if any(p in msg for p in ["night mode off", "stop night mode", "disable night mode", "pause night mode"]):
+        if _nm_off:
             await nm.disable()
             running = nm.get_running()
             if running:
-                return f"Night mode paused. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
+                return f"Night mode off. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
             return "Night mode off."
 
         # Morning briefing / overnight report
@@ -588,7 +642,7 @@ class Leon:
             return briefing
 
         # Add task to backlog
-        queue_triggers = ["queue task:", "add task:", "add to backlog:", "tonight do:", "tonight work on:", "work on tonight:", "add to queue:"]
+        queue_triggers = ["queue task:", "add task:", "add to backlog:", "tonight do:", "tonight work on:", "work on tonight:", "add to queue:", "your task:", "the task:", "task is:", "go work on:", "start working on:", "go code:"]
         for trigger in queue_triggers:
             if trigger in msg:
                 remainder = message[message.lower().index(trigger) + len(trigger):].strip()
@@ -634,12 +688,16 @@ class Leon:
             return "Nothing pending to clear."
 
         # ── Self-optimization / code review ─────────────────────────────
+        # Self-optimize triggers — must clearly refer to Leon's OWN code, not task briefs
         self_opt_triggers = [
-            "self optim", "self-optim", "optimize yourself", "review your code",
-            "fix your own code", "improve your code", "review your own", "self improve",
-            "self-improve", "check your code", "audit your code", "what's broken in your code",
+            "optimize yourself", "fix your own code", "improve yourself",
+            "review your own code", "check your own code", "audit your own code",
+            "fix your code", "optimize your code", "review your code",
+            "what's broken in your code", "optimize leon", "fix leon's code",
         ]
-        if any(p in msg for p in self_opt_triggers):
+        # Extra guard: skip if this looks like a task brief (long message about another project)
+        _is_task_brief = len(message) > 200 and any(w in msg for w in ["motorev", "app from railway", "phase 1", "phase 2", "codebase"])
+        if not _is_task_brief and any(p in msg for p in self_opt_triggers):
             leon_path = str(Path(__file__).parent.parent)
             project = {
                 "name": "Leon System",
@@ -1148,8 +1206,8 @@ Rules:
         msg = message.lower()
 
         # Map keywords to permission actions
+        # Note: delete_files removed — agents run with --dangerously-skip-permissions already
         checks = [
-            (["delete", "remove file", "rm ", "erase"], "delete_files"),
             (["purchase", "buy", "order", "checkout"], "make_purchase"),
             (["transfer money", "send money", "pay ", "wire "], "send_money"),
             (["post publicly", "tweet", "publish"], "post_publicly"),
@@ -1570,11 +1628,12 @@ spawned_by: Leon v1.0
                                 self.memory.remove_active_task(agent_id)
                                 old_task["id"] = new_id
                                 self.memory.add_active_task(new_id, old_task)
-                            # Update task queue mapping
+                            # Update task queue mapping and persist to disk
                             task = self.task_queue.active_tasks.pop(agent_id, None)
                             if task:
                                 task["agent_id"] = new_id
                                 self.task_queue.active_tasks[new_id] = task
+                                self.task_queue._save()
                         logger.info(f"Agent {agent_id} retrying as {new_id}")
 
                     elif status.get("completed"):
