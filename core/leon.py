@@ -233,6 +233,14 @@ class Leon:
             self.bridge.on(MSG_TASK_STATUS, self._handle_remote_task_status)
             self.bridge.on(MSG_TASK_RESULT, self._handle_remote_task_result)
 
+        # Feature detection — set flags for optional components
+        self._openclaw_available = (Path.home() / ".openclaw" / "bin" / "openclaw").exists()
+        self._claude_cli_available = bool(__import__("shutil").which("claude"))
+        if not self._openclaw_available:
+            logger.info("OpenClaw not installed — browser automation and skills unavailable")
+        if not self._claude_cli_available:
+            logger.warning("claude CLI not found — agent spawning will fail. Install from https://claude.ai/download")
+
         self.running = False
         self._awareness_task = None
         self._ram_watchdog_task = None
@@ -1646,30 +1654,35 @@ spawned_by: Leon v1.0
 
     def _get_skills_manifest(self) -> str:
         """Return a concise tools/skills section to inject into task briefs."""
+        oc_bin = Path.home() / ".openclaw" / "bin" / "openclaw"
         skills_dir = Path.home() / ".openclaw" / "workspace" / "skills"
+        openclaw_available = oc_bin.exists()
         skill_names = []
         if skills_dir.exists():
             skill_names = sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
 
-        # Key skills relevant to coding tasks
-        coding_skills = [
-            s for s in skill_names
-            if any(k in s for k in [
-                "github", "docker", "cloud", "frontend", "debug", "clean-code",
-                "security", "database", "sql", "drizzle", "research", "search",
-                "in-depth", "senior-dev", "spark", "jarvis", "task-dev", "self-improving",
-                "kubernetes", "jenkins", "mlops", "linux",
-            ])
-        ]
-
         lines = ["## Available Tools\n"]
-        lines.append("You have full bash access. You can also leverage these installed OpenClaw skills")
-        lines.append(f"(323 total) — invoke via `~/.openclaw/bin/openclaw agent` or use their expertise")
-        lines.append(f"directly since their knowledge is available to you:\n")
-        if coding_skills:
-            lines.append("**Relevant skills for this task:**")
-            for s in coding_skills[:20]:
-                lines.append(f"  - `{s}`")
+        lines.append("You have full bash access.")
+
+        if openclaw_available and skill_names:
+            # Key skills relevant to coding tasks
+            coding_skills = [
+                s for s in skill_names
+                if any(k in s for k in [
+                    "github", "docker", "cloud", "frontend", "debug", "clean-code",
+                    "security", "database", "sql", "drizzle", "research", "search",
+                    "in-depth", "senior-dev", "spark", "jarvis", "task-dev", "self-improving",
+                    "kubernetes", "jenkins", "mlops", "linux",
+                ])
+            ]
+            lines.append(f"You can also leverage these installed OpenClaw skills")
+            lines.append(f"({len(skill_names)} total) — invoke via `{oc_bin} agent` or use their expertise")
+            lines.append(f"directly since their knowledge is available to you:\n")
+            if coding_skills:
+                lines.append("**Relevant skills for this task:**")
+                for s in coding_skills[:20]:
+                    lines.append(f"  - `{s}`")
+
         lines.append("\n**Always:**")
         lines.append("  - Write tests for any code you add")
         lines.append("  - Commit changes with descriptive git messages")
@@ -2062,6 +2075,8 @@ spawned_by: Leon v1.0
             "active_agents": len(self.agent_manager.active_agents),
             "ai_provider": getattr(self.api, '_auth_method', 'none'),
             "ai_name": self.ai_name,
+            "openclaw_available": self._openclaw_available,
+            "claude_cli_available": self._claude_cli_available,
             "vision": self.vision.get_status() if self.vision else {},
             "security": security,
             "printer": self.printer is not None,

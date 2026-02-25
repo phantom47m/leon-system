@@ -1330,7 +1330,8 @@ class VoiceSystem:
             return False
 
     async def _speak_local(self, text: str):
-        """Fallback: local TTS using pyttsx3."""
+        """Fallback TTS chain: pyttsx3 → espeak-ng → print."""
+        # 1. Try pyttsx3
         try:
             import pyttsx3
 
@@ -1346,13 +1347,28 @@ class VoiceSystem:
                 engine.runAndWait()
 
             await asyncio.get_event_loop().run_in_executor(None, _speak)
-
+            return
         except ImportError:
-            logger.warning("pyttsx3 not installed — printing instead")
-            print(f"\nLeon: {text}\n")
+            pass
         except Exception as e:
-            logger.error("Local TTS error: %s", e)
-            print(f"\nLeon: {text}\n")
+            logger.warning("pyttsx3 failed: %s — trying espeak-ng", e)
+
+        # 2. Try espeak-ng directly (installed by scripts/install.sh)
+        import shutil as _shutil
+        if _shutil.which("espeak-ng"):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "espeak-ng", "-s", "160", "-v", "en+m3", text,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=30)
+                return
+            except Exception as e:
+                logger.warning("espeak-ng failed: %s", e)
+
+        # 3. Last resort: print to console
+        print(f"\n[{self.wake_word.split()[-1].upper()}]: {text}\n")
 
     # ================================================================
     # TTS CACHE

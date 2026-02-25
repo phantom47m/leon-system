@@ -38,8 +38,10 @@ Leon:
 - Linux (tested on Ubuntu/Pop!\_OS)
 - Python 3.11+
 - Node.js 18+ (for WhatsApp bridge)
-- One of: Claude Max subscription, Anthropic API key, or Groq free tier
+- **[`claude` CLI](https://claude.ai/download)** — required for agent spawning (free with Claude Max, or any Claude subscription)
+- One of for conversation: Claude Max subscription, Anthropic API key, or Groq free tier
 - Optional: ElevenLabs API key (voice output), Deepgram API key (STT)
+- Optional: [OpenClaw](https://openclaw.ai) — adds browser automation, cron scheduling, and 300+ AI skills
 
 ---
 
@@ -50,12 +52,14 @@ Leon:
 git clone https://github.com/phantom47m/leon-system.git
 cd leon-system
 
-# 2. Create virtualenv and install dependencies
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# 2. Install everything
+bash scripts/install.sh
 
-# 3. Start Leon
+# 3. Install and log into the claude CLI (required for agents)
+# Download from https://claude.ai/download, then:
+claude   # opens browser to log in — do this once
+
+# 4. Start Leon
 bash start.sh
 ```
 

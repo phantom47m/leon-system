@@ -1373,6 +1373,8 @@ def _build_state(leon) -> dict:
             "updateUrl": getattr(leon.update_checker, 'release_url', '') if getattr(leon, 'update_checker', None) else '',
             "aiProvider": status.get("ai_provider", "none"),
             "aiName": status.get("ai_name", "AI"),
+            "openclawAvailable": status.get("openclaw_available", False),
+            "claudeCliAvailable": status.get("claude_cli_available", False),
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")

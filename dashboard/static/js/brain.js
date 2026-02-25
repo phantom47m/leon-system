@@ -698,15 +698,26 @@ function updateUI() {
         }
     }
 
-    // No-provider banner — show when AI isn't configured
+    // No-provider banner
     const npb = document.getElementById('no-provider-banner');
-    if (npb) {
-        const hasProvider = brainState.aiProvider && brainState.aiProvider !== 'none';
-        npb.style.display = hasProvider ? 'none' : 'block';
-        // Shift update banner down if both are visible
-        const ub = document.getElementById('update-banner');
-        if (ub && ub.style.display !== 'none' && !hasProvider) {
-            ub.style.top = '36px';
+    const hasProvider = brainState.aiProvider && brainState.aiProvider !== 'none';
+    if (npb) npb.style.display = hasProvider ? 'none' : 'block';
+
+    // No claude CLI banner (agents won't work)
+    const ncb = document.getElementById('no-claude-banner');
+    if (ncb) {
+        // Only show if provider is configured but claude CLI is missing
+        const showCliWarn = hasProvider && brainState.claudeCliAvailable === false;
+        ncb.style.display = showCliWarn ? 'block' : 'none';
+    }
+
+    // Stack banners vertically if multiple visible
+    let bannerOffset = 0;
+    for (const id of ['update-banner', 'no-provider-banner', 'no-claude-banner']) {
+        const el = document.getElementById(id);
+        if (el && el.style.display !== 'none') {
+            el.style.top = bannerOffset + 'px';
+            bannerOffset += el.offsetHeight || 37;
         }
     }
 }
