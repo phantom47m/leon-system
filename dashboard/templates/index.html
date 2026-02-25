@@ -4,198 +4,451 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LEON — Neural Interface</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=17">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=41">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <!-- 3D Brain — center hero -->
-    <div id="brain-container"></div>
 
-    <!-- JARVIS HUD — data panels spread around the brain -->
-    <div id="hud">
+    <!-- Stars background -->
+    <canvas id="stars-bg"></canvas>
 
-        <!-- Top Bar — identity + connection -->
-        <div id="top-bar">
-            <div class="logo">
-                <span class="logo-icon">&#x2B21;</span>
-                <span class="logo-text">LEON</span>
-                <span class="logo-ver">v3.0</span>
-            </div>
-            <div class="top-center">
-                <span class="hud-chip"><span class="hl">UP</span> <span id="stat-uptime">00:00:00</span></span>
-                <span class="hud-divider">|</span>
-                <span class="hud-chip"><span class="hl">LOAD</span> <span id="stat-load">--</span></span>
-                <span class="hud-divider">|</span>
-                <span class="hud-chip"><span class="hl">PROC</span> <span id="stat-proc">--</span></span>
-            </div>
-            <div class="top-right">
-                <span id="voice-state" class="hud-chip voice-chip">MIC OFF</span>
-                <div class="indicator" id="ws-indicator">
-                    <span class="dot pulse" id="ws-dot"></span>
-                    <span id="ws-status-text">ONLINE</span>
-                </div>
+    <!-- Top bar -->
+    <header id="top-bar">
+        <div class="logo">
+            <span class="logo-hex">◆</span>
+            <span class="logo-text">LEON</span>
+            <span class="logo-ver">v3.0</span>
+        </div>
+        <div class="top-stats">
+            <span class="stat-chip"><span class="sl">UP</span><span id="stat-uptime">00:00:00</span></span>
+            <span class="divr">|</span>
+            <span class="stat-chip"><span class="sl">LOAD</span><span id="stat-load">--</span></span>
+            <span class="divr">|</span>
+            <span class="stat-chip"><span class="sl">PROC</span><span id="stat-proc">--</span></span>
+            <span class="divr">|</span>
+            <span class="stat-chip"><span class="sl">API</span><span id="stat-api">$0.00</span></span>
+            <span class="divr">|</span>
+            <span class="stat-chip"><span class="sl">TOK</span><span id="stat-tokens">0</span></span>
+            <span class="divr">|</span>
+            <span class="stat-chip"><span class="sl">TIME</span><span id="stat-clock">--:--:--</span></span>
+        </div>
+        <div class="top-right">
+            <!-- OpenClaw direct access -->
+            <button id="btn-openclaw" class="top-icon-btn" title="OpenClaw Direct Interface">🦀</button>
+            <button id="btn-settings" class="top-icon-btn" title="Leon Settings" onclick="toggleSettings()">⚙</button>
+            <span id="voice-state" class="voice-chip">MIC OFF</span>
+            <div class="ws-ind" id="ws-indicator">
+                <span class="ws-dot" id="ws-dot"></span>
+                <span id="ws-status-text">ONLINE</span>
             </div>
         </div>
+    </header>
 
-        <!-- ════ LEFT COLUMN — System Resources ════ -->
-        <div id="left-col">
+    <!-- Hub universe — full screen, hub centered, panels float around it -->
+    <div id="hub-universe">
 
-            <!-- CPU -->
-            <div class="hud-card">
-                <div class="card-head">CPU</div>
-                <div class="card-gauge">
-                    <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill cpu" id="gauge-cpu" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
-                    <span class="gauge-val" id="gauge-cpu-val">--%</span>
-                </div>
+        <!-- ══ SYSTEM PANEL (slides left) ══ -->
+        <div class="hub-panel panel-left" id="panel-system">
+            <div class="panel-header">
+                <span class="panel-title">SYSTEM</span>
+                <button class="panel-close" onclick="closePanel('system')">✕</button>
             </div>
-
-            <!-- RAM -->
-            <div class="hud-card">
-                <div class="card-head">MEMORY</div>
-                <div class="card-gauge">
-                    <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill mem" id="gauge-mem" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
-                    <span class="gauge-val" id="gauge-mem-val">--%</span>
-                </div>
-                <div class="card-detail" id="mem-detail">-- / -- GB</div>
-            </div>
-
-            <!-- GPU -->
-            <div class="hud-card">
-                <div class="card-head">GPU</div>
-                <div class="card-gauge">
-                    <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill gpu" id="gauge-gpu" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
-                    <span class="gauge-val" id="gauge-gpu-val">--%</span>
-                </div>
-                <div class="card-detail" id="gpu-name">--</div>
-                <div class="card-detail" id="gpu-temp">-- °C</div>
-                <div class="card-detail" id="gpu-vram">VRAM: --</div>
-            </div>
-
-            <!-- DISK -->
-            <div class="hud-card">
-                <div class="card-head">STORAGE</div>
-                <div class="card-gauge">
-                    <svg viewBox="0 0 36 36"><circle class="gauge-bg" cx="18" cy="18" r="15.5"/><circle class="gauge-fill disk" id="gauge-disk" cx="18" cy="18" r="15.5" stroke-dasharray="97.4" stroke-dashoffset="97.4"/></svg>
-                    <span class="gauge-val" id="gauge-disk-val">--%</span>
-                </div>
-                <div class="card-detail" id="disk-detail">-- / -- TB</div>
-            </div>
-
-            <!-- NETWORK -->
-            <div class="hud-card">
-                <div class="card-head">NETWORK</div>
-                <div class="card-detail" id="net-rx">&#x2193; RX: -- GB</div>
-                <div class="card-detail" id="net-tx">&#x2191; TX: -- GB</div>
-            </div>
-
+            <div class="bar-row"><span class="bl">CPU</span><div class="btrack"><div class="bfill cpu" id="bar-cpu"></div></div><span class="bv" id="val-cpu">--%</span></div>
+            <div class="bar-row"><span class="bl">MEM</span><div class="btrack"><div class="bfill mem" id="bar-mem"></div></div><span class="bv" id="val-mem">--%</span></div>
+            <div class="bar-row"><span class="bl">GPU</span><div class="btrack"><div class="bfill gpu" id="bar-gpu"></div></div><span class="bv" id="val-gpu">--%</span></div>
+            <div class="bar-row"><span class="bl">DISK</span><div class="btrack"><div class="bfill disk" id="bar-disk"></div></div><span class="bv" id="val-disk">--%</span></div>
+            <div class="pdiv"></div>
+            <div class="ir"><span class="il">MEMORY</span><span class="iv" id="mem-detail">-- / -- GB</span></div>
+            <div class="ir"><span class="il">STORAGE</span><span class="iv" id="disk-detail">-- / -- GB</span></div>
+            <div class="ir"><span class="il">RX ↓</span><span class="iv" id="net-rx">--</span></div>
+            <div class="ir"><span class="il">TX ↑</span><span class="iv" id="net-tx">--</span></div>
+            <div class="pdiv"></div>
+            <div class="ir"><span class="il">GPU MODEL</span></div>
+            <div class="iv sm" id="gpu-name">--</div>
+            <div class="ir"><span class="il">TEMP</span><span class="iv" id="gpu-temp">--</span></div>
+            <div class="ir"><span class="il">VRAM</span><span class="iv sm" id="gpu-vram">--</span></div>
         </div>
 
-        <!-- ════ RIGHT COLUMN — Leon Status ════ -->
-        <div id="right-col">
-
-            <!-- Brain Status -->
-            <div class="hud-card">
-                <div class="card-head">BRAIN</div>
-                <div class="card-row">
-                    <span class="card-label">Role</span>
-                    <span class="card-val" id="brain-role">UNIFIED</span>
-                </div>
-                <div class="card-row">
-                    <span class="card-label">Left</span>
-                    <span class="card-val active" id="left-status">ACTIVE</span>
-                </div>
-                <div class="card-row">
-                    <span class="card-label">Right</span>
-                    <span class="card-val active" id="right-status">ACTIVE</span>
-                </div>
+        <!-- ══ AGENTS PANEL (slides right) ══ -->
+        <div class="hub-panel panel-right" id="panel-agents">
+            <div class="panel-header">
+                <span class="panel-title">AGENTS</span>
+                <button class="panel-close" onclick="closePanel('agents')">✕</button>
             </div>
-
-            <!-- Agents -->
-            <div class="hud-card">
-                <div class="card-head">AGENTS</div>
-                <div class="card-big" id="agent-count">0</div>
-                <div class="card-row">
-                    <span class="card-label">Tasks</span>
-                    <span class="card-val" id="task-count">0</span>
-                </div>
-                <div class="card-row">
-                    <span class="card-label">Done</span>
-                    <span class="card-val" id="stat-completed">0</span>
-                </div>
-                <div class="card-row">
-                    <span class="card-label">Queue</span>
-                    <span class="card-val" id="stat-queued">0</span>
-                </div>
-                <div id="agents-list" class="card-agents"></div>
-            </div>
-
-            <!-- Notifications -->
-            <div class="hud-card">
-                <div class="card-head">ALERTS</div>
-                <div class="card-row">
-                    <span class="card-label">Total</span>
-                    <span class="card-val" id="notif-total">0</span>
-                </div>
-                <div class="card-row">
-                    <span class="card-label">Pending</span>
-                    <span class="card-val" id="notif-pending">0</span>
-                </div>
-            </div>
-
-            <!-- Screen Awareness -->
-            <div class="hud-card">
-                <div class="card-head">SCREEN</div>
-                <div class="card-detail" id="screen-activity">Activity: --</div>
-                <div class="card-detail" id="screen-app">App: --</div>
-            </div>
-
+            <div class="agent-big" id="agent-count">0</div>
+            <div class="ir"><span class="il">ROLE</span><span class="iv" id="brain-role">UNIFIED</span></div>
+            <div class="ir"><span class="il">LEFT BRAIN</span><span class="iv active" id="left-status">ACTIVE</span></div>
+            <div class="ir"><span class="il">RIGHT BRAIN</span><span class="iv idle" id="right-status">IDLE</span></div>
+            <div class="pdiv"></div>
+            <div class="ir"><span class="il">TASKS</span><span class="iv" id="task-count">0</span></div>
+            <div class="ir"><span class="il">COMPLETED</span><span class="iv" id="stat-completed">0</span></div>
+            <div class="ir"><span class="il">QUEUED</span><span class="iv" id="stat-queued">0</span></div>
+            <div class="pdiv"></div>
+            <div class="panel-title-sm">ACTIVE</div>
+            <div id="agents-list" class="agents-list"></div>
         </div>
 
-        <!-- ════ BOTTOM — Activity Feed ════ -->
-        <div id="feed-panel">
+        <!-- ══ FEED PANEL (slides lower-left) ══ -->
+        <div class="hub-panel panel-feed-pos" id="panel-feed">
+            <div class="panel-header">
+                <span class="panel-title">ACTIVITY FEED</span>
+                <div style="display:flex;gap:5px;align-items:center">
+                    <button class="panel-close" id="btn-feed-search" onclick="toggleFeedSearch()" title="Search feed">⌕</button>
+                    <button class="panel-close" onclick="exportFeed()" title="Export feed to file">EXP</button>
+                    <button class="panel-close" onclick="clearFeed()" title="Clear feed">CLR</button>
+                    <button class="panel-close" onclick="closePanel('feed')">✕</button>
+                </div>
+            </div>
+            <input id="feed-search" type="text" placeholder="filter feed…"
+                autocomplete="off" spellcheck="false"
+                style="width:100%;background:rgba(0,180,255,0.04);border:1px solid rgba(0,180,255,0.12);border-radius:3px;
+                color:rgba(0,212,255,0.7);font-family:Courier New,monospace;font-size:10px;padding:4px 8px;
+                margin-bottom:6px;outline:none;display:none">
             <div id="activity-feed">
-                <div class="feed-item feed-system"><span class="feed-time">--:--</span> J.A.R.V.I.S. — Just A Rather Very Intelligent System. Ready.</div>
+                <div class="feed-item feed-system">
+                    <span class="feed-time">--:--</span> LEON Neural Interface — Initialized. Ready.
+                </div>
             </div>
+            <button id="feed-scroll-resume" onclick="feedScrollResume()" style="display:none;width:100%;margin-top:6px;padding:4px 0;background:rgba(0,180,255,0.06);border:1px solid rgba(0,180,255,0.18);border-radius:3px;color:rgba(0,212,255,0.6);font-family:Orbitron,monospace;font-size:8px;letter-spacing:2px;cursor:pointer;justify-content:center;align-items:center;gap:4px;transition:all 0.2s">↓ NEW MESSAGES</button>
         </div>
 
-        <!-- Scan Lines -->
-        <div class="scanlines"></div>
+        <!-- ══ STATUS PANEL (slides up-left) ══ -->
+        <div class="hub-panel panel-topleft" id="panel-status">
+            <div class="panel-header">
+                <span class="panel-title">STATUS</span>
+                <button class="panel-close" onclick="closePanel('status')">✕</button>
+            </div>
+            <div class="ir"><span class="il">ALERTS</span><span class="iv" id="notif-total">0</span></div>
+            <div class="ir"><span class="il">PENDING</span><span class="iv" id="notif-pending">0</span></div>
+            <div class="pdiv"></div>
+            <div class="iv sm" id="screen-activity">Activity: --</div>
+            <div class="iv sm" id="screen-app">App: --</div>
+        </div>
+
+        <!-- ══ CENTRAL HUB SVG ══ -->
+        <div id="hub-container">
+            <svg id="hub" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <filter id="fx-cyan" x="-60%" y="-60%" width="220%" height="220%">
+                        <feGaussianBlur stdDeviation="3.5" result="b"/>
+                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                    <filter id="fx-text" x="-30%" y="-30%" width="160%" height="160%">
+                        <feGaussianBlur stdDeviation="7" result="b"/>
+                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                    <filter id="fx-orange" x="-60%" y="-60%" width="220%" height="220%">
+                        <feGaussianBlur stdDeviation="5" result="b"/>
+                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                    <filter id="fx-nav" x="-60%" y="-60%" width="220%" height="220%">
+                        <feGaussianBlur stdDeviation="3" result="b"/>
+                        <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                    <radialGradient id="rg-inner" cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stop-color="#0e1c28"/>
+                        <stop offset="100%" stop-color="#030910"/>
+                    </radialGradient>
+                    <radialGradient id="rg-ring" cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stop-color="#1a1e26"/>
+                        <stop offset="100%" stop-color="#0a0d14"/>
+                    </radialGradient>
+                </defs>
+
+                <!-- Slowly rotating outer dashed accent ring -->
+                <g id="hub-spin">
+                    <circle cx="250" cy="250" r="247" fill="none"
+                        stroke="#00d4ff" stroke-width="0.7"
+                        stroke-dasharray="5 20" opacity="0.18"/>
+                </g>
+
+                <!-- Outer metallic bezel -->
+                <circle cx="250" cy="250" r="238" fill="url(#rg-ring)" stroke="#0e1318" stroke-width="1"/>
+                <circle cx="250" cy="250" r="234" fill="none" stroke="#252830" stroke-width="1"/>
+                <circle cx="250" cy="250" r="228" fill="none" stroke="#1a1d22" stroke-width="10"/>
+                <circle cx="250" cy="250" r="220" fill="none" stroke="#0d1015" stroke-width="3"/>
+                <circle cx="250" cy="250" r="216" fill="none" stroke="#1c2028" stroke-width="2"/>
+
+                <!-- ═══ NAV ARCS (4 sections, each 60°, evenly spaced with 20° gaps) ═══ -->
+                <!--
+                    Clock positions (from 12 o'clock, clockwise):
+                    MIC (orange):  15° → 75°   (12:03 – 1:30, top area)
+                    AGENTS (cyan): 95° → 155°  (3:10 – 5:10, right side)
+                    FEED (teal):   175° → 235° (5:50 – 7:50, bottom)
+                    SYSTEM (cyan): 255° → 315° (8:30 – 10:30, left side)
+                    STATUS (blue): 335° → 355° (tiny, top-left notch)
+
+                    SVG rotate(X) shifts arc start from 3-o'clock by X°.
+                    Start-from-12 = 90° + rotate. So rotate = Start-from-12 - 90°.
+                    MIC:    rotate = 15  - 90 = -75
+                    AGENTS: rotate = 95  - 90 =   5
+                    FEED:   rotate = 175 - 90 =  85
+                    SYSTEM: rotate = 255 - 90 = 165
+                -->
+
+                <!-- MIC arc — background dim track (full 60° span visible always) -->
+                <circle cx="250" cy="250" r="225"
+                    fill="none" stroke="rgba(255,100,0,0.15)" stroke-width="10"
+                    stroke-dasharray="236 1178"
+                    transform="rotate(-75 250 250)"
+                    stroke-linecap="round"/>
+
+                <!-- MIC arc — active indicator (orange=muted, green=listening) -->
+                <circle cx="250" cy="250" r="225" id="hub-arc"
+                    fill="none" stroke="#ff7700" stroke-width="10"
+                    stroke-dasharray="236 1178"
+                    transform="rotate(-75 250 250)"
+                    stroke-linecap="round"
+                    filter="url(#fx-orange)"/>
+
+                <!-- AGENTS arc — background -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,180,255,0.08)" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(5 250 250)"
+                    stroke-linecap="round"/>
+                <!-- AGENTS arc — active -->
+                <circle cx="250" cy="250" r="210" id="arc-agents" class="nav-arc"
+                    fill="none" stroke="#00d4ff" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(5 250 250)"
+                    stroke-linecap="round" opacity="0.38"/>
+
+                <!-- FEED arc — background -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,180,255,0.08)" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(85 250 250)"
+                    stroke-linecap="round"/>
+                <!-- FEED arc — active -->
+                <circle cx="250" cy="250" r="210" id="arc-feed" class="nav-arc"
+                    fill="none" stroke="#00ffaa" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(85 250 250)"
+                    stroke-linecap="round" opacity="0.38"/>
+
+                <!-- SYSTEM arc — background -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,180,255,0.08)" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(165 250 250)"
+                    stroke-linecap="round"/>
+                <!-- SYSTEM arc — active -->
+                <circle cx="250" cy="250" r="210" id="arc-system" class="nav-arc"
+                    fill="none" stroke="#00d4ff" stroke-width="8"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(165 250 250)"
+                    stroke-linecap="round" opacity="0.38"/>
+
+                <!-- STATUS arc — top-left notch -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,180,255,0.08)" stroke-width="8"
+                    stroke-dasharray="104 1226"
+                    transform="rotate(-115 250 250)"
+                    stroke-linecap="round"/>
+                <circle cx="250" cy="250" r="210" id="arc-status" class="nav-arc"
+                    fill="none" stroke="#8888ff" stroke-width="8"
+                    stroke-dasharray="104 1226"
+                    transform="rotate(-115 250 250)"
+                    stroke-linecap="round" opacity="0.38"/>
+
+                <!-- Separator ring (on top of nav arcs visually) -->
+                <circle cx="250" cy="250" r="200" fill="none" stroke="#0c0f14" stroke-width="3"/>
+
+                <!-- Primary cyan glow ring -->
+                <circle cx="250" cy="250" r="194" fill="none" stroke="#00d4ff" stroke-width="2.5"
+                    opacity="0.85" filter="url(#fx-cyan)"/>
+                <circle cx="250" cy="250" r="194" fill="none" stroke="#00d4ff" stroke-width="0.6" opacity="0.5"/>
+
+                <!-- Dark interior fill -->
+                <circle cx="250" cy="250" r="188" fill="#050b12"/>
+
+                <!-- Tick marks (generated by JS) -->
+                <g id="hub-ticks" opacity="0.55"></g>
+
+                <!-- Inner ring -->
+                <circle cx="250" cy="250" r="175" fill="none" stroke="#00d4ff" stroke-width="1.8"
+                    opacity="0.7" filter="url(#fx-cyan)"/>
+                <circle cx="250" cy="250" r="175" fill="none" stroke="#00d4ff" stroke-width="0.5" opacity="0.35"/>
+
+                <!-- Inner fill gradient -->
+                <circle cx="250" cy="250" r="172" fill="url(#rg-inner)"/>
+
+                <!-- Decorative inner concentric rings -->
+                <circle cx="250" cy="250" r="155" fill="none" stroke="#00d4ff" stroke-width="0.4" opacity="0.18"/>
+                <circle cx="250" cy="250" r="135" fill="none" stroke="#00d4ff" stroke-width="0.3" opacity="0.12"/>
+
+                <!-- Cardinal crosshair lines -->
+                <line x1="250" y1="78"  x2="250" y2="110" stroke="#00d4ff" stroke-width="0.8" opacity="0.3"/>
+                <line x1="250" y1="390" x2="250" y2="422" stroke="#00d4ff" stroke-width="0.8" opacity="0.3"/>
+                <line x1="78"  y1="250" x2="110" y2="250" stroke="#00d4ff" stroke-width="0.8" opacity="0.3"/>
+                <line x1="390" y1="250" x2="422" y2="250" stroke="#00d4ff" stroke-width="0.8" opacity="0.3"/>
+
+                <!-- Pulsing inner halo -->
+                <circle cx="250" cy="250" r="88" fill="none" stroke="#00d4ff"
+                    stroke-width="0.6" opacity="0.1" id="hub-halo"/>
+
+                <!-- LEON text -->
+                <text x="250" y="224"
+                    text-anchor="middle"
+                    font-family="Orbitron,monospace"
+                    font-size="40" font-weight="900"
+                    fill="#00d4ff"
+                    letter-spacing="8"
+                    filter="url(#fx-text)">LEON</text>
+
+                <line x1="178" y1="239" x2="322" y2="239" stroke="#00d4ff" stroke-width="0.6" opacity="0.3"/>
+
+                <text x="250" y="258"
+                    text-anchor="middle"
+                    font-family="Orbitron,monospace"
+                    font-size="7.5" fill="#00d4ff" opacity="0.38" letter-spacing="3.5">NEURAL INTERFACE</text>
+
+                <!-- Hub status / nav hint text -->
+                <text x="250" y="282"
+                    text-anchor="middle"
+                    font-family="Orbitron,monospace"
+                    font-size="12" fill="#00ffaa"
+                    letter-spacing="4" id="hub-status">ONLINE</text>
+
+                <text x="250" y="308"
+                    text-anchor="middle"
+                    font-family="Orbitron,monospace"
+                    font-size="8.5" fill="#00d4ff" opacity="0.35"
+                    letter-spacing="2" id="hub-agents">AGENTS: 0</text>
+
+                <!-- MIC state indicator — very visible -->
+                <text x="250" y="336"
+                    text-anchor="middle"
+                    font-family="Orbitron,monospace"
+                    font-size="9" fill="#ff7700"
+                    letter-spacing="3" id="hub-mic-state">◉ MUTED</text>
+
+                <!-- ═══ INVISIBLE HIT TARGETS (must be last — on top) ═══ -->
+                <!-- MIC hit target — pointer-events="all" ensures transparent stroke captures clicks -->
+                <circle cx="250" cy="250" r="225"
+                    fill="none" stroke="rgba(0,0,0,0)" stroke-width="38"
+                    stroke-dasharray="236 1178"
+                    transform="rotate(-75 250 250)"
+                    pointer-events="all"
+                    style="cursor:pointer" id="hit-mic"/>
+
+                <!-- AGENTS hit target -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,0,0,0)" stroke-width="38"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(5 250 250)"
+                    pointer-events="all"
+                    style="cursor:pointer" id="hit-agents"/>
+
+                <!-- FEED hit target -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,0,0,0)" stroke-width="38"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(85 250 250)"
+                    pointer-events="all"
+                    style="cursor:pointer" id="hit-feed"/>
+
+                <!-- SYSTEM hit target -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,0,0,0)" stroke-width="38"
+                    stroke-dasharray="220 1100"
+                    transform="rotate(165 250 250)"
+                    pointer-events="all"
+                    style="cursor:pointer" id="hit-system"/>
+
+                <!-- STATUS hit target -->
+                <circle cx="250" cy="250" r="210"
+                    fill="none" stroke="rgba(0,0,0,0)" stroke-width="38"
+                    stroke-dasharray="104 1226"
+                    transform="rotate(-115 250 250)"
+                    pointer-events="all"
+                    style="cursor:pointer" id="hit-status"/>
+
+            </svg>
+        </div>
+
+    </div><!-- end hub-universe -->
+
+    <!-- Command bar — always accessible -->
+    <div id="cmd-bar">
+        <span class="cmd-pfx">◆</span>
+        <input type="text" id="command-input" placeholder="Talk to Leon..."
+            autocomplete="off" spellcheck="false" aria-label="Command input">
+        <button id="cmd-send" aria-label="Send">➤</button>
+        <button id="ptt-btn" title="Activate Leon voice" aria-label="Activate voice">⏺</button>
+        <div class="cmd-ld" id="command-loading"></div>
     </div>
 
-    <!-- Auth Overlay -->
-    <div id="auth-overlay" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(2,8,18,0.95); align-items:center; justify-content:center; backdrop-filter:blur(20px);">
+    <!-- Settings Panel -->
+    <div id="panel-settings" class="side-panel" style="display:none;right:0;top:50px;width:280px;">
+        <div class="panel-header">
+            <span class="panel-title">⚙ LEON SETTINGS</span>
+            <button class="panel-close" onclick="toggleSettings()">✕</button>
+        </div>
+        <div class="panel-body" style="padding:16px;display:flex;flex-direction:column;gap:18px;">
+
+            <!-- Response Mode -->
+            <div class="setting-group">
+                <div class="setting-label">RESPONSE MODE</div>
+                <div class="setting-desc">How Leon responds to messages</div>
+                <div class="setting-btn-group" id="response-mode-btns">
+                    <button class="mode-btn" data-mode="voice" onclick="setResponseMode('voice')">🔊 Voice</button>
+                    <button class="mode-btn active" data-mode="both" onclick="setResponseMode('both')">🔊+💬 Both</button>
+                    <button class="mode-btn" data-mode="text" onclick="setResponseMode('text')">💬 Text</button>
+                </div>
+            </div>
+
+            <!-- Voice Volume -->
+            <div class="setting-group">
+                <div class="setting-label">VOICE VOLUME <span id="vol-display">100%</span></div>
+                <div class="setting-desc">Leon's TTS speaking volume</div>
+                <input type="range" id="voice-vol-slider" min="0" max="200" value="100"
+                    oninput="onVolumeSlider(this.value)"
+                    onchange="applyVolume(this.value)"
+                    style="width:100%;accent-color:#00d4ff;margin-top:6px;">
+            </div>
+
+            <!-- Mic Mute -->
+            <div class="setting-group">
+                <div class="setting-label">MICROPHONE</div>
+                <button id="settings-mute-btn" class="mode-btn active" onclick="settingsToggleMic()" style="width:100%">🎤 Active</button>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Scanlines -->
+    <div class="scanlines"></div>
+
+    <!-- Auth overlay -->
+    <div id="auth-overlay" style="display:none; position:fixed; inset:0; z-index:9999;
+        background:rgba(2,8,18,0.96); align-items:center; justify-content:center;
+        backdrop-filter:blur(20px);">
         <div style="text-align:center; font-family:'Orbitron',monospace;">
-            <div style="font-size:2.5rem; color:#00d4ff; margin-bottom:8px; text-shadow: 0 0 40px rgba(0,212,255,0.4);">&#x2B21; LEON</div>
-            <div style="font-size:0.65rem; color:rgba(255,255,255,0.25); margin-bottom:40px; letter-spacing:6px;">NEURAL INTERFACE</div>
-            <input type="text" id="auth-token-input" placeholder="Session token..." autocomplete="off" spellcheck="false">
-            <br>
-            <button id="auth-submit">INITIALIZE</button>
-            <div id="auth-error" style="margin-top:18px; color:#ff4466; font-family:'Rajdhani',sans-serif; font-size:0.85rem; min-height:1.2em;"></div>
+            <div style="font-size:2.5rem; color:#00d4ff; margin-bottom:8px;
+                text-shadow:0 0 40px rgba(0,212,255,0.5);">◆ LEON</div>
+            <div style="font-size:0.6rem; color:rgba(0,212,255,0.25);
+                margin-bottom:40px; letter-spacing:6px;">NEURAL INTERFACE</div>
+            <input type="text" id="auth-token-input" placeholder="Session token..."
+                autocomplete="off" spellcheck="false"
+                style="width:280px; padding:12px 16px;
+                background:rgba(0,180,255,0.05); border:1px solid rgba(0,180,255,0.2);
+                border-radius:4px; color:#00d4ff; font-family:'Courier New',monospace;
+                font-size:13px; outline:none; text-align:center; display:block; margin:0 auto;">
+            <button id="auth-submit"
+                style="display:block; margin:16px auto 0; padding:10px 40px;
+                background:rgba(0,180,255,0.06); border:1px solid rgba(0,180,255,0.25);
+                border-radius:4px; color:#00d4ff; font-family:'Orbitron',monospace;
+                font-size:10px; font-weight:700; cursor:pointer; letter-spacing:4px;">
+                INITIALIZE
+            </button>
+            <div id="auth-error"
+                style="margin-top:16px; color:#ff3355; font-family:'Rajdhani',sans-serif;
+                font-size:0.85rem; min-height:1.2em;"></div>
         </div>
     </div>
 
-    <!-- Command Bar — bottom center -->
-    <div id="command-bar">
-        <span class="command-prefix">&#x2B21;</span>
-        <input type="text" id="command-input" placeholder="Talk to Leon..." autocomplete="off" spellcheck="false" aria-label="Command input">
-        <button id="command-send" aria-label="Send">&#x27A4;</button>
-        <div class="command-bar-loading" id="command-loading"></div>
-    </div>
-
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-        }
-    }
-    </script>
-    <script type="module" src="/static/js/brain.js?v=17"></script>
-    <script>
-        window.onerror = function(msg, url, line) {
-            var el = document.getElementById('brain-container');
-            if (el) el.innerHTML = '<div style="color:#ff4466;padding:40px;font-family:monospace;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5"><h2>WebGL Error</h2><p>' + msg + '</p></div>';
-        };
-    </script>
+    <script src="/static/js/brain.js?v=41"></script>
 </body>
 </html>
