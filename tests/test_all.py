@@ -735,7 +735,7 @@ class TestOpenClawSafe(unittest.TestCase):
         status = oci.get_system_status()
         self.assertIn("load_1m", status)
         self.assertIn("mem_total_mb", status)
-        self.assertIn("disk_total_gb", status)
+        self.assertIn("disk_free_gb", status)
 
 
 # ══════════════════════════════════════════════════════════
@@ -980,10 +980,10 @@ class TestVoiceSystem(unittest.TestCase):
         self.assertEqual(self.voice.voice_id, "onwK4e9ZLuTAKqWW03F9")
 
     def test_tts_stability(self):
-        self.assertEqual(self.voice.tts_stability, 0.6)
+        self.assertEqual(self.voice.tts_stability, 0.55)
 
     def test_tts_similarity(self):
-        self.assertEqual(self.voice.tts_similarity_boost, 0.85)
+        self.assertEqual(self.voice.tts_similarity_boost, 0.75)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1226,6 +1226,365 @@ class TestBroadcastSetSafety(unittest.TestCase):
         finally:
             server.ws_authenticated.clear()
             server.ws_authenticated.update(original)
+
+
+# ══════════════════════════════════════════════════════════
+# NEURAL BRIDGE — MESSAGE SERIALIZATION
+# ══════════════════════════════════════════════════════════
+
+class TestBridgeMessage(unittest.TestCase):
+    def test_roundtrip_serialization(self):
+        from core.neural_bridge import BridgeMessage
+        msg = BridgeMessage(type="test", payload={"key": "value"})
+        raw = msg.to_json()
+        restored = BridgeMessage.from_json(raw)
+        self.assertEqual(restored.type, "test")
+        self.assertEqual(restored.payload["key"], "value")
+        self.assertEqual(restored.id, msg.id)
+
+    def test_from_json_invalid(self):
+        from core.neural_bridge import BridgeMessage
+        with self.assertRaises(Exception):
+            BridgeMessage.from_json("not valid json")
+
+    def test_from_json_missing_type(self):
+        from core.neural_bridge import BridgeMessage
+        with self.assertRaises(KeyError):
+            BridgeMessage.from_json('{"payload": {}}')
+
+    def test_auto_generated_id(self):
+        from core.neural_bridge import BridgeMessage
+        msg1 = BridgeMessage(type="a")
+        msg2 = BridgeMessage(type="b")
+        self.assertNotEqual(msg1.id, msg2.id)
+
+    def test_auto_generated_timestamp(self):
+        from core.neural_bridge import BridgeMessage
+        msg = BridgeMessage(type="t")
+        self.assertGreater(msg.timestamp, 0)
+
+    def test_message_types_defined(self):
+        from core.neural_bridge import (
+            MSG_AUTH, MSG_HEARTBEAT, MSG_TASK_DISPATCH,
+            MSG_TASK_STATUS, MSG_TASK_RESULT, MSG_MEMORY_SYNC,
+            MSG_STATUS_REQUEST, MSG_STATUS_RESPONSE,
+        )
+        self.assertEqual(MSG_AUTH, "auth")
+        self.assertEqual(MSG_HEARTBEAT, "heartbeat")
+        self.assertEqual(MSG_TASK_DISPATCH, "task_dispatch")
+        self.assertEqual(MSG_TASK_STATUS, "task_status")
+        self.assertEqual(MSG_TASK_RESULT, "task_result")
+        self.assertEqual(MSG_MEMORY_SYNC, "memory_sync")
+        self.assertEqual(MSG_STATUS_REQUEST, "status_request")
+        self.assertEqual(MSG_STATUS_RESPONSE, "status_response")
+
+
+# ══════════════════════════════════════════════════════════
+# NEURAL BRIDGE — SERVER INIT
+# ══════════════════════════════════════════════════════════
+
+class TestBridgeServerInit(unittest.TestCase):
+    def test_default_config(self):
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        self.assertEqual(server.host, "0.0.0.0")
+        self.assertEqual(server.port, 9100)
+        self.assertFalse(server.connected)
+
+    def test_custom_config(self):
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({"host": "127.0.0.1", "port": 9200, "token": "secret"})
+        self.assertEqual(server.host, "127.0.0.1")
+        self.assertEqual(server.port, 9200)
+        self.assertEqual(server.token, "secret")
+
+    def test_handler_registration(self):
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+
+        async def handler(msg):
+            pass
+
+        server.on("test_type", handler)
+        self.assertIn("test_type", server._handlers)
+
+
+# ══════════════════════════════════════════════════════════
+# NEURAL BRIDGE — CLIENT INIT
+# ══════════════════════════════════════════════════════════
+
+class TestBridgeClientInit(unittest.TestCase):
+    def test_default_config(self):
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({})
+        self.assertEqual(client.server_url, "wss://localhost:9100/bridge")
+        self.assertFalse(client.connected)
+        self.assertFalse(client._running)
+
+    def test_custom_config(self):
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({"server_url": "wss://10.0.0.1:9200/bridge", "token": "abc"})
+        self.assertEqual(client.server_url, "wss://10.0.0.1:9200/bridge")
+        self.assertEqual(client.token, "abc")
+
+    def test_handler_registration(self):
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({})
+
+        async def handler(msg):
+            pass
+
+        client.on("task_result", handler)
+        self.assertIn("task_result", client._handlers)
+
+
+# ══════════════════════════════════════════════════════════
+# NIGHT MODE
+# ══════════════════════════════════════════════════════════
+
+class TestNightMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        # Patch the class-level paths before creating instance
+        import core.night_mode as nm_module
+        self._orig_backlog = nm_module.NightMode.BACKLOG_PATH
+        self._orig_log = nm_module.NightMode.LOG_PATH
+        nm_module.NightMode.BACKLOG_PATH = Path(os.path.join(self.tmp_dir, "night_tasks.json"))
+        nm_module.NightMode.LOG_PATH = Path(os.path.join(self.tmp_dir, "night_log.json"))
+
+        # Create a minimal mock Leon
+        class MockLeon:
+            class agent_manager:
+                active_agents = {}
+            class task_queue:
+                max_concurrent = 5
+        self.night = nm_module.NightMode(MockLeon())
+
+    def tearDown(self):
+        import shutil
+        import core.night_mode as nm_module
+        nm_module.NightMode.BACKLOG_PATH = self._orig_backlog
+        nm_module.NightMode.LOG_PATH = self._orig_log
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_add_task(self):
+        task = self.night.add_task("Fix login bug", "my-project")
+        self.assertEqual(task["status"], "pending")
+        self.assertEqual(task["project"], "my-project")
+        self.assertEqual(len(self.night.get_pending()), 1)
+
+    def test_remove_task(self):
+        task = self.night.add_task("Remove me", "proj")
+        self.assertTrue(self.night.remove_task(task["id"]))
+        self.assertEqual(len(self.night.get_pending()), 0)
+
+    def test_remove_nonexistent(self):
+        self.assertFalse(self.night.remove_task("nonexistent"))
+
+    def test_clear_pending(self):
+        self.night.add_task("Task 1", "proj")
+        self.night.add_task("Task 2", "proj")
+        cleared = self.night.clear_pending()
+        self.assertEqual(cleared, 2)
+        self.assertEqual(len(self.night.get_pending()), 0)
+
+    def test_priority_ordering(self):
+        self.night.add_task("Low priority", "proj", priority=1)
+        self.night.add_task("High priority", "proj", priority=5)
+        pending = self.night.get_pending()
+        self.assertEqual(len(pending), 2)
+        # Higher priority should be first
+        self.assertEqual(pending[0]["description"], "High priority")
+
+    def test_initial_state(self):
+        self.assertFalse(self.night.active)
+        self.assertEqual(len(self.night.get_pending()), 0)
+        self.assertEqual(len(self.night.get_running()), 0)
+
+    def test_status_text_empty(self):
+        text = self.night.get_status_text()
+        self.assertIn("OFF", text)
+        self.assertIn("empty", text)
+
+    def test_status_text_with_tasks(self):
+        self.night.add_task("Task 1", "proj")
+        text = self.night.get_status_text()
+        self.assertIn("1 pending", text)
+
+    def test_backlog_text_empty(self):
+        text = self.night.get_backlog_text()
+        self.assertIn("empty", text)
+
+    def test_backlog_text_with_tasks(self):
+        self.night.add_task("Fix the bug", "my-project")
+        text = self.night.get_backlog_text()
+        self.assertIn("Fix the bug", text)
+        self.assertIn("my-project", text)
+
+    def test_morning_briefing_empty(self):
+        text = self.night.generate_morning_briefing()
+        self.assertIn("Nothing ran overnight", text)
+
+    def test_mark_agent_completed(self):
+        task = self.night.add_task("Pending task", "proj")
+        # Simulate dispatch
+        self.night._backlog[0]["status"] = "running"
+        self.night._backlog[0]["agent_id"] = "agent_abc"
+        self.night._save_backlog()
+
+        self.night.mark_agent_completed("agent_abc", "All done")
+        self.assertEqual(self.night._backlog[0]["status"], "completed")
+        self.assertEqual(self.night._backlog[0]["result"], "All done")
+
+    def test_mark_agent_failed(self):
+        task = self.night.add_task("Will fail", "proj")
+        self.night._backlog[0]["status"] = "running"
+        self.night._backlog[0]["agent_id"] = "agent_xyz"
+        self.night._save_backlog()
+
+        self.night.mark_agent_failed("agent_xyz", "Timeout error")
+        self.assertEqual(self.night._backlog[0]["status"], "failed")
+        self.assertIn("Timeout", self.night._backlog[0]["result"])
+
+    def test_persistence(self):
+        self.night.add_task("Persist me", "proj")
+        # Reload from disk
+        import core.night_mode as nm_module
+
+        class MockLeon:
+            class agent_manager:
+                active_agents = {}
+            class task_queue:
+                max_concurrent = 5
+        night2 = nm_module.NightMode(MockLeon())
+        self.assertEqual(len(night2.get_pending()), 1)
+        self.assertEqual(night2.get_pending()[0]["description"], "Persist me")
+
+
+# ══════════════════════════════════════════════════════════
+# API CLIENT — PROVIDER DETECTION
+# ══════════════════════════════════════════════════════════
+
+try:
+    import httpx as _httpx_check
+    _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
+
+
+@unittest.skipUnless(_HAS_HTTPX, "httpx not installed")
+class TestAPIClient(unittest.TestCase):
+    def test_init_no_provider(self):
+        """Without any API keys or providers, auth_method should be 'none' or 'claude_cli'."""
+        orig_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+        orig_groq = os.environ.pop("GROQ_API_KEY", None)
+        try:
+            from core.api_client import AnthropicAPI
+            api = AnthropicAPI({"model": "test", "max_tokens": 100})
+            self.assertIn(api._auth_method, ("none", "claude_cli"))
+        finally:
+            if orig_anthropic:
+                os.environ["ANTHROPIC_API_KEY"] = orig_anthropic
+            if orig_groq:
+                os.environ["GROQ_API_KEY"] = orig_groq
+
+    def test_provider_info(self):
+        """get_provider_info should return a dict with expected keys."""
+        orig_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+        orig_groq = os.environ.pop("GROQ_API_KEY", None)
+        try:
+            from core.api_client import AnthropicAPI
+            api = AnthropicAPI({"model": "test", "max_tokens": 100})
+            info = api.get_provider_info()
+            self.assertIn("name", info)
+            self.assertIn("model", info)
+            self.assertIn("cost", info)
+        finally:
+            if orig_anthropic:
+                os.environ["ANTHROPIC_API_KEY"] = orig_anthropic
+            if orig_groq:
+                os.environ["GROQ_API_KEY"] = orig_groq
+
+    def test_set_api_key_groq(self):
+        """set_api_key for groq should switch provider."""
+        orig_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+        orig_groq = os.environ.pop("GROQ_API_KEY", None)
+        try:
+            from core.api_client import AnthropicAPI
+            api = AnthropicAPI({"model": "test", "max_tokens": 100})
+            api.set_api_key("gsk_test_key", provider="groq")
+            self.assertEqual(api._auth_method, "groq")
+            self.assertEqual(api._groq_key, "gsk_test_key")
+        finally:
+            if orig_anthropic:
+                os.environ["ANTHROPIC_API_KEY"] = orig_anthropic
+            if orig_groq:
+                os.environ["GROQ_API_KEY"] = orig_groq
+            os.environ.pop("GROQ_API_KEY", None)
+
+    def test_no_provider_message(self):
+        from core.api_client import _no_provider_msg
+        msg = _no_provider_msg()
+        self.assertIn("Groq", msg)
+        self.assertIn("Ollama", msg)
+        self.assertIn("Anthropic", msg)
+
+    def test_friendly_name(self):
+        from core.openclaw_interface import _friendly_name
+        self.assertEqual(_friendly_name("https://www.google.com/search"), "Google")
+        self.assertEqual(_friendly_name("https://github.com/repo"), "Github")
+
+
+# ══════════════════════════════════════════════════════════
+# OPENCLAW — CRON INTERFACE
+# ══════════════════════════════════════════════════════════
+
+class TestOpenClawCron(unittest.TestCase):
+    def test_format_jobs_empty(self):
+        from core.openclaw_interface import OpenClawCron
+        cron = OpenClawCron()
+        self.assertEqual(cron.format_jobs([]), "No cron jobs scheduled.")
+
+    def test_format_jobs_cron_kind(self):
+        from core.openclaw_interface import OpenClawCron
+        cron = OpenClawCron()
+        jobs = [{
+            "id": "abc12345",
+            "name": "Morning briefing",
+            "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+            "enabled": True,
+            "payload": {"message": "daily briefing"},
+        }]
+        text = cron.format_jobs(jobs)
+        self.assertIn("Morning briefing", text)
+        self.assertIn("0 9 * * *", text)
+        self.assertIn("active", text)
+
+    def test_format_jobs_every_kind(self):
+        from core.openclaw_interface import OpenClawCron
+        cron = OpenClawCron()
+        jobs = [{
+            "id": "def45678",
+            "name": "Health check",
+            "schedule": {"kind": "every", "everyMs": 3600000},
+            "enabled": True,
+            "payload": {"message": "check health"},
+        }]
+        text = cron.format_jobs(jobs)
+        self.assertIn("every 1h", text)
+
+    def test_format_jobs_disabled(self):
+        from core.openclaw_interface import OpenClawCron
+        cron = OpenClawCron()
+        jobs = [{
+            "id": "ghi78901",
+            "name": "Disabled job",
+            "schedule": {"kind": "cron", "expr": "0 0 * * *"},
+            "enabled": False,
+            "payload": {"message": "noop"},
+        }]
+        text = cron.format_jobs(jobs)
+        self.assertIn("disabled", text)
 
 
 # ══════════════════════════════════════════════════════════
