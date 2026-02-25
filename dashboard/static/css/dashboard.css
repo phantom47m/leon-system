@@ -527,7 +527,7 @@ html, body {
 /* ── Settings Panel ─────────────────────────────── */
 #panel-settings {
     position: fixed; z-index: 200;
-    background: var(--bg-panel);
+    background: var(--panel-bg);
     border: 1px solid rgba(0,212,255,0.18);
     border-radius: 6px;
     box-shadow: 0 0 30px rgba(0,0,0,0.6), 0 0 15px rgba(0,212,255,0.06);

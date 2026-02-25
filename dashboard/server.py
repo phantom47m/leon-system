@@ -99,6 +99,10 @@ async def index(request):
     html = html.replace('⚙ LEON SETTINGS', f'⚙ {ai_name} SETTINGS')
     # Loading screen logo
     html = html.replace('◆ LEON</div>', f'◆ {ai_name}</div>')
+    # Input placeholder and button tooltip
+    html = html.replace('placeholder="Talk to Leon..."', f'placeholder="Talk to {ai_name}..."')
+    html = html.replace('title="Activate Leon voice"', f'title="Activate {ai_name} voice"')
+    html = html.replace('title="Leon Settings"', f'title="{ai_name} Settings"')
     return web.Response(
         text=html,
         content_type="text/html",
@@ -773,11 +777,15 @@ async def websocket_handler(request):
                     if vs:
                         vs.mute()
                         await ws.send_json({"type": "voice_mute_result", "success": True, "muted": True})
+                    else:
+                        await ws.send_json({"type": "voice_mute_result", "success": False, "muted": True, "error": "Voice system not active"})
                 elif data.get("command") == "voice_unmute":
                     vs = leon.hotkey_listener.voice_system if (leon and leon.hotkey_listener) else None
                     if vs:
                         vs.unmute()
                         await ws.send_json({"type": "voice_mute_result", "success": True, "muted": False})
+                    else:
+                        await ws.send_json({"type": "voice_mute_result", "success": False, "muted": True, "error": "Voice system not active"})
                 elif data.get("command") == "set_response_mode":
                     mode = data.get("mode", "both")
                     if mode in ("voice", "text", "both"):
@@ -796,7 +804,8 @@ async def websocket_handler(request):
                         "type": "settings",
                         "response_mode": request.app.get("response_mode", "both"),
                         "voice_volume": request.app.get("voice_volume", 100),
-                        "muted": vs.is_muted if vs else False,
+                        "muted": vs.is_muted if vs else True,
+                        "voice": vs.listening_state if vs else {},
                     })
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error(f"WebSocket error: {ws.exception()}")

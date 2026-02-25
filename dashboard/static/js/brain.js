@@ -479,7 +479,7 @@ function connectWS() {
                     if (demoInterval) { clearInterval(demoInterval); demoInterval = null; }
                     // Sync initial mute state — UI starts muted, tell server
                     ws.send(JSON.stringify({ command: micMuted ? 'voice_mute' : 'voice_unmute' }));
-                    feed(now(), 'Connected to Leon', 'feed-system');
+                    feed(now(), `Connected to ${brainState.aiName || 'AI'}`, 'feed-system');
                 } else {
                     wsAuthenticated = false;
                     localStorage.removeItem('leon_session_token');
@@ -490,13 +490,13 @@ function connectWS() {
             if (d.type === 'input_response') {
                 if (loadingTimer) { clearTimeout(loadingTimer); loadingTimer = null; }
                 setLoading(false);
-                feed(d.timestamp || now(), `Leon: ${d.message}`, 'feed-response');
+                feed(d.timestamp || now(), `${brainState.aiName || 'AI'}: ${d.message}`, 'feed-response');
                 autoOpenFeed();
                 // Track API usage (use server-provided token count if available, else estimate)
                 apiTracker.addExchange(d.input_tokens || 200, d.output_tokens || Math.ceil((d.message||'').length / 4));
                 // Browser notification when tab is in background
                 if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-                    new Notification('Leon', { body: (d.message || '').substring(0, 120) });
+                    new Notification(brainState.aiName || 'AI', { body: (d.message || '').substring(0, 120) });
                 }
                 return;
             }
@@ -504,7 +504,7 @@ function connectWS() {
                 feed(now(), `Agent #${(d.agent_id||'').slice(-8)} done: ${d.summary||''}`, 'feed-agent-ok');
                 // Notify on agent completion too
                 if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-                    new Notification('Leon — Agent Done', { body: (d.summary || 'Task completed').substring(0, 100) });
+                    new Notification(`${brainState.aiName || 'AI'} — Agent Done`, { body: (d.summary || 'Task completed').substring(0, 100) });
                 }
                 return;
             }
@@ -700,7 +700,11 @@ function updateUI() {
         if (arc) arc.style.opacity = agents.length > 0 ? '0.8' : '0.38';
     }
 
-    // Voice state → MIC arc — client micMuted is authoritative, never overridden by server push
+    // Voice state → MIC arc — sync from server state (is_muted is authoritative)
+    if (brainState.voice && typeof brainState.voice.is_muted === 'boolean') {
+        const serverMuted = brainState.voice.is_muted;
+        if (serverMuted !== micMuted) micMuted = serverMuted;  // keep client in sync
+    }
     updateMicArc(micMuted ? 'muted' : 'active');
 
     // Update banner — show when a new version is available

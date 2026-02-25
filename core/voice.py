@@ -343,6 +343,7 @@ class VoiceSystem:
             "state": self._state,
             "is_listening": self.is_listening,
             "is_awake": self.is_awake,
+            "is_muted": self.is_muted,
             "deepgram_healthy": self._deepgram_healthy,
             "elevenlabs_degraded": self._elevenlabs_degraded,
         }
