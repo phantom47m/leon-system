@@ -211,13 +211,15 @@ Open **http://localhost:3000** after starting Leon.
 
 ## Updating
 
+Run this whenever a new version is available:
+
 ```bash
-cd leon-system
-git pull
-source venv/bin/activate
-pip install -r requirements.txt
-bash start.sh
+cd leon-system && git pull && bash stop.sh && bash start.sh
 ```
+
+That's it — one command. It pulls the latest code and restarts Leon.
+
+> **Tip:** Leon's dashboard shows an update banner automatically when a new version is released, so you'll know when to run it. You can also ask Leon directly: *"Are there any updates?"*
 
 ---
 
