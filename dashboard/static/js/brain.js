@@ -1,7 +1,28 @@
 /**
- * LEON — JARVIS Neural Interface  v19
+ * LEON — JARVIS Neural Interface  v20
  * Radial hub navigation. Canvas stars. No WebGL.
+ * Performance: all rAF loops pause when tab is hidden, capped at 30fps.
  */
+
+// ═══════════════════════════════════════════════════════
+// PERFORMANCE: pause all animations when tab not visible
+// ═══════════════════════════════════════════════════════
+let _tabVisible = !document.hidden;
+document.addEventListener('visibilitychange', () => { _tabVisible = !document.hidden; });
+
+// Throttled rAF — runs callback at max targetFps, skips entirely when tab hidden
+function rafThrottle(fn, targetFps) {
+    const interval = 1000 / targetFps;
+    let last = 0;
+    function loop(ts) {
+        if (_tabVisible && ts - last >= interval) {
+            last = ts;
+            fn(ts);
+        }
+        requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+}
 
 // ═══════════════════════════════════════════════════════
 // STARS BACKGROUND
@@ -19,7 +40,8 @@
     }
     function buildStars() {
         stars = [];
-        const n = Math.floor((canvas.width * canvas.height) / 3800);
+        // Fewer stars on small/slow screens
+        const n = Math.floor((canvas.width * canvas.height) / 5000);
         for (let i = 0; i < n; i++) {
             stars.push({
                 x: Math.random() * canvas.width,
@@ -46,11 +68,10 @@
             ctx.fillStyle = `rgba(170,225,255,${a})`;
             ctx.fill();
         }
-        requestAnimationFrame(draw);
     }
     window.addEventListener('resize', resize);
     resize();
-    requestAnimationFrame(draw);
+    rafThrottle(draw, 30);  // 30fps max, pauses when tab hidden
 })();
 
 
@@ -80,28 +101,24 @@
         }
     }
 
-    // Rotating outer accent ring
+    // Rotating outer accent ring — 20fps, pauses when hidden
     const spin = document.getElementById('hub-spin');
     let angle = 0;
-    function rotateSpin() {
-        angle = (angle + 0.07) % 360;
+    rafThrottle(function() {
+        angle = (angle + 0.18) % 360;
         if (spin) spin.setAttribute('transform', `rotate(${angle.toFixed(1)} 250 250)`);
-        requestAnimationFrame(rotateSpin);
-    }
-    requestAnimationFrame(rotateSpin);
+    }, 20);
 
-    // Pulsing halo
+    // Pulsing halo — 20fps, pauses when hidden
     const halo = document.getElementById('hub-halo');
     let haloT = 0;
-    function animHalo() {
-        haloT += 0.022;
+    rafThrottle(function(ts) {
+        haloT = ts / 1000;
         if (halo) {
             halo.setAttribute('r', (88 + 10 * Math.sin(haloT)).toFixed(1));
             halo.setAttribute('opacity', (0.06 + 0.06 * Math.sin(haloT)).toFixed(3));
         }
-        requestAnimationFrame(animHalo);
-    }
-    requestAnimationFrame(animHalo);
+    }, 20);
 })();
 
 

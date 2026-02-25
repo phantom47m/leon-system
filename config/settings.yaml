@@ -74,6 +74,9 @@ update_check:
   repo: "GITHUB_USERNAME/REPO_NAME"   # owner sets this before publishing
   check_interval_hours: 12
 
+vision:
+  enabled: false   # set true only if you want camera/screen awareness — CPU intensive
+
 system:
   auto_start: true
   hotkey: "Super+L"

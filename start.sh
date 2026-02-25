@@ -20,7 +20,8 @@ fi
 
 MODE="${1:---left-brain}"
 echo "Starting Leon $MODE..."
-python3 main.py $MODE >> "$LOG" 2>&1 &
+# nice -n -5 gives Leon higher CPU priority (all resources go here)
+nice -n -5 python3 main.py $MODE >> "$LOG" 2>&1 &
 sleep 4
 
 LEON_PID=$(pgrep -f "python3 main.py" | head -1)

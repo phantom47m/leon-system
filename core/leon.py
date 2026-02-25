@@ -158,12 +158,16 @@ class Leon:
             self.printer = None
             self.stl_searcher = None
 
-        # Vision system
-        try:
-            from vision.vision import VisionSystem
-            self.vision = VisionSystem(api_client=self.api, analysis_interval=3.0)
-        except Exception as e:
-            logger.warning(f"Vision module not available: {e}")
+        # Vision system — disabled by default (CPU intensive, opt-in via settings.yaml)
+        _vision_enabled = self.config.get("vision", {}).get("enabled", False)
+        if _vision_enabled:
+            try:
+                from vision.vision import VisionSystem
+                self.vision = VisionSystem(api_client=self.api, analysis_interval=3.0)
+            except Exception as e:
+                logger.warning(f"Vision module not available: {e}")
+                self.vision = None
+        else:
             self.vision = None
 
         # Business modules
