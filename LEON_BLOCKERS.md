@@ -5,33 +5,32 @@
 ## Motorev App Blockers
 
 ### High
-1. **No GPS / ride tracking** — The Rides tab is cosmetic. "Start Ride" button exists but does nothing.
-2. **No real weather API** — Weather card shows hardcoded "22°C, Perfect for riding".
-3. **No map integration** — "View Map" buttons are no-ops. No `react-native-maps` installed.
+1. **No map integration** — "View Map" buttons are no-ops. No `react-native-maps` installed.
 
 ### Medium
-4. **Stock photos reused** — Same 2 Pexels images used across all screens (2393816, 1413412).
-5. **No backend API** — Data persistence is local-only (AsyncStorage). No multi-device sync.
+2. **No backend API** — Data persistence is local-only (AsyncStorage). No multi-device sync.
+3. **No dark mode toggle** — App is always dark; no light mode option.
 
 ### Low
-6. **No crash detection** — SOS sends alerts manually, no accelerometer-based detection.
-7. **No Bluetooth intercom** — Voice channel buttons show "coming soon" alerts.
-8. **No push notifications** — No notification delivery system.
+4. **No crash detection** — SOS sends alerts manually, no accelerometer-based detection.
+5. **No Bluetooth intercom** — Voice channel buttons show "coming soon" alerts.
+6. **No push notifications** — No notification delivery system.
 
-### Resolved This Session (Phase 6)
-- ~~Zero button handlers~~ → Every button across all 6 tabs responds with appropriate feedback
-- ~~No user authentication~~ → Onboarding flow with name entry, store-driven routing
-- ~~No data persistence~~ → AsyncStorage store persists profile, settings, safety checks
-- ~~Hardcoded user name~~ → Profile reads from persistent store, set during onboarding
-- ~~Large monolith files~~ → connect.tsx decomposed from 363 → 193 LOC (4 extracted components)
+### Resolved This Session (Phase 10)
+- ~~Hardcoded modifications data~~ → Modifications fully wired to store with add/remove/persist
+- ~~shell_exec command injection~~ → Uses shlex.split + shell=False with metachar blocklist
+- ~~API token logged in plaintext~~ → Masked to last 6 characters
+- ~~Phone number in version control~~ → Moved to env var
+- ~~Bridge binds to 0.0.0.0~~ → Defaults to 127.0.0.1
+- ~~Unbounded memory saves~~ → Debounced (5s interval) with flush_if_dirty()
+- ~~Uncapped completed tasks~~ → Capped at 200 during runtime + 500 on flush
 
-### Resolved Earlier (Phase 2–5)
+### Resolved Earlier (Phase 2–9)
 - ~~33% unused dependencies~~ → Removed 10 packages
 - ~~No design tokens~~ → Full dark theme token system
-- ~~Dashboard has no clear primary action~~ → "Start Ride" is now the hero CTA
-- ~~Garage Overview always visible~~ → Only shows on bikes tab
-- ~~Profile has 9 sections~~ → Consolidated to 5
-- ~~Connect rider cards too dense~~ → Simplified to essentials
-- ~~StatusBadge fully saturated~~ → Semitransparent backgrounds
-- ~~EmergencySOS misleading text~~ → Corrected subtitle
-- ~~Safety tab missing from navigation~~ → Added Shield icon tab
+- ~~Zero button handlers~~ → Every button responds with feedback
+- ~~No data persistence~~ → AsyncStorage store with profile/settings/safety
+- ~~Hardcoded user name~~ → Onboarding flow with name entry
+- ~~Stock photos reused~~ → Diversified images
+- ~~No GPS/ride tracking~~ → Full GPS tracking with Haversine calc
+- ~~No real weather API~~ → Open-Meteo integration

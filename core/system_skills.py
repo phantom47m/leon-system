@@ -19,6 +19,14 @@ from pathlib import Path
 
 logger = logging.getLogger("leon.skills")
 
+# Ensure GUI commands have access to the display
+def _gui_env() -> dict:
+    """Return env dict with DISPLAY/WAYLAND_DISPLAY set for GUI subprocesses."""
+    env = os.environ.copy()
+    if not env.get("DISPLAY"):
+        env["DISPLAY"] = ":1"
+    return env
+
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a command, returning a failed-like result if the binary is missing."""
@@ -177,7 +185,30 @@ EXTRA UTILITIES:
 - volume_get() — Get current volume level
 - open_terminal(path) — Open terminal in a directory
 - disk_free() — Quick free space check on main drive
-- who_am_i() — Current user info"""
+- who_am_i() — Current user info
+
+TERMINAL & CODE:
+- shell_exec(command) — Run a shell command and return output
+- python_exec(code) — Run Python code and return result (15s timeout)
+- ocr_screen() — Screenshot the screen and extract all visible text via OCR
+
+SEARCH:
+- fast_search(query) — Quick search via DuckDuckGo Instant Answers (no browser)
+
+NOTES:
+- note_add(content, title) — Save a persistent note
+- note_list(n) — List the most recent N notes
+- note_get(note_id) — Get full note content by ID
+- note_search(query) — Search notes by content or title
+- note_delete(note_id) — Delete a note by ID
+
+HOME ASSISTANT:
+- ha_get(entity_id) — Get state of a Home Assistant entity (e.g. light.bedroom)
+- ha_set(entity_id, service, data) — Call a HA service (e.g. service=turn_on)
+- ha_list(domain) — List HA entities, optionally filtered by domain
+
+TELEGRAM:
+- send_telegram(message, to) — Send a Telegram message via OpenClaw"""
 
     # ------------------------------------------------------------------
     # Execute a skill by name (called by Leon's AI router)
@@ -186,6 +217,7 @@ EXTRA UTILITIES:
     # Methods that should NOT be callable as skills
     _internal_methods = frozenset({
         "execute", "get_skill_list", "_start_clipboard_monitor",
+        "_load_notes", "_save_notes", "_xdotool_or_missing",
     })
 
     async def execute(self, skill_name: str, args: dict) -> str:
@@ -301,13 +333,37 @@ EXTRA UTILITIES:
         _run(["xdotool", "windowactivate", window_ids[0]])
         return f"Switched to {name}."
 
-    def open_url(self, url: str) -> str:
-        """Open a URL in the default browser."""
+    def open_url(self, url: str, monitor: int = None, **kwargs) -> str:
+        """Open a URL in the default browser, optionally on a specific monitor."""
         subprocess.Popen(
             ["xdg-open", url],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if monitor and monitor > 1:
+            # Give the browser window a moment to open, then move it
+            time.sleep(1.5)
+            # Get monitor geometry via xrandr and move the active window there
+            xr = _run(["xrandr", "--listmonitors"])
+            monitors = []
+            for line in xr.stdout.splitlines():
+                parts = line.strip().split()
+                if parts and parts[0].endswith(":"):
+                    # parse geometry like 1920/527x1080/296+1920+0
+                    for p in parts:
+                        if "x" in p and "+" in p:
+                            try:
+                                geo = p.split("/")[0] if "/" in p.split("+")[0] else p.split("+")[0]
+                                x_off = int(p.split("+")[1])
+                                y_off = int(p.split("+")[2])
+                                monitors.append((x_off, y_off))
+                            except Exception:
+                                pass
+            idx = monitor - 1
+            if idx < len(monitors):
+                x, y = monitors[idx]
+                _run(["xdotool", "getactivewindow", "windowmove", str(x + 100), str(y + 100)])
+                return f"Opened {url} on monitor {monitor}."
         return f"Opened {url} in browser."
 
     def open_file(self, path: str) -> str:
@@ -1190,6 +1246,8 @@ EXTRA UTILITIES:
             return f"Directory not found: {path}"
         # Try common terminal emulators
         for term_cmd in [
+            ["cosmic-term"],
+            ["x-terminal-emulator"],
             ["gnome-terminal", f"--working-directory={p}"],
             ["konsole", f"--workdir={p}"],
             ["xfce4-terminal", f"--working-directory={p}"],
@@ -1220,3 +1278,286 @@ EXTRA UTILITIES:
         if result.returncode == 0:
             return result.stdout.strip()
         return f"User: {os.environ.get('USER', 'unknown')}"
+
+    # ==================================================================
+    # TERMINAL EXECUTION
+    # ==================================================================
+
+    # Patterns that are never allowed regardless of context
+    _BLOCKED_PATTERNS = [
+        "rm -rf /", "rm -rf ~", "mkfs", "dd if=", "> /dev/sd",
+        ":(){ :|:& };:", "chmod -R 777 /", "chown -R",
+        "sudo rm", "shred ", "> /etc/",
+    ]
+
+    # Shell metacharacters that indicate injection attempts
+    _UNSAFE_CHARS = [";", "|", "$(", "`", "&&", "||", ">>", "<<", "<("]
+
+    def shell_exec(self, command: str) -> str:
+        """Run a shell command and return its output (stdout + stderr).
+
+        Uses shlex.split() + shell=False to prevent command injection.
+        """
+        import shlex
+
+        cmd_lower = command.lower()
+        for pattern in self._BLOCKED_PATTERNS:
+            if pattern in cmd_lower:
+                return f"Blocked: unsafe pattern '{pattern}' in command."
+        for char in self._UNSAFE_CHARS:
+            if char in command:
+                return f"Blocked: shell metacharacter '{char}' not allowed. Use separate commands."
+        try:
+            args = shlex.split(command)
+        except ValueError as e:
+            return f"Invalid command syntax: {e}"
+        try:
+            result = subprocess.run(
+                args, shell=False, capture_output=True, text=True,
+                timeout=30, env=_gui_env(),
+            )
+            out = (result.stdout + result.stderr).strip()
+            return out[:2000] if out else "(no output)"
+        except subprocess.TimeoutExpired:
+            return "Command timed out after 30 seconds."
+        except FileNotFoundError:
+            return f"Command not found: {args[0]}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    # ==================================================================
+    # SCREEN OCR
+    # ==================================================================
+
+    def ocr_screen(self) -> str:
+        """Take a screenshot of the screen and extract text via OCR."""
+        path = "/tmp/leon_ocr_screen.png"
+        # Try scrot, then gnome-screenshot
+        r = _run(["scrot", path], env=_gui_env())
+        if r.returncode != 0:
+            r = _run(["gnome-screenshot", "-f", path], env=_gui_env())
+        if r.returncode != 0:
+            return "Screenshot failed — install scrot: sudo apt install scrot"
+        r = _run(["tesseract", path, "stdout", "-l", "eng"])
+        if r.returncode == 127:
+            return "tesseract not installed. Run: sudo apt install tesseract-ocr"
+        text = r.stdout.strip()
+        return text[:3000] if text else "No text detected on screen."
+
+    # ==================================================================
+    # FAST SEARCH (no browser — DuckDuckGo Instant Answers)
+    # ==================================================================
+
+    def fast_search(self, query: str) -> str:
+        """Search via DuckDuckGo Instant Answers API — no browser needed."""
+        import urllib.parse
+        url = (
+            "https://api.duckduckgo.com/?q="
+            + urllib.parse.quote_plus(query)
+            + "&format=json&no_html=1&skip_disambig=1"
+        )
+        try:
+            r = _run(["curl", "-s", "--max-time", "6", "-A", "Leon/1.0", url], timeout=10)
+            if r.returncode != 0:
+                return "Search request failed."
+            data = json.loads(r.stdout)
+            parts = []
+            answer = data.get("Answer", "").strip()
+            abstract = data.get("AbstractText", "").strip()
+            abstract_src = data.get("AbstractSource", "").strip()
+            if answer:
+                parts.append(f"**Answer:** {answer}")
+            if abstract:
+                src = f" (via {abstract_src})" if abstract_src else ""
+                parts.append(f"**Summary{src}:** {abstract[:500]}")
+            related = [t for t in data.get("RelatedTopics", []) if isinstance(t, dict) and t.get("Text")][:3]
+            for rt in related:
+                parts.append(f"• {rt['Text'][:150]}")
+            if parts:
+                return "\n".join(parts)
+            return f"No instant answer for '{query}'. Try: /search {query} to use the browser."
+        except (json.JSONDecodeError, subprocess.TimeoutExpired, Exception) as e:
+            return f"Search failed: {e}"
+
+    # ==================================================================
+    # PERSISTENT NOTES
+    # ==================================================================
+
+    _NOTES_FILE = Path.home() / ".leon" / "notes.json"
+
+    def _load_notes(self) -> list:
+        self._NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if self._NOTES_FILE.exists():
+            try:
+                return json.loads(self._NOTES_FILE.read_text())
+            except Exception:
+                pass
+        return []
+
+    def _save_notes(self, notes: list):
+        self._NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._NOTES_FILE.write_text(json.dumps(notes, indent=2))
+
+    def note_add(self, content: str, title: str = "") -> str:
+        """Save a note to Leon's persistent notes."""
+        notes = self._load_notes()
+        note_id = (notes[-1]["id"] + 1) if notes else 1
+        notes.append({
+            "id": note_id,
+            "title": title or content[:50].strip(),
+            "content": content,
+            "created": datetime.now().isoformat(),
+        })
+        self._save_notes(notes)
+        return f"Note #{note_id} saved."
+
+    def note_list(self, n: int = 10) -> str:
+        """List saved notes (most recent first)."""
+        notes = self._load_notes()
+        if not notes:
+            return "No notes saved."
+        lines = ["**Notes:**"]
+        for note in reversed(notes[-int(n):]):
+            lines.append(f"  #{note['id']} [{note['created'][:10]}] {note['title']}")
+        return "\n".join(lines)
+
+    def note_get(self, note_id: int) -> str:
+        """Get the full content of a note by ID."""
+        for note in self._load_notes():
+            if note["id"] == int(note_id):
+                return f"**#{note['id']} — {note['title']}**\n{note['content']}"
+        return f"Note #{note_id} not found."
+
+    def note_search(self, query: str) -> str:
+        """Search notes by content or title."""
+        q = query.lower()
+        matches = [n for n in self._load_notes()
+                   if q in n["content"].lower() or q in n["title"].lower()]
+        if not matches:
+            return f"No notes matching '{query}'."
+        lines = [f"**Notes matching '{query}':**"]
+        for n in matches[-10:]:
+            lines.append(f"  #{n['id']} [{n['created'][:10]}] {n['title']}\n    {n['content'][:150]}")
+        return "\n\n".join(lines)
+
+    def note_delete(self, note_id: int) -> str:
+        """Delete a note by ID."""
+        notes = self._load_notes()
+        new_notes = [n for n in notes if n["id"] != int(note_id)]
+        if len(new_notes) == len(notes):
+            return f"Note #{note_id} not found."
+        self._save_notes(new_notes)
+        return f"Note #{note_id} deleted."
+
+    # ==================================================================
+    # PYTHON CODE EXECUTION
+    # ==================================================================
+
+    def python_exec(self, code: str) -> str:
+        """Run Python code in a subprocess sandbox (15s timeout)."""
+        try:
+            result = subprocess.run(
+                ["python3", "-c", code],
+                capture_output=True, text=True, timeout=15,
+            )
+            out = (result.stdout + result.stderr).strip()
+            return out[:2000] if out else "(no output)"
+        except subprocess.TimeoutExpired:
+            return "Code execution timed out after 15 seconds."
+        except Exception as e:
+            return f"Execution error: {e}"
+
+    # ==================================================================
+    # HOME ASSISTANT
+    # ==================================================================
+
+    def ha_get(self, entity_id: str) -> str:
+        """Get the current state of a Home Assistant entity."""
+        ha_url = os.environ.get("HA_URL", "").rstrip("/")
+        ha_token = os.environ.get("HA_TOKEN", "")
+        if not ha_url or not ha_token:
+            return "Home Assistant not configured. Add HA_URL and HA_TOKEN to .env"
+        try:
+            r = _run(["curl", "-s", "--max-time", "5",
+                      "-H", f"Authorization: Bearer {ha_token}",
+                      f"{ha_url}/api/states/{entity_id}"], timeout=10)
+            if r.returncode != 0:
+                return f"HA request failed."
+            data = json.loads(r.stdout)
+            name = data.get("attributes", {}).get("friendly_name", entity_id)
+            state = data.get("state", "unknown")
+            attrs = data.get("attributes", {})
+            extra = ""
+            if "temperature" in attrs:
+                extra = f", temp: {attrs['temperature']}"
+            elif "brightness" in attrs:
+                extra = f", brightness: {attrs['brightness']}"
+            return f"{name}: {state}{extra}"
+        except Exception as e:
+            return f"HA error: {e}"
+
+    def ha_set(self, entity_id: str, service: str, data: dict = None) -> str:
+        """Call a Home Assistant service (e.g. entity='light.bedroom', service='turn_on')."""
+        ha_url = os.environ.get("HA_URL", "").rstrip("/")
+        ha_token = os.environ.get("HA_TOKEN", "")
+        if not ha_url or not ha_token:
+            return "Home Assistant not configured. Add HA_URL and HA_TOKEN to .env"
+        domain = entity_id.split(".")[0] if "." in entity_id else service.split(".")[0]
+        payload = json.dumps({"entity_id": entity_id, **(data or {})})
+        try:
+            r = _run(["curl", "-s", "--max-time", "5", "-X", "POST",
+                      "-H", f"Authorization: Bearer {ha_token}",
+                      "-H", "Content-Type: application/json",
+                      "-d", payload,
+                      f"{ha_url}/api/services/{domain}/{service}"], timeout=10)
+            if r.returncode == 0:
+                return f"Called {domain}.{service} on {entity_id}."
+            return f"HA error: {r.stderr.strip()[:100]}"
+        except Exception as e:
+            return f"HA error: {e}"
+
+    def ha_list(self, domain: str = "") -> str:
+        """List Home Assistant entities (optionally filter by domain like 'light', 'switch')."""
+        ha_url = os.environ.get("HA_URL", "").rstrip("/")
+        ha_token = os.environ.get("HA_TOKEN", "")
+        if not ha_url or not ha_token:
+            return "Home Assistant not configured. Add HA_URL and HA_TOKEN to .env"
+        try:
+            r = _run(["curl", "-s", "--max-time", "8",
+                      "-H", f"Authorization: Bearer {ha_token}",
+                      f"{ha_url}/api/states"], timeout=12)
+            entities = json.loads(r.stdout)
+            if domain:
+                entities = [e for e in entities if e["entity_id"].startswith(domain + ".")]
+            lines = []
+            for e in entities[:30]:
+                name = e.get("attributes", {}).get("friendly_name", e["entity_id"])
+                lines.append(f"  {e['entity_id']}: {e['state']} ({name})")
+            return "\n".join(lines) if lines else "No entities found."
+        except Exception as e:
+            return f"HA error: {e}"
+
+    # ==================================================================
+    # TELEGRAM (via OpenClaw channels)
+    # ==================================================================
+
+    def send_telegram(self, message: str, to: str = "") -> str:
+        """Send a Telegram message via OpenClaw's connected Telegram channel."""
+        oc = shutil.which("openclaw") or str(Path.home() / ".openclaw" / "bin" / "openclaw")
+        if not Path(oc).exists() and not shutil.which("openclaw"):
+            return "OpenClaw not found."
+        args = [oc, "message", "send", "--channel", "telegram", message]
+        if to:
+            args += ["--to", to]
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                return "Telegram message sent."
+            err = r.stderr.strip() or r.stdout.strip()
+            if "not configured" in err.lower() or "no channel" in err.lower():
+                return "Telegram not configured in OpenClaw. Run: openclaw configure"
+            return f"Telegram error: {err[:150]}"
+        except subprocess.TimeoutExpired:
+            return "Telegram send timed out."
+        except Exception as e:
+            return f"Telegram error: {e}"

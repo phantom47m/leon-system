@@ -48,24 +48,17 @@ class TaskQueue:
             self.active_tasks = data.get("active_tasks", {})
             self.completed = data.get("completed", [])
 
-            # Tasks that were "active" at shutdown are now stale —
-            # mark them as failed since the processes are gone
+            # Tasks that were "active" at shutdown lost their processes — move back to queue
+            recovered = []
             for agent_id, task in list(self.active_tasks.items()):
-                task["status"] = "failed"
-                task["failed_at"] = datetime.now().isoformat()
-                task["failure_reason"] = "System restart — process lost"
-                self.completed.append(task)
-            if self.active_tasks:
-                logger.warning(
-                    f"Marked {len(self.active_tasks)} previously active tasks as failed (restart)"
-                )
-                self.active_tasks = {}
-
-            # Promote queued tasks to fill slots
-            while self.queue and len(self.active_tasks) < self.max_concurrent:
-                next_task = self.queue.pop(0)
-                next_task["status"] = "ready"  # ready to be picked up, not yet running
-                self.active_tasks[next_task["agent_id"]] = next_task
+                task["status"] = "queued"
+                task.pop("failed_at", None)
+                task.pop("failure_reason", None)
+                recovered.append(task)
+            if recovered:
+                self.queue = recovered + self.queue  # re-queue at front so they run first
+                logger.info(f"Recovered {len(recovered)} interrupted task(s) → re-queued")
+            self.active_tasks = {}
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Corrupt task queue file, starting fresh: {e}")
@@ -119,6 +112,7 @@ class TaskQueue:
             task["status"] = "completed"
             task["completed_at"] = datetime.now().isoformat()
             self.completed.append(task)
+            self.completed = self.completed[-200:]  # Cap during runtime too
             logger.info(f"Task completed: {task['description'][:50]}")
 
         # Promote next queued task
@@ -138,6 +132,7 @@ class TaskQueue:
             task["failed_at"] = datetime.now().isoformat()
             task["failure_reason"] = reason
             self.completed.append(task)
+            self.completed = self.completed[-200:]  # Cap during runtime too
             logger.warning(f"Task failed: {task['description'][:50]} - {reason}")
 
         # Promote next queued task

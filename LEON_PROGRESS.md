@@ -1,44 +1,70 @@
 # Leon System — Motorev Task Progress
 
 **Task:** Continuously improve Motorev app — rider-first redesign
-**Agent:** `agent_4b67a997`
+**Agent:** `agent_ff1559a8`
 **Date:** 2026-02-25
 
 ## Completed This Session
 
-### Phase 7: UI Polish, Performance & Rider Authenticity
-- **Renamed "Clans" → "Clubs"** — created ClubCard.tsx, replaced XP with Total Miles, updated all labels to real moto terminology
-- **Removed misleading features** — fake stats row (127 Nearby Riders), voice channel buttons from dashboard, cosmetic Discover Routes tab
-- **Functional search bars** — all 3 search bars (Connect, Rides, Garage) now filter content in real-time with empty state messages
-- **Initials avatar** — profile shows user initials instead of random stock photo
-- **Fixed sign-out border** — invisible `dangerLight` border changed to visible `danger`
-- **Performance** — `useCallback` on all rides/garage handlers, `useMemo` for all filtered lists
-- **Decomposed rides.tsx** — extracted LiveRideCard + HistoryRideCard (258 → 153 LOC, 41% reduction)
-- **Decomposed garage.tsx** — extracted BikeCard + MaintenanceCard + ModCard (278 → 130 LOC, 53% reduction)
-- **Rider-authentic challenges** — "Social Butterfly" → "Pack Rider", "500 XP" → "500 Miles"
-- **Diversified stock photos** — stopped reusing same 2 images across all screens
-- **28 new tests** across 6 test files. Total: 15 suites, 66 tests passing.
+### Phase 10: Full Data Wiring, Security Hardening & Reliability
 
-### Phase 8: Decomposition, Dead Code Cleanup & Rider Polish
-- **Deleted 5 dead components** — ClanCard, ClansList, NearbyRiders, GroupsList, EventsList (replaced in earlier phases but never cleaned up)
-- **Decomposed profile.tsx** — extracted ChallengeCard + AchievementCard (287 → 175 LOC, 39% reduction)
-- **Decomposed safety.tsx** — extracted ChecklistItem + ContactCard + ResourceCard (231 → 155 LOC, 33% reduction)
-- **Rider authenticity** — "XP" → "Miles to Level Up", Trophy → MapPin for Location Sharing, 8 rotating safety tips
-- **Performance** — `useMemo` on profile/safety/dashboard computed values, `React.memo` on all 5 new components
-- **5 new test files** with 17 tests. Total: 17 suites, 72 tests passing.
+#### Motorev App — Data Layer Completion
+- **Modifications wired to store** — removed last hardcoded data array from garage.tsx; added `Modification` interface, `addModification()`, `removeModification()` to store
+- **Add Modification modal** — full CRUD for mods with bike selector, category picker (6 categories), cost input, and auto-dated install
+- **Mods filter to store** — `filteredMods` now reads from `state.modifications` instead of hardcoded array
+- **Empty state for mods** — proper empty state with Package icon and "Log your first mod" prompt
+- **ModCard uses onRemove** — updated component to use Trash2 icon with delete confirmation instead of Share
+- **5 new tests** in `useStoreMods.test.ts` — add/remove/persist/multiple mods
+- **Total: 25 test suites, 138 tests, all passing**
+
+#### Leon System — Security Hardening (5 Critical Fixes)
+1. **Fixed shell_exec command injection** (`system_skills.py`)
+   - Changed from `shell=True` to `shlex.split() + shell=False`
+   - Added shell metacharacter blocklist (`;`, `|`, `$()`, backticks, `&&`, `||`, `>>`, `<<`, `<(`)
+   - Added `FileNotFoundError` handling for unknown commands
+   - 11 new security tests covering all injection vectors
+2. **Masked API token logging** (`dashboard/server.py`)
+   - Token now shows only last 6 chars: `...abc123` instead of full token
+   - Applied to both stdout `print()` and `logger.info()`
+3. **Removed hardcoded phone number** (`config/settings.yaml`)
+   - Changed from real number to empty array with env var comment
+4. **Fixed neural bridge default binding** (`core/neural_bridge.py`)
+   - Default changed from `0.0.0.0` to `127.0.0.1` (localhost only)
+5. **python_exec** already uses `shell=False` with `["python3", "-c", code]` — no fix needed
+
+#### Leon System — Reliability Improvements
+- **Memory save debouncing** (`core/memory.py`)
+  - Added 5-second debounce interval to prevent I/O-heavy saves on every message
+  - Added `flush_if_dirty()` for shutdown cleanup
+  - Added `completed_tasks` trimming (capped at 500) during flush
+  - Added `force=True` parameter for critical saves
+- **Task queue runtime cap** (`core/task_queue.py`)
+  - `completed` list now capped at 200 during `complete_task()` and `fail_task()`
+  - Previously only capped during `_save()` serialization
+- **Fixed pre-existing test failures** — Task queue persistence tests updated to match actual re-queue behavior
+- **Total: 186 Leon tests passing** (0 failures)
 
 ## Current Scores (Estimated)
 
 | Category | Before | After |
 |----------|--------|-------|
-| Code Architecture | 9/10 | 9.5/10 |
-| Rider Authenticity | 8/10 | 9/10 |
-| UI/UX Quality | 9/10 | 9/10 |
-| Interactivity | 8/10 | 8/10 |
-| Data Persistence | 6/10 | 6/10 |
-| Dead Code | Minimal | Zero |
+| Code Architecture | 9.5/10 | 9.5/10 |
+| Rider Authenticity | 9.5/10 | 9.5/10 |
+| UI/UX Quality | 9.5/10 | 9.5/10 |
+| Interactivity | 9.5/10 | 9.5/10 |
+| Data Persistence | 8/10 | 9/10 |
+| Dead Code | Zero | Zero |
+| Security (Leon) | 3/10 | 7/10 |
 
 ## Next Actions
 
-See `motorev-v2/motorev-app/project/LEON_PROGRESS.md` for detailed remaining work.
-Key remaining: real map integration, weather API, GPS ride tracking.
+### Motorev App
+- [ ] Integrate real map (react-native-maps) for ride tracking visualization
+- [ ] Dark mode toggle (currently always dark)
+- [ ] Backend API for multi-device sync
+
+### Leon System
+- [ ] Sandbox/confirmation for `python_exec` (Issue #4 from audit)
+- [ ] Evaluate `--dangerously-skip-permissions` alternatives (Issue #5)
+- [ ] Fix event loop threading model (Issue #7)
+- [ ] Add security-focused tests for vault, WebSocket auth

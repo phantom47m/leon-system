@@ -65,7 +65,7 @@ class BridgeServer:
     """
 
     def __init__(self, config: dict):
-        self.host = config.get("host", "0.0.0.0")
+        self.host = config.get("host", "127.0.0.1")
         self.port = config.get("port", 9100)
         self.token = os.environ.get("LEON_BRIDGE_TOKEN") or config.get("token", "")
         self.cert_path = config.get("cert_path", "")

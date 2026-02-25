@@ -1172,14 +1172,23 @@ def _build_state(leon) -> dict:
         completed_count = tasks.get("completed", 0)
         max_concurrent = tasks.get("max_concurrent", 5)
 
-        # Normalize active tasks for dashboard (ensure startedAt exists)
+        # Normalize active tasks for dashboard (ensure startedAt and id exist)
         active_tasks = []
-        for t in raw_tasks:
+        for agent_id, t in (tasks.get("active_tasks_by_id", {}) or {}).items():
             agent = dict(t)
-            # Map created_at/started_at → startedAt for dashboard JS
+            agent["id"] = agent_id
             if "startedAt" not in agent:
                 agent["startedAt"] = agent.get("started_at") or agent.get("created_at", "")
             active_tasks.append(agent)
+        # Fallback: raw_tasks list if active_tasks_by_id not available
+        if not active_tasks:
+            for t in raw_tasks:
+                agent = dict(t)
+                if "id" not in agent:
+                    agent["id"] = agent.get("agent_id") or agent.get("task_id") or ""
+                if "startedAt" not in agent:
+                    agent["startedAt"] = agent.get("started_at") or agent.get("created_at", "")
+                active_tasks.append(agent)
 
         # Build activity feed
         feed = []
@@ -1297,6 +1306,25 @@ async def error_handling_middleware(request, handler):
         )
 
 
+async def api_agent_log(request: web.Request) -> web.Response:
+    """GET /api/agent-log/{agent_id} — last N lines of agent's stdout log."""
+    import re as _re
+    agent_id = request.match_info.get("agent_id", "")
+    # Basic sanitization — agent_id should only be alphanumeric + underscore
+    if not _re.match(r'^agent_[a-f0-9]{8}$', agent_id):
+        return web.json_response({"error": "invalid"}, status=400)
+    log_path = Path("data/agent_outputs") / f"{agent_id}.log"
+    if not log_path.exists():
+        return web.json_response({"lines": [], "exists": False})
+    try:
+        # Read last 80 lines efficiently
+        content = log_path.read_text(errors="replace")
+        lines = content.splitlines()[-80:]
+        return web.json_response({"lines": lines, "exists": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── App Setup ────────────────────────────────────────────
 
 def create_app(leon_core=None) -> web.Application:
@@ -1314,8 +1342,8 @@ def create_app(leon_core=None) -> web.Application:
     if not token:
         token = os.environ.get("LEON_SESSION_TOKEN", secrets.token_hex(16))
     app["session_token"] = token
-    print(f"\n  Dashboard session token: {token}\n", flush=True)
-    logger.info(f"Dashboard session token: {token}")
+    print(f"\n  Dashboard session token: ...{token[-6:]}\n", flush=True)
+    logger.info(f"Dashboard session token: ...{token[-6:]}")
 
     # Persistent API token — always loaded from config/api_token.txt so it never changes across restarts
     _token_file = Path(__file__).parent.parent / "config" / "api_token.txt"
@@ -1330,8 +1358,8 @@ def create_app(leon_core=None) -> web.Application:
     os.environ["LEON_API_TOKEN"] = api_token  # ensure bridge subprocess picks up correct token
     app["response_mode"] = "both"   # voice, text, both
     app["voice_volume"] = 100       # 0-200
-    print(f"  API token (for WhatsApp bridge): {api_token}\n", flush=True)
-    logger.info(f"API token: {api_token}")
+    print(f"  API token (for WhatsApp bridge): ...{api_token[-6:]}\n", flush=True)
+    logger.info(f"API token: ...{api_token[-6:]}")
 
     # Routes
     app.router.add_get("/", index)
@@ -1339,6 +1367,7 @@ def create_app(leon_core=None) -> web.Application:
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/openclaw-url", api_openclaw_url)
     app.router.add_post("/api/message", api_message)
+    app.router.add_get("/api/agent-log/{agent_id}", api_agent_log)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
 

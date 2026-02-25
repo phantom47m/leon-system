@@ -4,6 +4,7 @@ Leon Memory System - Persistent context across all sessions
 
 import json
 import os
+import time
 import uuid
 import shutil
 import logging
@@ -13,6 +14,8 @@ from typing import Optional
 
 logger = logging.getLogger("leon.memory")
 
+_SAVE_DEBOUNCE_SECONDS = 5  # Minimum interval between disk writes
+
 
 class MemorySystem:
     """Persistent memory for Leon - survives restarts, maintains project context"""
@@ -20,6 +23,8 @@ class MemorySystem:
     def __init__(self, memory_file: str = "data/leon_memory.json"):
         self.memory_file = Path(memory_file)
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
+        self._dirty = False
+        self._last_save_time = 0.0
         self.memory = self._load()
         logger.info(f"Memory loaded: {len(self.memory.get('ongoing_projects', {}))} projects tracked")
 
@@ -36,13 +41,35 @@ class MemorySystem:
                 logger.warning("Corrupt memory file, starting fresh")
         return self._empty()
 
-    def save(self):
-        """Persist memory state to disk."""
-        # Atomic write: write to tmp then rename
+    def save(self, force: bool = False):
+        """Persist memory state to disk with debouncing.
+
+        Writes are debounced to at most once every _SAVE_DEBOUNCE_SECONDS
+        to avoid excessive I/O on high-frequency updates. Use force=True
+        to bypass debouncing (e.g., on shutdown).
+        """
+        now = time.monotonic()
+        if not force and (now - self._last_save_time) < _SAVE_DEBOUNCE_SECONDS:
+            self._dirty = True
+            return
+        self._flush()
+
+    def _flush(self):
+        """Immediately write memory to disk (atomic write)."""
+        # Trim completed_tasks to prevent unbounded growth
+        if "completed_tasks" in self.memory:
+            self.memory["completed_tasks"] = self.memory["completed_tasks"][-500:]
         tmp = self.memory_file.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(self.memory, f, indent=2, default=str)
         shutil.move(str(tmp), str(self.memory_file))
+        self._dirty = False
+        self._last_save_time = time.monotonic()
+
+    def flush_if_dirty(self):
+        """Flush pending changes to disk. Call on shutdown."""
+        if self._dirty:
+            self._flush()
 
     # alias
     save_memory = save
