@@ -225,13 +225,14 @@ async def api_setup(request):
         if leon:
             leon.ai_name = ai_name
             leon.owner_name = owner_name
-            if leon.voice:
+            vs = getattr(getattr(leon, 'hotkey_listener', None), 'voice_system', None)
+            if vs:
                 if elevenlabs_api_key:
-                    leon.voice.elevenlabs_api_key = elevenlabs_api_key
+                    vs.elevenlabs_api_key = elevenlabs_api_key
                 if elevenlabs_voice_id:
-                    leon.voice.voice_id = elevenlabs_voice_id
-                if hasattr(leon.voice, 'reset_elevenlabs'):
-                    leon.voice.reset_elevenlabs()
+                    vs.voice_id = elevenlabs_voice_id
+                if hasattr(vs, 'reset_elevenlabs'):
+                    vs.reset_elevenlabs()
 
     except Exception as e:
         logger.exception("api_setup failed")

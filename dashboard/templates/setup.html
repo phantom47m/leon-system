@@ -318,8 +318,8 @@
             </div>
             <div id="voice-picker" style="display:none;margin-top:10px">
                 <label for="voice-select" style="margin-bottom:6px">Select Voice</label>
-                <select id="voice-select" name="elevenlabs_voice_id" style="width:100%;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.2);border-radius:3px;color:#c0e8ff;font-family:'Rajdhani',sans-serif;font-size:15px;padding:10px 14px;outline:none;cursor:pointer">
-                    <option value="">— pick a voice —</option>
+                <select id="voice-select" name="elevenlabs_voice_id" style="width:100%;background:#000d1a;border:1px solid rgba(0,212,255,0.3);border-radius:3px;color:#c0e8ff;font-family:'Rajdhani',sans-serif;font-size:15px;padding:10px 14px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none">
+                    <option value="" style="background:#000d1a;color:#c0e8ff">— pick a voice —</option>
                 </select>
             </div>
             <div id="voice-fetch-status" style="font-size:12px;margin-top:5px;display:none"></div>
@@ -375,6 +375,8 @@
                 const opt = document.createElement('option');
                 opt.value = v.voice_id;
                 opt.textContent = label;
+                opt.style.background = '#000d1a';
+                opt.style.color = '#c0e8ff';
                 select.appendChild(opt);
             });
 
