@@ -189,7 +189,7 @@ _STARTUP_GREETINGS = [
     "Online and fully operational. Awaiting your command.",
     "Good to be back online. All systems nominal.",
     "Systems initialized. Ready to go.",
-    "Leon online. All subsystems green.",
+    "All subsystems green.",
     "Startup complete. Voice, intelligence, and automation — all online.",
     "I'm here. All systems are go.",
 ]
@@ -271,7 +271,7 @@ class VoiceSystem:
         self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY", "")
         self.voice_id = os.getenv(
             "LEON_VOICE_ID",
-            voice_cfg.get("voice_id", "onwK4e9ZLuTAKqWW03F9"),  # Daniel — deep authoritative British
+            voice_cfg.get("voice_id", ""),  # set via setup wizard
         )
         self.tts_model = "eleven_turbo_v2_5"
 
@@ -1065,7 +1065,7 @@ class VoiceSystem:
         self._set_state(VoiceState.SPEAKING)
         logger.info("Speaking: %s", text[:80])
 
-        if self.elevenlabs_api_key and not self._elevenlabs_degraded:
+        if self.elevenlabs_api_key and self.voice_id and not self._elevenlabs_degraded:
             await self._speak_elevenlabs(text)
         else:
             await self._speak_local(text)
