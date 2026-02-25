@@ -4,7 +4,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$SCRIPT_DIR/../.."
 cd "$BASE_DIR"
 
-# Install dependencies if needed
+# Activate virtualenv (same one Leon uses)
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+fi
+
+# Install dependencies if needed (into venv)
 if ! python3 -c "import discord" 2>/dev/null; then
     echo "[discord] Installing discord.py..."
     pip install -r "$SCRIPT_DIR/requirements.txt" -q
