@@ -102,6 +102,42 @@ async def index(request):
     )
 
 
+async def api_elevenlabs_voices(request):
+    """GET /api/elevenlabs-voices?key=sk_... — fetch user's available ElevenLabs voices."""
+    key = request.rel_url.query.get("key", "").strip()
+    if not key:
+        return web.json_response({"error": "No API key provided"}, status=400)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers={"xi-api-key": key},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 401:
+                    return web.json_response({"error": "Invalid API key — check it and try again"}, status=401)
+                if resp.status != 200:
+                    return web.json_response({"error": f"ElevenLabs returned {resp.status}"}, status=502)
+                data = await resp.json()
+                voices = sorted(
+                    [
+                        {
+                            "voice_id": v["voice_id"],
+                            "name": v["name"],
+                            "gender": (v.get("labels") or {}).get("gender", ""),
+                            "accent": (v.get("labels") or {}).get("accent", ""),
+                        }
+                        for v in data.get("voices", [])
+                    ],
+                    key=lambda x: x["name"].lower(),
+                )
+                return web.json_response({"voices": voices})
+    except asyncio.TimeoutError:
+        return web.json_response({"error": "Request timed out — check your internet connection"}, status=504)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def setup_page(request):
     """Serve the first-run setup wizard."""
     setup_path = TEMPLATES_DIR / "setup.html"
@@ -130,6 +166,7 @@ async def api_setup(request):
     claude_auth = body.get("claude_auth", "max")
     claude_api_key = (body.get("claude_api_key") or "").strip()
     elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
+    elevenlabs_voice_id = (body.get("elevenlabs_voice_id") or "").strip()
     groq_api_key = (body.get("groq_api_key") or "").strip()
 
     # Validate: if "max" selected, check claude CLI is actually installed
@@ -160,6 +197,7 @@ async def api_setup(request):
         "claude_auth": claude_auth,
         "claude_api_key": claude_api_key,
         "elevenlabs_api_key": elevenlabs_api_key,
+        "elevenlabs_voice_id": elevenlabs_voice_id,
         "groq_api_key": groq_api_key,
         "setup_complete": True,
     }
@@ -169,19 +207,28 @@ async def api_setup(request):
     user_cfg_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
     logger.info(f"Setup complete — AI: {ai_name}, Owner: {owner_name}")
 
-    # Set env vars for current session
+    # Set env vars for current session — direct assignment so these win over .env
     if groq_api_key:
-        os.environ.setdefault("GROQ_API_KEY", groq_api_key)
+        os.environ["GROQ_API_KEY"] = groq_api_key
     if elevenlabs_api_key:
-        os.environ.setdefault("ELEVENLABS_API_KEY", elevenlabs_api_key)
+        os.environ["ELEVENLABS_API_KEY"] = elevenlabs_api_key
+    if elevenlabs_voice_id:
+        os.environ["LEON_VOICE_ID"] = elevenlabs_voice_id
     if claude_api_key and claude_auth == "api":
-        os.environ.setdefault("ANTHROPIC_API_KEY", claude_api_key)
+        os.environ["ANTHROPIC_API_KEY"] = claude_api_key
 
-    # Update leon_core ai_name/owner_name in current session
+    # Update leon_core in current session (no restart needed)
     leon = request.app.get("leon_core")
     if leon:
         leon.ai_name = ai_name
         leon.owner_name = owner_name
+        if leon.voice:
+            if elevenlabs_api_key:
+                leon.voice.elevenlabs_api_key = elevenlabs_api_key
+            if elevenlabs_voice_id:
+                leon.voice.voice_id = elevenlabs_voice_id
+            if hasattr(leon.voice, 'reset_elevenlabs'):
+                leon.voice.reset_elevenlabs()
 
     return web.json_response({"ok": True})
 
@@ -1493,6 +1540,7 @@ def create_app(leon_core=None) -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/setup", setup_page)
     app.router.add_post("/api/setup", api_setup)
+    app.router.add_get("/api/elevenlabs-voices", api_elevenlabs_voices)
     app.router.add_get("/health", health)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/openclaw-url", api_openclaw_url)

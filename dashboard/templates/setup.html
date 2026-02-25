@@ -312,8 +312,18 @@
                 <label for="elevenlabs-key">ElevenLabs API Key</label>
                 <span class="optional-tag">OPTIONAL</span>
             </div>
-            <input type="password" id="elevenlabs-key" name="elevenlabs_api_key" placeholder="sk_..." autocomplete="off" />
-            <div class="hint">Natural voice output. Skip to use local TTS fallback.</div>
+            <div style="display:flex;gap:8px;align-items:stretch">
+                <input type="password" id="elevenlabs-key" name="elevenlabs_api_key" placeholder="sk_..." autocomplete="off" style="flex:1" />
+                <button type="button" id="fetch-voices-btn" style="padding:10px 14px;background:transparent;border:1px solid rgba(0,212,255,0.3);border-radius:3px;color:#00d4ff;font-family:'Rajdhani',sans-serif;font-size:13px;font-weight:600;letter-spacing:1px;cursor:pointer;white-space:nowrap;transition:border-color 0.2s,background 0.2s" onmouseover="this.style.background='rgba(0,212,255,0.06)'" onmouseout="this.style.background='transparent'">Fetch Voices</button>
+            </div>
+            <div id="voice-picker" style="display:none;margin-top:10px">
+                <label for="voice-select" style="margin-bottom:6px">Select Voice</label>
+                <select id="voice-select" name="elevenlabs_voice_id" style="width:100%;background:rgba(0,212,255,0.04);border:1px solid rgba(0,212,255,0.2);border-radius:3px;color:#c0e8ff;font-family:'Rajdhani',sans-serif;font-size:15px;padding:10px 14px;outline:none;cursor:pointer">
+                    <option value="">— pick a voice —</option>
+                </select>
+            </div>
+            <div id="voice-fetch-status" style="font-size:12px;margin-top:5px;display:none"></div>
+            <div class="hint">Natural voice output. Enter your key then click "Fetch Voices" to pick one. Get a free key at <a href="https://elevenlabs.io" target="_blank" style="color:#00d4ff">elevenlabs.io</a></div>
         </div>
 
         <!-- 5. Groq -->
@@ -335,6 +345,53 @@
 </div>
 
 <script>
+    // Fetch ElevenLabs voices
+    document.getElementById('fetch-voices-btn').addEventListener('click', async () => {
+        const key = document.getElementById('elevenlabs-key').value.trim();
+        const statusEl = document.getElementById('voice-fetch-status');
+        const picker = document.getElementById('voice-picker');
+        const select = document.getElementById('voice-select');
+        const btn = document.getElementById('fetch-voices-btn');
+
+        if (!key) {
+            statusEl.style.display = 'block';
+            statusEl.style.color = '#ff6666';
+            statusEl.textContent = 'Enter your ElevenLabs key first.';
+            return;
+        }
+
+        btn.textContent = 'Loading...';
+        btn.disabled = true;
+        statusEl.style.display = 'none';
+
+        try {
+            const res = await fetch(`/api/elevenlabs-voices?key=${encodeURIComponent(key)}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to fetch voices');
+
+            select.innerHTML = '<option value="">— pick a voice —</option>';
+            data.voices.forEach(v => {
+                const label = [v.name, v.gender, v.accent].filter(Boolean).join(' · ');
+                const opt = document.createElement('option');
+                opt.value = v.voice_id;
+                opt.textContent = label;
+                select.appendChild(opt);
+            });
+
+            picker.style.display = 'block';
+            statusEl.style.display = 'block';
+            statusEl.style.color = 'rgba(0,212,255,0.6)';
+            statusEl.textContent = `${data.voices.length} voices found. Pick one above.`;
+        } catch (err) {
+            statusEl.style.display = 'block';
+            statusEl.style.color = '#ff6666';
+            statusEl.textContent = err.message;
+        } finally {
+            btn.textContent = 'Fetch Voices';
+            btn.disabled = false;
+        }
+    });
+
     // Show/hide API key field based on auth selection
     document.querySelectorAll('input[name="claude_auth"]').forEach(radio => {
         radio.addEventListener('change', () => {
@@ -360,6 +417,7 @@
             claude_auth: document.querySelector('input[name="claude_auth"]:checked').value,
             claude_api_key: document.getElementById('claude-api-key').value.trim(),
             elevenlabs_api_key: document.getElementById('elevenlabs-key').value.trim(),
+            elevenlabs_voice_id: document.getElementById('voice-select').value.trim(),
             groq_api_key: document.getElementById('groq-key').value.trim(),
         };
 

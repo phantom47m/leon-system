@@ -61,7 +61,7 @@ whatsapp:
 voice:
   stt_provider: "deepgram"
   tts_provider: "elevenlabs"
-  voice_id: "onwK4e9ZLuTAKqWW03F9"  # Daniel (British male) — Jarvis feel
+  voice_id: ""  # set via setup wizard — leave blank, user picks their own ElevenLabs voice
   stability: 0.6
   similarity_boost: 0.85
   style: 0.2

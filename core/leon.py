@@ -97,12 +97,15 @@ class Leon:
                 ucfg = yaml.safe_load(user_cfg_path.read_text()) or {}
                 self.ai_name = ucfg.get("ai_name") or self.config.get("leon", {}).get("name") or "AI"
                 self.owner_name = ucfg.get("owner_name", "User")
+                # Use direct assignment so user_config.yaml always wins over .env
                 if ucfg.get("groq_api_key"):
-                    os.environ.setdefault("GROQ_API_KEY", ucfg["groq_api_key"])
+                    os.environ["GROQ_API_KEY"] = ucfg["groq_api_key"]
                 if ucfg.get("elevenlabs_api_key"):
-                    os.environ.setdefault("ELEVENLABS_API_KEY", ucfg["elevenlabs_api_key"])
+                    os.environ["ELEVENLABS_API_KEY"] = ucfg["elevenlabs_api_key"]
+                if ucfg.get("elevenlabs_voice_id"):
+                    os.environ["LEON_VOICE_ID"] = ucfg["elevenlabs_voice_id"]
                 if ucfg.get("claude_api_key") and ucfg.get("claude_auth") == "api":
-                    os.environ.setdefault("ANTHROPIC_API_KEY", ucfg["claude_api_key"])
+                    os.environ["ANTHROPIC_API_KEY"] = ucfg["claude_api_key"]
             except Exception as e:
                 logger.warning(f"Could not load user_config.yaml: {e}")
                 self.ai_name = self.config.get("leon", {}).get("name") or "AI"
