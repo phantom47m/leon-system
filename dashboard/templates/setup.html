@@ -333,7 +333,24 @@
                 <span class="optional-tag">OPTIONAL</span>
             </div>
             <input type="password" id="groq-key" name="groq_api_key" placeholder="gsk_..." autocomplete="off" />
-            <div class="hint">Fast speech-to-text via Whisper. Get a free key at console.groq.com.</div>
+            <div class="hint">Fast speech-to-text via Whisper. Get a free key at <a href="https://console.groq.com" target="_blank" style="color:#00d4ff">console.groq.com</a>.</div>
+        </div>
+
+        <hr class="divider" />
+
+        <!-- 6. Discord -->
+        <div class="section">
+            <div class="optional-label">
+                <label>Discord Bot</label>
+                <span class="optional-tag">OPTIONAL</span>
+            </div>
+            <div class="hint" style="margin-bottom:10px">Talk to your AI from your phone via Discord. More reliable than WhatsApp — no QR codes, no expiry.<br>
+            <a href="https://discord.com/developers/applications" target="_blank" style="color:#00d4ff">Create a bot here</a> → New Application → Bot → copy token. Enable "Message Content Intent".</div>
+            <label for="discord-token">Bot Token</label>
+            <input type="password" id="discord-token" name="discord_bot_token" placeholder="MTI3..." autocomplete="off" style="margin-bottom:10px" />
+            <label for="discord-users">Your Discord User ID <span style="color:rgba(192,232,255,0.4);font-weight:normal;font-size:11px">(optional — locks bot to your account only)</span></label>
+            <input type="text" id="discord-users" name="discord_allowed_users" placeholder="123456789012345678" autocomplete="off" />
+            <div class="hint">To get your user ID: Discord → Settings → Advanced → Enable Developer Mode, then right-click your name → Copy User ID.</div>
         </div>
 
         <div class="error-msg" id="error-msg"></div>
@@ -421,6 +438,8 @@
             elevenlabs_api_key: document.getElementById('elevenlabs-key').value.trim(),
             elevenlabs_voice_id: document.getElementById('voice-select').value.trim(),
             groq_api_key: document.getElementById('groq-key').value.trim(),
+            discord_bot_token: document.getElementById('discord-token').value.trim(),
+            discord_allowed_users: document.getElementById('discord-users').value.trim(),
         };
 
         try {

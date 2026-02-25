@@ -130,7 +130,7 @@ class Leon:
             self._error_translations = personality.get("error_translations", {})
         except FileNotFoundError:
             logger.warning(f"Personality file not found: {personality_file}, using default")
-            self.system_prompt = "You are Leon, a helpful AI assistant and orchestrator."
+            self.system_prompt = f"You are {self.ai_name}, a helpful AI assistant and orchestrator."
             self._wake_responses = ["Yeah?"]
             self._task_complete_phrases = ["Done."]
             self._task_failed_phrases = ["That didn't work — {error}."]
@@ -613,6 +613,13 @@ class Leon:
         logger.info(f"User: {message[:80]}...")
         self.memory.add_conversation(message, role="user")
 
+        # Self-update command
+        _msg_lower = message.lower().strip()
+        _update_triggers = ["update yourself", "update yourself.", "git pull", "check for updates",
+                            f"update {self.ai_name.lower()}", "pull latest", "pull updates"]
+        if any(_msg_lower == t or _msg_lower.startswith(t) for t in _update_triggers):
+            return await self._self_update()
+
         # Permission check for sensitive actions
         if self.permissions:
             denied = self._check_sensitive_permissions(message)
@@ -821,13 +828,13 @@ class Leon:
         if not _is_task_brief and any(p in msg for p in self_opt_triggers):
             leon_path = str(Path(__file__).parent.parent)
             project = {
-                "name": "Leon System",
+                "name": f"{self.ai_name} System",
                 "path": leon_path,
                 "tech_stack": ["Python", "aiohttp", "asyncio", "JavaScript", "Node.js"],
-                "description": "Leon's own source code",
+                "description": f"{self.ai_name}'s own source code",
             }
             task_desc = (
-                "Perform a self-improvement audit of the Leon AI system codebase. "
+                f"Perform a self-improvement audit of the {self.ai_name} AI system codebase. "
                 "Read the core Python files (core/leon.py, core/voice.py, dashboard/server.py, "
                 "core/agent_manager.py, core/task_queue.py, core/night_mode.py). "
                 "Identify: (1) bugs or error handling gaps, (2) code that could be more robust, "
@@ -1010,7 +1017,7 @@ class Leon:
 
         skill_list = self.system_skills.get_skill_list()
 
-        prompt = f"""You are a PC control router for Leon AI. Classify the user's request.
+        prompt = f"""You are a PC control router for {self.ai_name}. Classify the user's request.
 
 User message: "{message}"
 
@@ -1108,7 +1115,7 @@ System skill examples:
 
         if action == "cron_add":
             args = result.get("args", {})
-            name = args.get("name", "Leon task")
+            name = args.get("name", f"{self.ai_name} task")
             message = args.get("message", "")
             every = args.get("every")
             cron_expr = args.get("cron")
@@ -1646,7 +1653,7 @@ Keep it focused and actionable. The agent should be able to start immediately.""
 agent_task_id: {task_id}
 project: {project['name']}
 created: {datetime.now().isoformat()}
-spawned_by: Leon v1.0
+spawned_by: {self.ai_name} v1.0
 ---
 
 {skills_section}
@@ -1952,6 +1959,34 @@ spawned_by: Leon v1.0
         # Fallback: truncate and present simply
         short = raw_error[:120].rstrip(".")
         return f"Something went wrong — {short}"
+
+    @staticmethod
+    async def _self_update(self) -> str:
+        """Run git pull and restart the process."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=str(Path(__file__).parent.parent),
+                capture_output=True, text=True, timeout=60
+            )
+            output = result.stdout.strip()
+            if result.returncode != 0:
+                return f"Update failed — git pull returned an error:\n{result.stderr.strip() or output}"
+            if "Already up to date" in output:
+                return "Already on the latest version. Nothing to update."
+            # Restart the process
+            asyncio.create_task(self._delayed_restart(output))
+            return f"Update pulled. Restarting now...\n{output}"
+        except Exception as e:
+            return f"Update failed: {e}"
+
+    async def _delayed_restart(self, update_output: str):
+        """Wait 2 seconds then restart the process."""
+        import sys, os
+        await asyncio.sleep(2)
+        logger.info("Restarting after self-update...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     @staticmethod
     def _strip_sir(text: str) -> str:

@@ -173,6 +173,8 @@ async def api_setup(request):
         elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
         elevenlabs_voice_id = (body.get("elevenlabs_voice_id") or "").strip()
         groq_api_key = (body.get("groq_api_key") or "").strip()
+        discord_bot_token = (body.get("discord_bot_token") or "").strip()
+        discord_allowed_users = (body.get("discord_allowed_users") or "").strip()
 
         # Validate: if "max" selected, check claude CLI is actually installed
         if claude_auth == "max":
@@ -203,6 +205,8 @@ async def api_setup(request):
             "elevenlabs_api_key": elevenlabs_api_key,
             "elevenlabs_voice_id": elevenlabs_voice_id,
             "groq_api_key": groq_api_key,
+            "discord_bot_token": discord_bot_token,
+            "discord_allowed_users": discord_allowed_users,
             "setup_complete": True,
         }
 

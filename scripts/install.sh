@@ -83,6 +83,10 @@ else
     echo "  ⚠ Node.js not found — WhatsApp bridge skipped"
 fi
 
+# ── Discord bot dependencies ─────────────────────────────
+pip install discord.py aiohttp -q && echo "  ✓ Discord bot dependencies ready"
+chmod +x integrations/discord/start.sh
+
 # ── 4. Data directories & gitkeep placeholders ───────────
 echo "[4/6] Creating runtime directories..."
 mkdir -p data/task_briefs data/agent_outputs logs

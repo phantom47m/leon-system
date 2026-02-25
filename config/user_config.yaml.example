@@ -3,6 +3,8 @@ owner_name: "Alice"
 claude_auth: "max"        # "max" = Claude Max CLI auth, "api" = API key
 claude_api_key: ""
 elevenlabs_api_key: ""
-elevenlabs_voice_id: ""   # chosen in setup wizard (e.g. "21m00Tcm4TlvDq8ikWAM" = Rachel)
+elevenlabs_voice_id: ""   # chosen in setup wizard
 groq_api_key: ""
+discord_bot_token: ""     # optional — talk to your AI via Discord
+discord_allowed_users: "" # optional — your Discord user ID (locks bot to your account)
 setup_complete: true

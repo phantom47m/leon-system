@@ -30,4 +30,21 @@ if [ -n "$LEON_PID" ]; then
 else
     echo "ERROR — check logs/leon_startup.log"
     tail -15 "$LOG"
+    exit 1
+fi
+
+# Auto-start Discord bridge if token is configured
+DISCORD_TOKEN=$(python3 -c "
+import yaml, sys
+try:
+    c = yaml.safe_load(open('config/user_config.yaml'))
+    print(c.get('discord_bot_token', ''))
+except:
+    print('')
+" 2>/dev/null)
+if [ -n "$DISCORD_TOKEN" ]; then
+    # Kill any existing Discord bridge
+    OLD_PID=$(cat /tmp/leon_discord.pid 2>/dev/null)
+    [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null
+    bash integrations/discord/start.sh
 fi
