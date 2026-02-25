@@ -20,6 +20,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
 
 logger = logging.getLogger("leon.dashboard")
