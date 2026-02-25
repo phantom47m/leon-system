@@ -4,17 +4,14 @@
 
 ## Motorev App Blockers
 
-### High
-1. **No map integration** — "View Map" buttons are no-ops. No `react-native-maps` installed.
-
 ### Medium
-2. **No backend API** — Data persistence is local-only (AsyncStorage). No multi-device sync.
-3. **No dark mode toggle** — App is always dark; no light mode option.
+1. **No backend API** — Data persistence is local-only (AsyncStorage). No multi-device sync.
+2. **No dark mode toggle** — App is always dark; no light mode option.
+3. **No push notifications** — No notification delivery system.
 
 ### Low
 4. **No crash detection** — SOS sends alerts manually, no accelerometer-based detection.
 5. **No Bluetooth intercom** — Voice channel buttons show "coming soon" alerts.
-6. **No push notifications** — No notification delivery system.
 
 ## Leon System Blockers
 
@@ -28,7 +25,11 @@
 11. **System skill routing costs tokens** — ~1000-token AI prompt per PC control command.
 12. **Stale stt_provider config** — Config says "deepgram" but code uses Groq Whisper.
 
-### Resolved This Session (Phase 11)
+### Resolved This Session (Phase 12)
+- ~~No map integration~~ → `react-native-maps` installed, RideMap component with live tracking + history route replay
+- ~~No camera avatar picker~~ → `expo-image-picker` installed, camera + gallery picker on profile
+
+### Resolved Earlier (Phase 11)
 - ~~WhatsApp watchdog zero-width space~~ → Uses /health endpoint only
 - ~~NightMode dispatch race condition~~ → asyncio.Lock guards _try_dispatch
 - ~~Duplicate dashboard startup code~~ → Shared _start_dashboard_thread() helper
