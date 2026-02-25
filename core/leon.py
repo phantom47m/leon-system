@@ -2060,6 +2060,8 @@ spawned_by: Leon v1.0
             "tasks": self.task_queue.get_status_summary(),
             "projects": self.memory.list_projects(),
             "active_agents": len(self.agent_manager.active_agents),
+            "ai_provider": getattr(self.api, '_auth_method', 'none'),
+            "ai_name": self.ai_name,
             "vision": self.vision.get_status() if self.vision else {},
             "security": security,
             "printer": self.printer is not None,

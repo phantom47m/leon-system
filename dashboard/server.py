@@ -82,13 +82,19 @@ async def index(request):
         html = re.sub(r'dashboard\.css\?v=\w+', f'dashboard.css?v={css_v}', html)
     except OSError:
         pass  # Static files missing — serve HTML without cache-busting
-    # Patch AI name into dashboard branding
+    # Patch AI name into dashboard branding (every hardcoded LEON reference)
     leon = request.app.get("leon_core")
     ai_name = getattr(leon, 'ai_name', 'LEON').upper() if leon else 'LEON'
     html = re.sub(r'(<span class="logo-text">)LEON(</span>)', rf'\g<1>{ai_name}\2', html)
     html = re.sub(r'<title>LEON\b', f'<title>{ai_name}', html)
     html = html.replace('LEON Neural Interface — Initialized. Ready.',
                         f'{ai_name} Neural Interface — Initialized. Ready.')
+    # SVG hub circle text
+    html = re.sub(r'>LEON</text>', f'>{ai_name}</text>', html)
+    # Settings panel title
+    html = html.replace('⚙ LEON SETTINGS', f'⚙ {ai_name} SETTINGS')
+    # Loading screen logo
+    html = html.replace('◆ LEON</div>', f'◆ {ai_name}</div>')
     return web.Response(
         text=html,
         content_type="text/html",
@@ -125,6 +131,28 @@ async def api_setup(request):
     claude_api_key = (body.get("claude_api_key") or "").strip()
     elevenlabs_api_key = (body.get("elevenlabs_api_key") or "").strip()
     groq_api_key = (body.get("groq_api_key") or "").strip()
+
+    # Validate: if "max" selected, check claude CLI is actually installed
+    if claude_auth == "max":
+        import shutil as _shutil
+        if not _shutil.which("claude"):
+            return web.json_response({
+                "error": (
+                    "Claude CLI not found. Install it first:\n"
+                    "https://claude.ai/download\n\n"
+                    "Or switch to 'API key' mode and enter an Anthropic API key."
+                )
+            }, status=400)
+
+    # Validate: if "api" selected, key must be provided
+    if claude_auth == "api" and not claude_api_key:
+        return web.json_response({"error": "Please enter your Anthropic API key."}, status=400)
+
+    # Validate: must have at least one AI provider
+    if claude_auth not in ("max", "api") and not groq_api_key:
+        return web.json_response({
+            "error": "You need at least one AI provider — Claude Max, an API key, or a Groq key."
+        }, status=400)
 
     cfg = {
         "ai_name": ai_name,
@@ -1343,6 +1371,8 @@ def _build_state(leon) -> dict:
             "updateAvailable": getattr(leon, '_update_available', False),
             "updateVersion": getattr(leon.update_checker, 'latest_version', '') if getattr(leon, 'update_checker', None) else '',
             "updateUrl": getattr(leon.update_checker, 'release_url', '') if getattr(leon, 'update_checker', None) else '',
+            "aiProvider": status.get("ai_provider", "none"),
+            "aiName": status.get("ai_name", "AI"),
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")

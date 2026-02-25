@@ -49,6 +49,13 @@
         &#x2B06; <span id="update-msg"></span> &nbsp;|&nbsp; <a id="update-link" href="#" target="_blank" style="color:#ff8800">See release notes</a> &nbsp;|&nbsp; <code style="color:#ffcc00">git pull</code>
     </div>
 
+    <!-- No AI provider warning (hidden when provider is configured) -->
+    <div id="no-provider-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9998;background:#1a0a0a;border-bottom:1px solid #ff3333;padding:8px 20px;font-family:monospace;font-size:12px;color:#ff5555;text-align:center">
+        &#9888; No AI provider configured — responses won't work. &nbsp;|&nbsp;
+        <a href="/setup" style="color:#ff8800">Re-run setup</a> &nbsp;|&nbsp;
+        Install <a href="https://claude.ai/download" target="_blank" style="color:#ff8800">Claude CLI</a> or add a <a href="https://console.groq.com" target="_blank" style="color:#ff8800">Groq key</a>
+    </div>
+
     <!-- Hub universe — full screen, hub centered, panels float around it -->
     <div id="hub-universe">
 

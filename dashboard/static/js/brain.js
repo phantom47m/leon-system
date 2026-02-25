@@ -697,6 +697,18 @@ function updateUI() {
             if (linkEl && brainState.updateUrl) linkEl.href = brainState.updateUrl;
         }
     }
+
+    // No-provider banner — show when AI isn't configured
+    const npb = document.getElementById('no-provider-banner');
+    if (npb) {
+        const hasProvider = brainState.aiProvider && brainState.aiProvider !== 'none';
+        npb.style.display = hasProvider ? 'none' : 'block';
+        // Shift update banner down if both are visible
+        const ub = document.getElementById('update-banner');
+        if (ub && ub.style.display !== 'none' && !hasProvider) {
+            ub.style.top = '36px';
+        }
+    }
 }
 
 // ── Health Polling ─────────────────────────────────────
