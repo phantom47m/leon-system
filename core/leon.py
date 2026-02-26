@@ -42,6 +42,105 @@ from .plan_mode import PlanMode
 logger = logging.getLogger("leon")
 
 
+# ── Self-repair detection ─────────────────────────────────────────────────────
+
+# Things that map to specific Leon subsystems / files
+_COMPONENT_MAP = {
+    "screenshot": ("screenshot system", "integrations/discord/bot.py — _take_screenshot()"),
+    "screen shot": ("screenshot system", "integrations/discord/bot.py — _take_screenshot()"),
+    "screen capture": ("screenshot system", "integrations/discord/bot.py — _take_screenshot()"),
+    "black box": ("screenshot system", "integrations/discord/bot.py — capturing black image on Wayland"),
+    "black image": ("screenshot system", "integrations/discord/bot.py — capturing black image on Wayland"),
+    "black screen": ("screenshot system", "integrations/discord/bot.py — capturing black image on Wayland"),
+    "voice": ("voice system", "core/voice.py"),
+    "speak": ("voice system", "core/voice.py — TTS"),
+    "tts": ("voice system", "core/voice.py — TTS output"),
+    "hear": ("voice system", "core/voice.py — STT input"),
+    "listen": ("voice system", "core/voice.py — STT input"),
+    "memory": ("memory system", "core/memory.py"),
+    "remember": ("memory system", "core/memory.py"),
+    "forget": ("memory system", "core/memory.py"),
+    "discord": ("Discord integration", "integrations/discord/bot.py"),
+    "message": ("Discord integration", "integrations/discord/bot.py"),
+    "agent": ("agent system", "core/agent_manager.py"),
+    "task": ("task system", "core/leon.py — task routing"),
+    "schedule": ("scheduler", "core/scheduler.py"),
+    "dashboard": ("dashboard", "dashboard/server.py"),
+    "response": ("response quality", "core/leon.py — _analyze_request / _respond_conversationally"),
+    "routing": ("task routing", "core/leon.py — _route_special_commands"),
+    "plan": ("plan mode", "core/plan_mode.py"),
+}
+
+_NEGATIVE_WORDS = {
+    "broken", "wrong", "bad", "stupid", "not working", "doesn't work",
+    "didnt work", "didn't work", "failed", "messed up", "useless",
+    "terrible", "awful", "trash", "garbage", "black", "blank",
+    "not right", "incorrect", "buggy", "error", "crash", "weird",
+    "dumb", "useless", "fix", "repair",
+}
+
+_SELF_REPAIR_PATTERNS = [
+    # Direct commands
+    "fix your", "fix yourself", "fix leon", "code yourself",
+    "fix your own", "improve yourself", "optimize yourself",
+    "review your code", "audit your code", "check your code",
+    # Criticism patterns
+    "you're broken", "you are broken", "you're bad", "you are bad",
+    "you're stupid", "you are stupid", "you are dumb", "you're dumb",
+    "you sent a black", "you sent me a black", "sent me a black", "sent a black",
+    "that was wrong", "that was bad", "that was stupid",
+    "that didn't work", "that didnt work", "that's not right",
+    "thats not right", "that's wrong", "thats wrong",
+    "you failed", "you messed up", "you couldn't even",
+    # "your X is broken" variants
+    "your screenshot", "your screen", "your voice", "your memory",
+    "your response", "your agent", "your code", "your system",
+]
+
+
+def _detect_self_repair(msg: str) -> tuple[bool, str, str]:
+    """
+    Detect whether the user is asking Leon to fix something about itself.
+    Returns: (is_self_repair, component_label, file_hint)
+
+    Catches natural variants:
+      "your screenshot is broken fix it"   → screenshot system
+      "you sent me a black box"            → screenshot system
+      "that was wrong"                     → last action (from context)
+      "you're stupid"                      → general behavior
+      "code yourself better"               → general self-improve
+    """
+    m = msg.lower()
+
+    # Check direct patterns first
+    if any(p in m for p in _SELF_REPAIR_PATTERNS):
+        component, file_hint = _extract_component(m)
+        issue = _extract_issue(m)
+        return True, component, file_hint
+
+    # "your [X] [is/was] [negative]"
+    if "your" in m and any(neg in m for neg in _NEGATIVE_WORDS):
+        component, file_hint = _extract_component(m)
+        issue = _extract_issue(m)
+        return True, component, file_hint
+
+    return False, "", ""
+
+
+def _extract_component(msg: str) -> tuple[str, str]:
+    """Return (component_label, file_hint) for the most relevant component."""
+    for keyword, (label, hint) in _COMPONENT_MAP.items():
+        if keyword in msg:
+            return label, hint
+    return "general behavior", "core/leon.py"
+
+
+def _extract_issue(msg: str) -> str:
+    """Pull a short description of what the issue is from the user's message."""
+    # Keep it simple — just return the raw message trimmed
+    return msg[:200].strip()
+
+
 class Leon:
     """Main orchestration system - the brain that coordinates everything."""
 
@@ -727,6 +826,30 @@ class Leon:
                 return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
             return "Nothing pending to clear."
 
+        # ── Apply self-repair patch + restart ──────────────────────────────────
+        if any(p in msg for p in ["apply self-repair", "apply the repair", "apply the fix and restart",
+                                   "apply repair and restart", "apply self repair"]):
+            import glob as _glob
+            leon_path = str(Path(__file__).parent.parent)
+            # Find most recent self-repair diff
+            patches = sorted(
+                _glob.glob(f"{leon_path}/data/agent_zero_jobs/AZ-SELFREPAIR-*/output/patch.diff"),
+                key=os.path.getmtime, reverse=True
+            )
+            if not patches:
+                return "No self-repair patch found. Run a self-repair first."
+            patch = patches[0]
+            result = subprocess.run(
+                ["git", "apply", "--check", patch],
+                cwd=leon_path, capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                return f"Patch check failed: {result.stderr[:200]}\nApply manually: `git apply {patch}`"
+            subprocess.run(["git", "apply", patch], cwd=leon_path, check=True)
+            await self._send_discord_message("✅ Patch applied. Restarting Leon in 3 seconds...")
+            asyncio.create_task(self._delayed_restart(3))
+            return "Patch applied. Restarting now."
+
         # ── Agent Zero — kill switch ────────────────────────────────────────────
         if any(p in msg for p in ["kill agent zero", "stop agent zero", "kill az job", "abort agent zero"]):
             try:
@@ -794,46 +917,20 @@ class Leon:
                 + ("\n\n" + phases_block if phases_block else "")
             )
 
-        # ── Self-optimization / code review ─────────────────────────────
-        # Self-optimize triggers — must clearly refer to Leon's OWN code, not task briefs
-        self_opt_triggers = [
-            "optimize yourself", "fix your own code", "improve yourself",
-            "review your own code", "check your own code", "audit your own code",
-            "fix your code", "optimize your code", "review your code",
-            "what's broken in your code", "optimize leon", "fix leon's code",
-        ]
-        # Extra guard: skip if this looks like a task brief (long message about another project)
-        _is_task_brief = len(message) > 200 and any(w in msg for w in ["motorev", "app from railway", "phase 1", "phase 2", "codebase"])
-        if not _is_task_brief and any(p in msg for p in self_opt_triggers):
-            leon_path = str(Path(__file__).parent.parent)
-            project = {
-                "name": f"{self.ai_name} System",
-                "path": leon_path,
-                "tech_stack": ["Python", "aiohttp", "asyncio", "JavaScript", "Node.js"],
-                "description": f"{self.ai_name}'s own source code",
-            }
-            task_desc = (
-                f"Perform a self-improvement audit of the {self.ai_name} AI system codebase. "
-                "Read the core Python files (core/leon.py, core/voice.py, dashboard/server.py, "
-                "core/agent_manager.py, core/task_queue.py, core/night_mode.py). "
-                "Identify: (1) bugs or error handling gaps, (2) code that could be more robust, "
-                "(3) anything that might cause unexpected behavior. "
-                "Fix the top 3 most impactful issues you find. Write a summary of what you changed."
-            )
-            brief_path = await self._create_task_brief(task_desc, project)
-            agent_id = await self.agent_manager.spawn_agent(
-                brief_path=brief_path,
-                project_path=leon_path,
-            )
-            task_obj = {
-                "id": agent_id,
-                "description": task_desc,
-                "project_name": "Leon System",
-                "brief_path": brief_path,
-            }
-            self.task_queue.add_task(agent_id, task_obj)
-            self.memory.add_active_task(agent_id, task_obj)
-            return "Running a self-audit now. I'll read my own code, find the top issues, and fix them. I'll let you know what I find."
+        # ── Self-repair: detect when user says something Leon did was broken ─────
+        # Catches natural language like:
+        #   "your screenshot is broken fix it"
+        #   "you sent me a black box"
+        #   "that was wrong, fix yourself"
+        #   "your voice is bad"
+        #   "code yourself better"
+        _is_task_brief = len(message) > 200 and any(
+            w in msg for w in ["motorev", "phase 1", "phase 2", "app from railway"]
+        )
+        if not _is_task_brief:
+            _repair_hit, _component, _issue = _detect_self_repair(msg)
+            if _repair_hit:
+                return await self._handle_self_repair(message, _component, _issue)
 
         # 3D Printing
         if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti", "print job", "print queue"]):
@@ -2257,6 +2354,140 @@ spawned_by: {self.ai_name} v1.0
             f"Homelab's not responding — running it locally instead. "
             f"Working on **{task_desc}** in {project['name']}.\n\n"
             f"I'll let you know when it's done."
+        )
+
+    async def _handle_self_repair(self, message: str, component: str, file_hint: str) -> str:
+        """
+        Leon received criticism / a bug report about itself.
+        Dispatch a targeted self-repair job to Agent Zero (or Claude agent fallback)
+        pointed at the leon-system codebase.
+
+        Agent Zero is ideal here: it can read the code, reproduce the issue,
+        write a fix, run a quick test, and hand back a diff — just like it would
+        for any other project, but the project IS Leon itself.
+        """
+        leon_path = str(Path(__file__).parent.parent)
+        project = {
+            "name": "Leon System",
+            "path": leon_path,
+            "type": "system",
+            "tech_stack": ["Python", "aiohttp", "asyncio", "JavaScript"],
+            "context": (
+                f"This is Leon's OWN source code at {leon_path}.\n"
+                "You are repairing a bug that the owner just reported.\n"
+                "Key files: core/leon.py (main brain), integrations/discord/bot.py "
+                "(Discord bridge), core/voice.py (TTS/STT), core/agent_manager.py, "
+                "core/memory.py, dashboard/server.py.\n"
+                "After fixing, write a REPORT.md with: what the bug was, what you changed, "
+                "and the exact file + line numbers."
+            ),
+        }
+
+        # Pull the last few conversation turns for full context
+        recent = self.memory.get_recent_context(limit=6)
+        context_lines = []
+        for turn in recent[-6:]:
+            role = turn.get("role", "?")
+            content = turn.get("content", "")[:300]
+            context_lines.append(f"{role.upper()}: {content}")
+        conversation_context = "\n".join(context_lines)
+
+        task_desc = (
+            f"SELF-REPAIR: Fix a bug in Leon's own code.\n\n"
+            f"WHAT THE USER REPORTED:\n{message}\n\n"
+            f"SUSPECTED COMPONENT: {component}\n"
+            f"LIKELY FILE: {file_hint}\n\n"
+            f"RECENT CONVERSATION (for context):\n{conversation_context}\n\n"
+            f"YOUR JOB:\n"
+            f"1. Read {file_hint} and understand the current implementation.\n"
+            f"2. Identify exactly what is causing the reported problem.\n"
+            f"3. Fix it. Test if possible.\n"
+            f"4. Write REPORT.md: bug root cause, files changed, lines changed.\n"
+            f"Do NOT make unrelated changes. Stay focused on the reported issue."
+        )
+
+        # Use Agent Zero if available (can build tools on the fly, test, verify)
+        try:
+            from tools.agent_zero_runner import get_runner
+            az = get_runner()
+            if az.is_enabled() and await az.is_available_async():
+                leon_context = self._build_az_memory_context(project)
+                job_id_preview = f"AZ-SELFREPAIR-{datetime.now().strftime('%H%M%S')}"
+                task_obj = {
+                    "id": job_id_preview,
+                    "description": f"Self-repair: {component}",
+                    "project_name": "Leon System",
+                    "executor": "agent_zero",
+                }
+                self.memory.add_active_task(job_id_preview, task_obj)
+
+                async def _repair_and_notify():
+                    try:
+                        result = await az.run_job(
+                            task_desc=task_desc,
+                            project_path=leon_path,
+                            project_name="Leon System",
+                            leon_context=leon_context,
+                        )
+                        summary = result.get("summary", "")
+                        diff_path = result.get("diff_path", "")
+                        self.memory.memory.get("active_tasks", {}).pop(job_id_preview, None)
+                        self.memory.save()
+
+                        # Offer to apply the patch and restart
+                        if diff_path and Path(diff_path).exists():
+                            await self._send_discord_message(
+                                f"🔧 **Self-repair complete** ({component})\n"
+                                f"{summary[:300]}\n\n"
+                                f"**To apply:** `git apply {diff_path}` then restart Leon.\n"
+                                f"Or say: **apply self-repair and restart**"
+                            )
+                        else:
+                            await self._send_discord_message(
+                                f"🔧 **Self-repair complete** ({component})\n{summary[:400]}"
+                            )
+                    except Exception as exc:
+                        logger.exception("Self-repair job failed: %s", exc)
+
+                asyncio.create_task(_repair_and_notify())
+                return (
+                    f"Got it — I know my {component} failed. "
+                    f"Dispatching Agent Zero to diagnose and fix it now.\n\n"
+                    f"It'll read `{file_hint}`, find the root cause, and send you the fix via Discord."
+                )
+        except ImportError:
+            pass
+
+        # Fallback: Claude Code agent directly on leon-system (no workspace copy)
+        brief_path = await self._create_task_brief(task_desc, project)
+        agent_id = await self.agent_manager.spawn_agent(
+            brief_path=brief_path,
+            project_path=leon_path,
+        )
+        task_obj = {
+            "id": agent_id,
+            "description": f"Self-repair: {component}",
+            "project_name": "Leon System",
+            "brief_path": brief_path,
+        }
+        self.task_queue.add_task(agent_id, task_obj)
+        self.memory.add_active_task(agent_id, task_obj)
+        return (
+            f"Got it — my {component} is broken. "
+            f"Spawning an agent to read `{file_hint}` and fix it.\n"
+            f"I'll let you know what it finds."
+        )
+
+    async def _delayed_restart(self, delay_seconds: int = 3):
+        """Restart Leon after a short delay (used after self-repair patch apply)."""
+        await asyncio.sleep(delay_seconds)
+        leon_path = str(Path(__file__).parent.parent)
+        subprocess.Popen(
+            ["bash", "start.sh"],
+            cwd=leon_path,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
     def _build_az_memory_context(self, project: dict) -> str:
