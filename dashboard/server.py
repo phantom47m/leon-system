@@ -126,7 +126,7 @@ async def api_elevenlabs_voices(request):
                     return web.json_response({"error": "Invalid API key — check it and try again"}, status=401)
                 if resp.status != 200:
                     return web.json_response({"error": f"ElevenLabs returned {resp.status}"}, status=502)
-                data = await resp.json()
+                data = await resp.json(content_type=None)
                 voices = sorted(
                     [
                         {
@@ -580,17 +580,7 @@ async def api_message(request):
         should_speak = response_mode in ("voice", "both")
         if vs and should_speak and response and not response.startswith("["):
             import asyncio as _asyncio
-            if source == "whatsapp":
-                # For WhatsApp: generate audio to send as voice note, also play locally
-                audio_bytes = await vs.generate_audio(response)
-                if audio_bytes:
-                    import base64 as _base64
-                    audio_base64 = _base64.b64encode(audio_bytes).decode("utf-8")
-                    audio_mime = "audio/mpeg"
-                # Still play locally on the PC
-                _asyncio.create_task(vs.speak(response))
-            else:
-                _asyncio.create_task(vs.speak(response))
+            _asyncio.create_task(vs.speak(response))
     except Exception as e:
         logger.debug(f"TTS speak error: {e}")
 
@@ -1284,25 +1274,6 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "Or if using systemd: `systemctl --user restart leon`"
             )
 
-        elif cmd == "/whatsapp":
-            import urllib.request
-            try:
-                with urllib.request.urlopen("http://127.0.0.1:3001/health", timeout=3) as resp:
-                    data = json.loads(resp.read().decode())
-                    ready = data.get("whatsapp_ready", False)
-                    num = data.get("my_number", "unknown")
-                    uptime = data.get("uptime_seconds", 0)
-                    reconn = data.get("reconnect_count", 0)
-                    return (
-                        f"**WhatsApp Bridge:**\n\n"
-                        f"- Status: {'CONNECTED' if ready else 'NOT READY'}\n"
-                        f"- Phone: {num}\n"
-                        f"- Uptime: {uptime // 60}m {uptime % 60}s\n"
-                        f"- Reconnects: {reconn}"
-                    )
-            except Exception:
-                return "WhatsApp bridge is not running. Start it with `./start.sh`"
-
         elif cmd == "/help":
             return (
                 "**Dashboard Commands:**\n\n"
@@ -1330,7 +1301,6 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/login <pin>` — authenticate as owner\n"
                 "- `/voice` — voice system status\n"
                 "- `/restart` — how to restart Leon\n"
-                "- `/whatsapp` — WhatsApp bridge status\n"
                 "- `/help` — this message"
             )
 
@@ -1554,7 +1524,7 @@ def create_app(leon_core=None) -> web.Application:
     os.environ["LEON_API_TOKEN"] = api_token  # ensure bridge subprocess picks up correct token
     app["response_mode"] = "both"   # voice, text, both
     app["voice_volume"] = 100       # 0-200
-    print(f"  API token (for WhatsApp bridge): ...{api_token[-6:]}\n", flush=True)
+    print(f"  API token (for Discord bridge): ...{api_token[-6:]}\n", flush=True)
     logger.info(f"API token: ...{api_token[-6:]}")
 
     # Routes

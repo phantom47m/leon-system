@@ -4,19 +4,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$SCRIPT_DIR/../.."
 cd "$BASE_DIR"
 
-# Activate virtualenv (same one Leon uses)
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
+# Use venv python directly (no activate needed)
+PYTHON="$BASE_DIR/venv/bin/python"
+if [ ! -f "$PYTHON" ]; then
+    PYTHON="python3"
 fi
 
 # Install dependencies if needed (into venv)
-if ! python3 -c "import discord" 2>/dev/null; then
+if ! "$PYTHON" -c "import discord" 2>/dev/null; then
     echo "[discord] Installing discord.py..."
-    pip install -r "$SCRIPT_DIR/requirements.txt" -q
+    "$PYTHON" -m pip install discord.py aiohttp -q
 fi
 
 # Read Discord bot token from user_config.yaml
-DISCORD_TOKEN=$(python3 -c "
+DISCORD_TOKEN=$("$PYTHON" -c "
 import yaml, sys
 try:
     c = yaml.safe_load(open('config/user_config.yaml'))
@@ -25,7 +26,7 @@ except:
     print('')
 " 2>/dev/null)
 
-ALLOWED_USERS=$(python3 -c "
+ALLOWED_USERS=$("$PYTHON" -c "
 import yaml
 try:
     c = yaml.safe_load(open('config/user_config.yaml'))
@@ -48,6 +49,6 @@ if [ -n "$ALLOWED_USERS" ]; then
 fi
 
 echo "[discord] Starting Discord bridge..."
-python3 "$SCRIPT_DIR/bot.py" $ARGS >> logs/discord_bridge.log 2>&1 &
+"$PYTHON" "$SCRIPT_DIR/bot.py" $ARGS >> logs/discord_bridge.log 2>&1 &
 echo $! > /tmp/leon_discord.pid
 echo "[discord] Bridge started (PID: $!)"

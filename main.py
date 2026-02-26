@@ -300,15 +300,6 @@ def run_headless():
     voice_thread.start()
     logger.info("Voice system starting in background...")
 
-    # Start WhatsApp bridge AFTER dashboard (so API token is available)
-    wa_config = leon.config.get("whatsapp", {})
-    if wa_config.get("enabled") and not leon._whatsapp_process:
-        api_token = app.get("api_token", "")
-        if api_token:
-            import os as _os
-            _os.environ["LEON_API_TOKEN"] = api_token
-        leon._start_whatsapp_bridge(wa_config)
-
     try:
         loop.run_forever()
     except KeyboardInterrupt:

@@ -52,12 +52,6 @@ scheduler:
       interval_hours: 6
       enabled: false
 
-whatsapp:
-  enabled: true
-  allowed_numbers: []  # Set via LEON_WHATSAPP_ALLOWED env var (comma-separated)
-  auto_start: true
-  bridge_dir: "integrations/whatsapp"
-
 voice:
   stt_provider: "deepgram"
   tts_provider: "elevenlabs"

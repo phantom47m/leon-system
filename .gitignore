@@ -17,9 +17,12 @@ data/.auth.json
 !data/agent_outputs/.gitkeep
 !data/task_briefs/.gitkeep
 !logs/.gitkeep
-integrations/whatsapp/node_modules/
-integrations/whatsapp/.wwebjs_auth/
-integrations/whatsapp/.wwebjs_cache/
+.wwebjs_auth/
+.wwebjs_cache/
+data/voice_cache/
+data/night_log.json
+data/night_tasks.json
+.clawhub/
 config/api_token.txt
 config/bridge_*.pem
 config/user_config.yaml

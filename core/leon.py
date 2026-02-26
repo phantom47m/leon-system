@@ -252,9 +252,6 @@ class Leon:
         self._awareness_task = None
         self._ram_watchdog_task = None
         self._vision_task = None
-        self._whatsapp_process = None
-        self._whatsapp_log_fh = None  # track log file handle to avoid FD leak
-
         # Overnight autonomous coding mode
         self.night_mode = NightMode(self)
 
@@ -350,14 +347,6 @@ class Leon:
         # Auto-trigger daily briefing on startup
         asyncio.create_task(self._auto_daily_briefing())
 
-        # Auto-start WhatsApp bridge if configured
-        wa_config = self.config.get("whatsapp", {})
-        if wa_config.get("enabled") and wa_config.get("auto_start"):
-            self._start_whatsapp_bridge(wa_config)
-
-        # Watchdog — restart bridge if it dies
-        asyncio.create_task(self._whatsapp_watchdog())
-
         # Resume night mode — always enable if there are pending tasks (including recovered ones)
         pending = self.night_mode.get_pending()
         if pending:
@@ -434,15 +423,6 @@ class Leon:
 
         logger.info(f"Health checks: {checks_passed}/{checks_total} passed")
 
-    def _close_whatsapp_log(self):
-        """Close the WhatsApp bridge log file handle if open."""
-        if self._whatsapp_log_fh and not self._whatsapp_log_fh.closed:
-            try:
-                self._whatsapp_log_fh.close()
-            except Exception:
-                pass
-            self._whatsapp_log_fh = None
-
     async def stop(self):
         logger.info("Stopping Leon...")
         self.running = False
@@ -454,15 +434,6 @@ class Leon:
             self._vision_task.cancel()
         if self.vision:
             self.vision.stop()
-        if self._whatsapp_process:
-            logger.info("Stopping WhatsApp bridge...")
-            self._whatsapp_process.terminate()
-            try:
-                self._whatsapp_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._whatsapp_process.kill()
-            self._whatsapp_process = None
-        self._close_whatsapp_log()
         if self.hotkey_listener:
             self.hotkey_listener.stop()
         if self.project_watcher:
@@ -498,112 +469,6 @@ class Leon:
                 })
         except Exception as e:
             logger.warning(f"Auto daily briefing failed: {e}")
-
-    def _start_whatsapp_bridge(self, wa_config: dict):
-        """Spawn the WhatsApp bridge as a subprocess."""
-        bridge_dir = Path(wa_config.get("bridge_dir", "integrations/whatsapp"))
-        bridge_script = bridge_dir / "bridge.js"
-
-        if not bridge_script.exists():
-            logger.warning(f"WhatsApp bridge script not found: {bridge_script}")
-            return
-
-        # Build env vars for the bridge
-        env = os.environ.copy()
-        env["LEON_API_URL"] = "http://127.0.0.1:3000"
-
-        # Get API token — token file is primary source of truth (persists across restarts)
-        _token_file = Path("config/api_token.txt")
-        api_token = _token_file.read_text().strip() if _token_file.exists() else ""
-        if not api_token:
-            api_token = os.environ.get("LEON_API_TOKEN", "")
-        if not api_token and self.vault and self.vault._unlocked:
-            api_token = self.vault.retrieve("LEON_API_TOKEN") or ""
-        if api_token:
-            os.environ["LEON_API_TOKEN"] = api_token  # keep env in sync
-        env["LEON_API_TOKEN"] = api_token
-
-        # Set allowed numbers from config
-        allowed = wa_config.get("allowed_numbers", [])
-        env["LEON_WHATSAPP_ALLOWED"] = ",".join(allowed)
-
-        if not api_token:
-            logger.warning("WhatsApp bridge: no API token available, skipping auto-start")
-            return
-
-        try:
-            # Close any previous log file handle to prevent FD leak on restart
-            self._close_whatsapp_log()
-
-            log_path = Path("logs/whatsapp_bridge.log")
-            log_path.parent.mkdir(exist_ok=True)
-            wa_log = open(log_path, "a")
-            try:
-                self._whatsapp_process = subprocess.Popen(
-                    ["node", "bridge.js"],
-                    cwd=str(bridge_dir),
-                    env=env,
-                    stdout=wa_log,
-                    stderr=wa_log,
-                )
-            except Exception:
-                wa_log.close()
-                raise
-            self._whatsapp_log_fh = wa_log  # store handle so we can close it later
-            logger.info(f"WhatsApp bridge started (PID {self._whatsapp_process.pid}), log → {log_path}")
-            if self.audit_log:
-                self.audit_log.log("whatsapp_bridge_start", f"PID {self._whatsapp_process.pid}", "info")
-        except Exception as e:
-            logger.error(f"Failed to start WhatsApp bridge: {e}")
-            self._whatsapp_process = None
-
-    async def _whatsapp_watchdog(self):
-        """Restart the WhatsApp bridge if it crashes or becomes unresponsive."""
-        await asyncio.sleep(30)
-        wa_config = self.config.get("whatsapp", {})
-        if not wa_config.get("enabled"):
-            return
-        _fail_streak = 0
-        while self.running:
-            await asyncio.sleep(60)
-
-            # Check 1: process dead?
-            process_dead = bool(self._whatsapp_process and self._whatsapp_process.poll() is not None)
-
-            # Check 2: health endpoint probe (no message sending — avoids spam)
-            bridge_broken = False
-            if not process_dead:
-                try:
-                    import httpx as _httpx
-                    async with _httpx.AsyncClient(timeout=5.0) as cl:
-                        h = await cl.get("http://127.0.0.1:3001/health")
-                        health_data = h.json()
-                        if not health_data.get("whatsapp_ready"):
-                            bridge_broken = True
-                    _fail_streak = 0
-                except Exception:
-                    _fail_streak += 1
-                    if _fail_streak < 2:
-                        continue  # tolerate one transient blip
-                    bridge_broken = True
-
-            if process_dead or bridge_broken:
-                logger.warning(f"WhatsApp watchdog: unhealthy (dead={process_dead} broken={bridge_broken}) — restarting")
-                if self._whatsapp_process:
-                    try:
-                        self._whatsapp_process.kill()
-                    except Exception:
-                        pass
-                    self._whatsapp_process = None
-                self._close_whatsapp_log()
-                import subprocess as _sp
-                _sp.run(["pkill", "-9", "-f", "chrome.*wwebjs_auth"], capture_output=True)
-                await asyncio.sleep(5)
-                if not self.running:
-                    break
-                self._start_whatsapp_bridge(wa_config)
-                _fail_streak = 0
-                logger.info("WhatsApp bridge restarted by watchdog")
 
     # ------------------------------------------------------------------
     # Main input handler
@@ -1925,7 +1790,7 @@ spawned_by: {self.ai_name} v1.0
                                 self._update_available = True
                                 self._update_mentioned = False
                                 self.update_checker.mark_notified()
-                                # WhatsApp/dashboard notification
+                                # Dashboard notification
                                 msg = (
                                     f"Update available: v{self.update_checker.latest_version}\n"
                                     f"Run: cd ~/leon-system && git pull\n"

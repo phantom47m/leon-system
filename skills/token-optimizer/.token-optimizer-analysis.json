@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-02-24T20:49:36.596600",
+  "config_found": true,
+  "config_path": "/home/deansabr/.openclaw/openclaw.json",
+  "workspace_files": {
+    "SOUL.md": 1673,
+    "USER.md": 477,
+    "IDENTITY.md": 636,
+    "TOOLS.md": 860
+  },
+  "model_routing": {
+    "status": "not_configured",
+    "default_model": "unknown",
+    "has_haiku": false,
+    "has_sonnet": false,
+    "has_aliases": false,
+    "monthly_savings": 0
+  },
+  "heartbeat": {
+    "status": "not_configured",
+    "provider": "api",
+    "interval": 3600,
+    "monthly_cost": 0,
+    "monthly_savings": 0
+  },
+  "session_management": {
+    "status": "optimized",
+    "estimated_context_size": 3646,
+    "optimized_context_size": 8000,
+    "monthly_savings": 0
+  },
+  "caching": {
+    "status": "needs_optimization",
+    "enabled": false,
+    "ttl": "5m",
+    "monthly_savings": 40.5
+  },
+  "rate_limits": {
+    "status": "not_configured",
+    "has_api_limit": false,
+    "has_budget": false,
+    "daily_budget": null,
+    "monthly_budget": null
+  },
+  "total_monthly_savings": 40.5
+}

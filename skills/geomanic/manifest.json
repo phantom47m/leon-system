@@ -1,0 +1,89 @@
+{
+  "name": "geomanic",
+  "version": "1.0.0",
+  "description": "Connect OpenClaw to Geomanic — your GPS tracking companion. Query travel statistics, manage waypoints, and analyze your journeys through natural language.",
+  "author": "monswyk",
+  "main": "index.js",
+  "permissions": ["network:geomanic.com"],
+  "config": {
+    "apiKey": {
+      "type": "string",
+      "required": true,
+      "description": "Geomanic MCP API key (starts with gmnc_mcp_). Generate at https://geomanic.com/data"
+    },
+    "apiUrl": {
+      "type": "string",
+      "required": false,
+      "description": "Geomanic MCP API URL (default: https://geomanic.com/api/v1/mcp)"
+    }
+  },
+  "tools": [
+    {
+      "name": "create_waypoint",
+      "description": "Create a new GPS waypoint with coordinates, speed, altitude, and timestamp",
+      "parameters": {
+        "latitude": { "type": "number", "description": "Latitude (-90 to 90)", "required": true },
+        "longitude": { "type": "number", "description": "Longitude (-180 to 180)", "required": true },
+        "timestamp": { "type": "string", "description": "ISO 8601 timestamp", "required": true },
+        "speed": { "type": "number", "description": "Speed in km/h" },
+        "altitude": { "type": "number", "description": "Altitude in meters" },
+        "device_id": { "type": "string", "description": "Device identifier" },
+        "country": { "type": "string", "description": "ISO 3166-1 alpha-2 country code" },
+        "place": { "type": "string", "description": "Place name" }
+      }
+    },
+    {
+      "name": "update_waypoint",
+      "description": "Update an existing waypoint by ID",
+      "parameters": {
+        "id": { "type": "number", "description": "Waypoint ID", "required": true },
+        "latitude": { "type": "number", "description": "Latitude (-90 to 90)" },
+        "longitude": { "type": "number", "description": "Longitude (-180 to 180)" },
+        "timestamp": { "type": "string", "description": "ISO 8601 timestamp" },
+        "speed": { "type": "number", "description": "Speed in km/h" },
+        "altitude": { "type": "number", "description": "Altitude in meters" },
+        "country": { "type": "string", "description": "ISO 3166-1 alpha-2 country code" },
+        "place": { "type": "string", "description": "Place name" }
+      }
+    },
+    {
+      "name": "delete_waypoint",
+      "description": "Delete a waypoint by ID",
+      "parameters": {
+        "id": { "type": "number", "description": "Waypoint ID", "required": true }
+      }
+    },
+    {
+      "name": "get_waypoint",
+      "description": "Get a single waypoint by ID",
+      "parameters": {
+        "id": { "type": "number", "description": "Waypoint ID", "required": true }
+      }
+    },
+    {
+      "name": "list_waypoints",
+      "description": "List waypoints with optional time range, pagination, and sorting",
+      "parameters": {
+        "from": { "type": "string", "description": "Start date (ISO 8601)" },
+        "to": { "type": "string", "description": "End date (ISO 8601)" },
+        "limit": { "type": "number", "description": "Max results (default 50, max 1000)" },
+        "offset": { "type": "number", "description": "Offset for pagination" },
+        "sort": { "type": "string", "description": "Sort order: asc or desc (default desc)" }
+      }
+    },
+    {
+      "name": "get_statistics",
+      "description": "Get aggregated travel statistics: total distance, speed, altitude, country breakdown with full/part days",
+      "parameters": {
+        "from": { "type": "string", "description": "Start date (ISO 8601)", "required": true },
+        "to": { "type": "string", "description": "End date (ISO 8601)", "required": true },
+        "suppress_flights": { "type": "boolean", "description": "Exclude flight segments (default true)" }
+      }
+    },
+    {
+      "name": "get_date_range",
+      "description": "Get the earliest and latest waypoint dates for the user",
+      "parameters": {}
+    }
+  ]
+}
