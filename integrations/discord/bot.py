@@ -125,7 +125,21 @@ class AIDiscordBot(discord.Client):
                 except OSError:
                     pass
             else:
-                await message.reply("Couldn't take a screenshot — scrot not installed.")
+                # Don't just apologize — trigger self-repair automatically
+                await message.reply(
+                    "Screenshot failed. Dispatching Agent Zero to diagnose and fix the screenshot method now..."
+                )
+                session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
+                wayland = os.environ.get("WAYLAND_DISPLAY", "")
+                repair_msg = (
+                    f"SELF REPAIR NEEDED: _take_screenshot() just returned None when the user requested a screenshot. "
+                    f"System info: XDG_SESSION_TYPE={session_type}, WAYLAND_DISPLAY={wayland}. "
+                    f"The broken function is in integrations/discord/bot.py. "
+                    f"Check logs/discord_bridge.log for the specific error, then fix _take_screenshot() "
+                    f"so it works on this Wayland/COSMIC system. "
+                    f"After fixing, apply the patch and restart the discord bridge."
+                )
+                asyncio.create_task(self._ask_leon(repair_msg, str(message.author)))
             return
 
         # Show typing indicator while waiting for Leon
@@ -148,6 +162,7 @@ class AIDiscordBot(discord.Client):
                         pass
                 else:
                     await message.reply(chunk)
+                    self._trigger_screenshot_repair(str(message.author))
             else:
                 await message.reply(chunk)
 
@@ -159,6 +174,22 @@ class AIDiscordBot(discord.Client):
                     os.unlink(path)
                 except OSError:
                     pass
+            else:
+                self._trigger_screenshot_repair(str(message.author))
+
+    def _trigger_screenshot_repair(self, author: str) -> None:
+        """Whenever a screenshot silently fails, automatically ask Leon to fix it via Agent Zero."""
+        session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
+        wayland = os.environ.get("WAYLAND_DISPLAY", "")
+        repair_msg = (
+            f"SELF REPAIR NEEDED: _take_screenshot() returned None — screenshot capability is broken. "
+            f"System: XDG_SESSION_TYPE={session_type}, WAYLAND_DISPLAY={wayland}. "
+            f"File to fix: integrations/discord/bot.py (_take_screenshot function). "
+            f"Check logs/discord_bridge.log for the error, fix the function so it works on "
+            f"this Wayland/COSMIC desktop, then apply the patch and restart the Discord bridge."
+        )
+        asyncio.create_task(self._ask_leon(repair_msg, author))
+        logger.warning("Screenshot failed — self-repair dispatched to Leon/Agent Zero")
 
     async def _ask_leon(self, text: str, author: str) -> str:
         try:
@@ -286,14 +317,18 @@ async def _take_screenshot(monitor: dict | None = None) -> str | None:
         # Spawning a subprocess gives it a clean environment with its own event loop.
         if session_type == "wayland" or wayland_display:
             try:
-                venv_python = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "venv", "bin", "python3"
-                )
+                # bot.py lives at integrations/discord/bot.py → need 3 dirnames to reach project root
+                _bot_dir = os.path.dirname(os.path.abspath(__file__))          # .../integrations/discord
+                _integ_dir = os.path.dirname(_bot_dir)                          # .../integrations
+                _project_root = os.path.dirname(_integ_dir)                     # .../leon-system
+                venv_python = os.path.join(_project_root, "venv", "bin", "python3")
+                if not os.path.exists(venv_python):
+                    venv_python = os.path.join(_project_root, "venv", "bin", "python")
                 if not os.path.exists(venv_python):
                     venv_python = "python3"
+                logger.warning("pyscreenshot subprocess: using python=%s", venv_python)
                 script = (
-                    "import pyscreenshot as I, sys; "
+                    "import pyscreenshot as I; "
                     f"img=I.grab(backend='freedesktop_dbus'); "
                     f"img.save({full_path!r}); "
                     f"print('ok', img.size)"
@@ -302,8 +337,8 @@ async def _take_screenshot(monitor: dict | None = None) -> str | None:
                     [venv_python, "-c", script],
                     capture_output=True, timeout=20, env=env
                 )
-                logger.debug("pyscreenshot subprocess rc=%s stdout=%s stderr=%s",
-                             r.returncode, r.stdout[:200], r.stderr[:200])
+                logger.warning("pyscreenshot subprocess rc=%s stdout=%s stderr=%s",
+                               r.returncode, r.stdout[:300], r.stderr[:300])
                 if r.returncode == 0 and _file_ok(full_path):
                     if monitor:
                         _crop_and_save(full_path, path, monitor)
@@ -312,7 +347,7 @@ async def _take_screenshot(monitor: dict | None = None) -> str | None:
                     if _file_ok(path):
                         return path
             except Exception as e:
-                logger.debug("pyscreenshot subprocess failed: %s", e)
+                logger.warning("pyscreenshot subprocess exception: %s", e)
 
         # ── Method 2: gnome-screenshot (works on X11 and Wayland via portal) ──
         try:
