@@ -306,7 +306,7 @@ html, body {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-height: 420px;
+    max-height: calc(100vh - 280px);
     overflow-y: auto;
     padding-right: 4px;
     margin-top: 4px;
@@ -382,13 +382,14 @@ html, body {
 
 .agent-terminal-body {
     padding: 6px 8px;
-    max-height: 120px;
+    max-height: 200px;
     overflow-y: auto;
     font-family: 'Share Tech Mono', monospace;
     font-size: 10px;
-    line-height: 1.5;
+    line-height: 1.6;
     color: rgba(255,255,255,0.75);
-    scrollbar-width: none;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0,212,255,0.3) transparent;
 }
 
 .agent-terminal-body::-webkit-scrollbar { display: none; }

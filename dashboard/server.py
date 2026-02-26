@@ -1363,12 +1363,20 @@ def _build_state(leon) -> dict:
                     (t for t in leon.night_mode._backlog if t.get("agent_id") == agent_id),
                     {}
                 )
-                desc = (tq_entry.get("description")
+                # Check plan mode for task title
+                plan_task = {}
+                if hasattr(leon, 'plan_mode') and leon.plan_mode and leon.plan_mode.current_plan:
+                    for _phase in leon.plan_mode.current_plan.get("phases", []):
+                        for _t in _phase.get("tasks", []):
+                            if _t.get("agent_id") == agent_id:
+                                plan_task = _t
+                                break
+                desc = (plan_task.get("title")
+                        or tq_entry.get("description")
                         or night_task.get("description")
-                        or info.get("description", "agent"))
-                proj = (tq_entry.get("project")
-                        or night_task.get("project")
-                        or info.get("project_name", ""))
+                        or info.get("description", ""))
+                proj = (leon.plan_mode.current_plan.get("project", "") if plan_task and hasattr(leon, 'plan_mode') and leon.plan_mode and leon.plan_mode.current_plan else ""
+                        ) or tq_entry.get("project") or night_task.get("project") or info.get("project_name", "")
                 active_tasks.append({
                     "id": agent_id,
                     "description": desc,

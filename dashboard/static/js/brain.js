@@ -668,6 +668,8 @@ function updateUI() {
             al.innerHTML = '<div class="agents-empty">IDLE</div>';
             _stopAgentLogPolling();
         } else {
+            // Clear any stale IDLE placeholder
+            al.querySelector('.agents-empty')?.remove();
             // Build terminal cards — preserve existing DOM nodes to avoid scroll reset
             const currentIds = new Set(agents.map(a => a.id).filter(Boolean));
             // Remove cards for agents that finished
@@ -750,7 +752,7 @@ function updateUI() {
     if (planBar) {
         const pm = brainState.planMode;
         if (pm && (pm.active || pm.goal)) {
-            planBar.style.display = 'block';
+            planBar.style.display = 'flex';
             const goalEl = document.getElementById('plan-bar-goal');
             if (goalEl) goalEl.textContent = pm.goal || '';
             const progEl = document.getElementById('plan-bar-progress');
@@ -783,7 +785,7 @@ function updateUI() {
 
     // Stack banners vertically if multiple visible
     let bannerOffset = 0;
-    for (const id of ['update-banner', 'no-provider-banner', 'no-claude-banner']) {
+    for (const id of ['update-banner', 'no-provider-banner', 'no-claude-banner', 'plan-bar']) {
         const el = document.getElementById(id);
         if (el && el.style.display !== 'none') {
             el.style.top = bannerOffset + 'px';
@@ -1399,26 +1401,28 @@ async function _fetchAgentLogs(agents) {
             if (!r.ok) continue;
             const d = await r.json();
 
-            // Always update the current-action summary line
-            if (action && d.current_action) {
-                action.textContent = d.current_action.replace(/^#+\s*/, '');
+            // Update the current-action summary line
+            if (action) {
+                action.textContent = d.current_action
+                    ? d.current_action.replace(/^#+\s*/, '')
+                    : (d.lines && d.lines.length ? 'Working...' : 'Initializing...');
             }
 
-            // Only render full log when panel is open (saves DOM churn)
-            if (activePanel !== 'agents') continue;
+            // Always render full log — user wants to see live terminal output
             if (!d.lines || !d.lines.length) continue;
-            const lines = d.lines.slice(-25);
+            const lines = d.lines.slice(-30);
+            const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
             body.innerHTML = lines.map(l => {
                 const escaped = esc(l);
                 let cls = '';
                 if (l.startsWith('✓') || l.includes('completed') || l.includes('✅')) cls = 'ok';
                 else if (l.startsWith('✗') || l.toLowerCase().includes('error') || l.includes('❌')) cls = 'err';
                 else if (_re_tool.test(l)) cls = 'tool';
-                else if (l.startsWith('#') || l.includes('INFO') || l.startsWith('*')) cls = 'info';
-                else if (l.trim() === '' || l.startsWith('---')) cls = 'dim';
+                else if (l.startsWith('#') || l.startsWith('**')) cls = 'info';
+                else if (l.trim() === '' || l.startsWith('---') || l.startsWith('```')) cls = 'dim';
                 return `<div class="agent-terminal-line ${cls}">${escaped}</div>`;
             }).join('');
-            body.scrollTop = body.scrollHeight;
+            if (atBottom) body.scrollTop = body.scrollHeight;
         } catch (_) {}
     }
 }
