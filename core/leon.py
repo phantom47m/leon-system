@@ -1422,7 +1422,10 @@ Vision: {vision_desc}
         project = self._resolve_project(project_name, message)
 
         if not project:
-            return await self._respond_conversationally(message)
+            projects = self.projects_config.get("projects", [])
+            if not projects:
+                return "No projects configured — add one to config/projects.yaml first."
+            return f"Couldn't match that to a project. Known projects: {', '.join(p['name'] for p in projects)}. Which one?"
 
         brief_path = await self._create_task_brief(task_desc, project)
 

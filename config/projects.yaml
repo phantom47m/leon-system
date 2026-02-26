@@ -1,12 +1,23 @@
 # Define your projects here. Each project is a codebase your AI can spawn agents on.
-# Example:
-# - name: "my-website"
-#   path: "/home/yourname/my-website"
-#   type: "web"
-#   aliases: ["website", "site"]
-#   tech_stack: ["React", "Node.js"]
 
-projects: []
+projects:
+  - name: "Motorev"
+    path: "/home/deansabr/motorev-v2"
+    type: "mobile"
+    aliases: ["motorev", "the app", "moto", "mv2", "motorev app", "the motorev app"]
+    tech_stack: ["React Native", "Expo", "TypeScript"]
+
+  - name: "Leon System"
+    path: "/home/deansabr/leon-system"
+    type: "python"
+    aliases: ["leon", "leon system", "the ai", "yourself", "your own code", "leon-system"]
+    tech_stack: ["Python", "aiohttp", "asyncio"]
+
+  - name: "System"
+    path: "/home/deansabr"
+    type: "system"
+    aliases: ["system", "machine", "pc", "computer", "vm", "macos", "setup", "install", "configure", "infrastructure"]
+    tech_stack: ["bash", "linux"]
 
 default_preferences:
   coding_style: "clean, well-commented"
