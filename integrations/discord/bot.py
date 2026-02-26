@@ -264,36 +264,91 @@ def _pick_monitor(monitors: list[dict], hint: str) -> dict | None:
 async def _take_screenshot(monitor: dict | None = None) -> str | None:
     """
     Capture the screen (or a single monitor) and return the temp file path.
-    Uses scrot with geometry for per-monitor crops; falls back to ImageMagick import.
+
+    On Wayland (Pop!_OS default), scrot/import capture a black XWayland root window.
+    The fix: capture the full desktop via the freedesktop D-Bus screenshot portal,
+    then crop to the requested monitor geometry using Pillow.
+
+    Falls back through multiple methods so it always degrades gracefully.
     """
     path = os.path.join(tempfile.gettempdir(), "leon_discord_screenshot.png")
-    env  = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")}
+    full_path = os.path.join(tempfile.gettempdir(), "leon_discord_full.png")
     loop = asyncio.get_event_loop()
 
-    def _run():
+    session_type = os.environ.get("XDG_SESSION_TYPE", "x11").lower()
+    wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+    env = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":1")}
+
+    def _run() -> str | None:
+        # ── Method 1: pyscreenshot freedesktop D-Bus portal (Wayland-native) ──
+        # Works on GNOME/Wayland without sudo or special setup.
+        if session_type == "wayland" or wayland_display:
+            try:
+                import pyscreenshot as ImageGrab
+                full = ImageGrab.grab(backend="freedesktop_dbus")
+                if full and _is_real_image(full):
+                    if monitor:
+                        x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+                        cropped = full.crop((x, y, x + w, y + h))
+                        cropped.save(path, "PNG", optimize=True, quality=85)
+                    else:
+                        full.save(path, "PNG", optimize=True, quality=85)
+                    if os.path.exists(path) and os.path.getsize(path) > 1000:
+                        return path
+            except Exception as e:
+                logger.debug("freedesktop_dbus failed: %s", e)
+
+        # ── Method 2: gnome-screenshot (works on X11 and Wayland via portal) ──
+        try:
+            r = subprocess.run(
+                ["gnome-screenshot", "-f", full_path],
+                capture_output=True, timeout=10, env=env
+            )
+            if r.returncode == 0 and _file_ok(full_path):
+                if monitor:
+                    _crop_and_save(full_path, path, monitor)
+                else:
+                    import shutil; shutil.copy2(full_path, path)
+                if _file_ok(path):
+                    return path
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # ── Method 3: grim (Wayland-native, needs to be installed) ──
+        if session_type == "wayland" or wayland_display:
+            try:
+                grim_cmd = ["grim"]
+                if monitor:
+                    x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+                    grim_cmd += ["-g", f"{x},{y} {w}x{h}"]
+                grim_cmd.append(path)
+                r = subprocess.run(grim_cmd, capture_output=True, timeout=10, env=env)
+                if r.returncode == 0 and _file_ok(path):
+                    return path
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # ── Method 4: scrot / ImageMagick (X11 only — black on Wayland, last resort) ──
         if monitor:
             x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
-            cmds = [
-                # scrot: -a x,y,w,h
+            x11_cmds = [
                 ["scrot", "-a", f"{x},{y},{w},{h}", "-q", "85", path],
-                # ImageMagick import with crop
-                ["import", "-window", "root",
-                 "-crop", f"{w}x{h}+{x}+{y}", "+repage", path],
+                ["import", "-window", "root", "-crop", f"{w}x{h}+{x}+{y}", "+repage", path],
             ]
         else:
-            cmds = [
+            x11_cmds = [
                 ["scrot", "-q", "85", path],
-                ["gnome-screenshot", "-f", path],
                 ["import", "-window", "root", path],
             ]
-
-        for cmd in cmds:
+        for cmd in x11_cmds:
             try:
                 r = subprocess.run(cmd, capture_output=True, timeout=10, env=env)
-                if r.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
+                if r.returncode == 0 and _file_ok(path) and not _is_black_image(path):
                     return path
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
+
+        logger.error("All screenshot methods failed for session_type=%s", session_type)
         return None
 
     try:
@@ -301,6 +356,45 @@ async def _take_screenshot(monitor: dict | None = None) -> str | None:
     except Exception as e:
         logger.error("Screenshot error: %s", e)
         return None
+
+
+def _file_ok(path: str, min_bytes: int = 1000) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > min_bytes
+
+
+def _is_real_image(img) -> bool:
+    """Return True if the image has actual content (not all black)."""
+    try:
+        # Sample a few pixels across the image
+        w, h = img.size
+        samples = [img.getpixel((w * i // 8, h // 2)) for i in range(1, 8)]
+        return any(sum(p[:3]) > 30 for p in samples)
+    except Exception:
+        return True  # assume real if we can't check
+
+
+def _is_black_image(path: str) -> bool:
+    """Return True if a saved image file is all-black (captures failed silently)."""
+    try:
+        from PIL import Image
+        img = Image.open(path)
+        w, h = img.size
+        samples = [img.getpixel((w * i // 8, h // 2)) for i in range(1, 8)]
+        return all(sum(p[:3]) <= 30 for p in samples)
+    except Exception:
+        return False
+
+
+def _crop_and_save(src_path: str, dst_path: str, monitor: dict):
+    """Crop a full-desktop screenshot to a specific monitor and save."""
+    try:
+        from PIL import Image
+        img = Image.open(src_path)
+        x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+        img.crop((x, y, x + w, y + h)).save(dst_path, "PNG", optimize=True, quality=85)
+    except Exception as e:
+        logger.warning("Crop failed: %s", e)
+        import shutil; shutil.copy2(src_path, dst_path)
 
 
 # ── Message helpers ───────────────────────────────────────────────────────────
