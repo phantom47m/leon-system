@@ -144,13 +144,26 @@ class PlanMode:
         file_listing = self._get_file_listing(project["path"])
         key_content = self._read_key_files(project["path"])
 
+        project_context = project.get("context", "")
+        context_section = f"\nPROJECT CONTEXT (read carefully):\n{project_context}\n" if project_context else ""
+
+        infra_note = ""
+        if project.get("type") == "system" or "(no source files" in file_listing:
+            infra_note = """
+IMPORTANT — INFRASTRUCTURE / SYSTEM ADMINISTRATION MODE:
+This is NOT a software project. Do not generate code tasks.
+Each task brief must contain the EXACT shell commands to run, in sequence.
+Example brief format: "Run: sudo apt install -y qemu-system-x86_64 qemu-utils ovmf virt-manager\\nThen run: git clone https://github.com/kholia/OSX-KVM.git /home/deansabr/macos-vm/OSX-KVM"
+Agents have sudo access, bash, internet connectivity, and run with --dangerously-skip-permissions.
+Tasks are infrastructure steps, not code changes.
+"""
+
         prompt = f"""You are a senior software architect creating an autonomous execution plan.
 
 GOAL: {goal}
 PROJECT: {project["name"]}
 PATH: {project["path"]}
-TECH STACK: {", ".join(project.get("tech_stack", []))}
-
+TECH STACK: {", ".join(project.get("tech_stack", []))}{context_section}
 FILE STRUCTURE:
 {file_listing}
 
@@ -190,7 +203,7 @@ Design rules:
 - Later phases are features/screens that build on the foundation — set parallel: true
 - files_owned paths must be relative to the project root
 - Max 3 phases, max 5 tasks per phase
-- Only include tasks that directly achieve the goal — no gold-plating"""
+- Only include tasks that directly achieve the goal — no gold-plating{infra_note}"""
 
         result = await self.leon.api.analyze_json(prompt)
 
@@ -420,7 +433,8 @@ created: {datetime.now().isoformat()}
     def _get_file_listing(self, project_path: str) -> str:
         """Get a sorted list of source files in the project."""
         try:
-            extensions = ["*.ts", "*.tsx", "*.py", "*.js", "*.jsx"]
+            extensions = ["*.ts", "*.tsx", "*.py", "*.js", "*.jsx",
+                          "*.sh", "*.yaml", "*.yml", "*.md", "*.conf", "*.json"]
             files = []
             for ext in extensions:
                 for p in Path(project_path).rglob(ext):

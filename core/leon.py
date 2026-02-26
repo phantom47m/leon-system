@@ -361,6 +361,11 @@ class Leon:
                 logger.info(f"Night mode auto-resumed: {len(pending)} pending task(s) dispatching")
             asyncio.create_task(_resume_night())
 
+        # Clear stale active_tasks — any tasks from previous Leon process are dead
+        self.memory.memory["active_tasks"] = {}
+        self.memory.save(force=True)
+        logger.info("Cleared stale active_tasks from memory on startup")
+
         # Resume plan mode — if a plan was mid-execution when Leon last stopped, pick it up
         saved_plan = self.plan_mode.load_saved_plan()
         if saved_plan and saved_plan.get("status") == "executing":

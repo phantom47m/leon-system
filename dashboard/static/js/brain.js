@@ -133,7 +133,7 @@ const PANEL_META = {
     system:  { arc: 'arc-system', hint: 'SYSTEM',  color: '#00d4ff' },
     agents:  { arc: 'arc-agents', hint: 'AGENTS',  color: '#00d4ff' },
     feed:    { arc: 'arc-feed',   hint: 'FEED',    color: '#00ffaa' },
-    status:  { arc: 'arc-status', hint: 'STATUS',  color: '#8888ff' },
+    projects: { arc: 'arc-status', hint: 'PROJECTS', color: '#8888ff' },
 };
 
 function openPanel(name) { sfx('open');
@@ -150,6 +150,7 @@ function openPanel(name) { sfx('open');
     activePanel = name;
     try { localStorage.setItem('leon_last_panel', name); } catch {}
     if (name === 'feed') { feedUnread = 0; document.title = 'LEON — Neural Interface'; }
+    if (name === 'projects') { fetchProjects(); }
 }
 
 function closePanel(name) { sfx('close');
@@ -199,7 +200,7 @@ function initNavArcs() {
         'hit-agents': 'agents',
         'hit-feed':   'feed',
         'hit-system': 'system',
-        'hit-status': 'status',
+        'hit-status': 'projects',
     };
     for (const [hitId, panelName] of Object.entries(hitMap)) {
         const el = document.getElementById(hitId);
@@ -243,6 +244,39 @@ function initNavArcs() {
             else if (arc) arc.removeAttribute('filter');
         });
     }
+}
+
+// ── Projects panel ─────────────────────────────────────
+async function fetchProjects() {
+    const list = document.getElementById('projects-list');
+    if (!list) return;
+    list.innerHTML = '<div class="iv sm" style="opacity:0.4">Loading…</div>';
+    try {
+        const res = await fetch('/api/projects');
+        const projects = await res.json();
+        if (!projects.length) {
+            list.innerHTML = '<div class="iv sm" style="opacity:0.4">No projects configured</div>';
+            return;
+        }
+        list.innerHTML = projects.map(p => `
+            <div class="proj-item" onclick="openProject('${p.path.replace(/'/g, "\\'")}')">
+                <div class="proj-name">${p.name}</div>
+                <div class="proj-meta">${(p.tech_stack || []).join(' · ') || p.type || ''}</div>
+            </div>
+        `).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="iv sm" style="color:#ff3355">Failed to load</div>';
+    }
+}
+
+async function openProject(path) {
+    try {
+        await fetch('/api/projects/open', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+    } catch {}
 }
 
 // MIC toggle — sends voice command to Leon via WebSocket
@@ -807,7 +841,7 @@ async function pollHealth() {
             const sapp = d.leon.screen?.active_app;
             set('screen-activity', `Activity: ${(sa   && sa   !== 'unknown') ? sa   : '--'}`);
             set('screen-app',      `App: ${(sapp && sapp !== 'unknown') ? sapp : '--'}`);
-            if (d.leon.active_agents !== undefined) set('status-agents', `${d.leon.active_agents} AGENT${d.leon.active_agents !== 1 ? 'S' : ''} ACTIVE`);
+            // (status-agents moved to agents panel)
         }
     } catch { /* silent */ }
 }
@@ -951,7 +985,7 @@ function initCmd() {
             if (e.key === '1') { e.preventDefault(); togglePanel('system'); }
             else if (e.key === '2') { e.preventDefault(); togglePanel('agents'); }
             else if (e.key === '3') { e.preventDefault(); togglePanel('feed'); }
-            else if (e.key === '4') { e.preventDefault(); togglePanel('status'); }
+            else if (e.key === '4') { e.preventDefault(); togglePanel('projects'); }
         }
     });
 }

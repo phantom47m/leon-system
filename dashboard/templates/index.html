@@ -131,19 +131,13 @@
             <button id="feed-scroll-resume" onclick="feedScrollResume()" style="display:none;width:100%;margin-top:6px;padding:4px 0;background:rgba(0,180,255,0.06);border:1px solid rgba(0,180,255,0.18);border-radius:3px;color:rgba(0,212,255,0.6);font-family:Orbitron,monospace;font-size:8px;letter-spacing:2px;cursor:pointer;justify-content:center;align-items:center;gap:4px;transition:all 0.2s">↓ NEW MESSAGES</button>
         </div>
 
-        <!-- ══ STATUS PANEL (slides up-left) ══ -->
-        <div class="hub-panel panel-topleft" id="panel-status">
+        <!-- ══ PROJECTS PANEL (slides up-left) ══ -->
+        <div class="hub-panel panel-topleft" id="panel-projects">
             <div class="panel-header">
-                <span class="panel-title">STATUS</span>
-                <button class="panel-close" onclick="closePanel('status')">✕</button>
+                <span class="panel-title">PROJECTS</span>
+                <button class="panel-close" onclick="closePanel('projects')">✕</button>
             </div>
-            <div class="ir"><span class="il">ALERTS</span><span class="iv" id="notif-total">0</span></div>
-            <div class="ir"><span class="il">PENDING</span><span class="iv" id="notif-pending">0</span></div>
-            <div class="pdiv"></div>
-            <div class="iv sm" id="status-agents" style="color:#ff7700">0 AGENTS ACTIVE</div>
-            <div class="pdiv"></div>
-            <div class="iv sm" id="screen-activity">Activity: --</div>
-            <div class="iv sm" id="screen-app">App: --</div>
+            <div id="projects-list"><div class="iv sm" style="opacity:0.4">Loading…</div></div>
         </div>
 
         <!-- ══ CENTRAL HUB SVG ══ -->

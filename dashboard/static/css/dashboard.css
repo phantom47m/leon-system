@@ -269,6 +269,35 @@ html, body {
     background: linear-gradient(90deg, transparent, rgba(0,180,255,0.18), transparent);
 }
 
+/* ── Project list items ──────────────────────────── */
+.proj-item {
+    padding: 7px 8px;
+    margin-bottom: 4px;
+    border: 1px solid rgba(136,136,255,0.15);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+.proj-item:hover {
+    background: rgba(136,136,255,0.08);
+    border-color: rgba(136,136,255,0.45);
+}
+.proj-name {
+    font-family: var(--font-hud);
+    font-size: 9px;
+    font-weight: 700;
+    color: #8888ff;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+.proj-meta {
+    font-family: var(--font-hud);
+    font-size: 7px;
+    color: rgba(136,136,255,0.45);
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+
 /* ── Metric bars ─────────────────────────────────── */
 .bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
 .bl { font-family: var(--font-hud); font-size: 7px; letter-spacing: 1px; color: rgba(0,212,255,0.4); min-width: 26px; }

@@ -476,6 +476,43 @@ async def api_openclaw_url(request):
         return web.json_response({"url": "http://127.0.0.1:18789", "error": str(e)})
 
 
+async def api_projects(request):
+    """GET /api/projects — Return all configured projects."""
+    leon = request.app.get("leon_core")
+    if leon and hasattr(leon, "projects_config"):
+        projects = leon.projects_config.get("projects", [])
+    else:
+        try:
+            import yaml
+            cfg_path = Path(__file__).parent.parent / "config" / "projects.yaml"
+            projects = yaml.safe_load(cfg_path.read_text()).get("projects", [])
+        except Exception:
+            projects = []
+    return web.json_response([
+        {
+            "name": p.get("name", ""),
+            "path": p.get("path", ""),
+            "type": p.get("type", ""),
+            "tech_stack": p.get("tech_stack", []),
+        }
+        for p in projects
+    ])
+
+
+async def api_projects_open(request):
+    """POST /api/projects/open — Open a project folder in the file manager."""
+    try:
+        data = await request.json()
+        path = data.get("path", "")
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not path or not Path(path).exists():
+        return web.json_response({"error": "path not found"}, status=404)
+    subprocess.Popen(["xdg-open", path], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return web.json_response({"ok": True})
+
+
 async def api_message(request):
     """
     POST /api/message — HTTP API for external integrations (WhatsApp bridge, etc.)
@@ -1598,6 +1635,8 @@ def create_app(leon_core=None) -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_get("/api/health", api_health)
     app.router.add_get("/api/openclaw-url", api_openclaw_url)
+    app.router.add_get("/api/projects", api_projects)
+    app.router.add_post("/api/projects/open", api_projects_open)
     app.router.add_post("/api/message", api_message)
     app.router.add_get("/api/agent-log/{agent_id}", api_agent_log)
     app.router.add_get("/ws", websocket_handler)
