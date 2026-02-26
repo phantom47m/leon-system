@@ -121,6 +121,16 @@ class PlanMode:
             await self._broadcast_plan(plan)  # final state
             logger.info(f"Plan {plan_id} done: {summary}")
 
+            # Notify via Discord
+            done = sum(1 for p in plan.get("phases", []) for t in p.get("tasks", []) if t.get("status") == "completed")
+            total = sum(len(p.get("tasks", [])) for p in plan.get("phases", []))
+            discord_msg = (
+                f"✅ **Plan complete** — {plan.get('goal', '')}\n"
+                f"{done}/{total} tasks done\n"
+                f"Project: {project.get('name', '')}"
+            )
+            await self.leon._send_discord_message(discord_msg)
+
         except asyncio.CancelledError:
             logger.info(f"Plan {plan_id} cancelled")
         except Exception as e:
