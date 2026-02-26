@@ -361,6 +361,34 @@ class Leon:
                 logger.info(f"Night mode auto-resumed: {len(pending)} pending task(s) dispatching")
             asyncio.create_task(_resume_night())
 
+        # Resume plan mode — if a plan was mid-execution when Leon last stopped, pick it up
+        saved_plan = self.plan_mode.load_saved_plan()
+        if saved_plan and saved_plan.get("status") == "executing":
+            async def _resume_plan():
+                await asyncio.sleep(10)
+                # Reset any "running" tasks back to "pending" — their agents died with the restart
+                for phase in saved_plan.get("phases", []):
+                    for task in phase.get("tasks", []):
+                        if task.get("status") == "running":
+                            task["status"] = "pending"
+                            task["agent_id"] = None
+                self.plan_mode._save_plan(saved_plan)
+                # Find the project from the plan
+                proj_name = saved_plan.get("project", "")
+                project = self._resolve_project(proj_name, proj_name)
+                if not project:
+                    projects = self.projects_config.get("projects", [])
+                    project = projects[0] if projects else None
+                if project:
+                    logger.info(f"Resuming plan '{saved_plan.get('goal','')[:60]}' from restart")
+                    await self.plan_mode._execute_plan(saved_plan, project)
+                    saved_plan["status"] = "complete"
+                    self.plan_mode._save_plan(saved_plan)
+                    self.plan_mode._active = False
+            self.plan_mode._active = True
+            self.plan_mode.current_plan = saved_plan
+            asyncio.create_task(_resume_plan())
+
         logger.info("Leon is now running — all systems active")
 
     def _run_health_checks(self):
