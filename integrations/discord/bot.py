@@ -56,15 +56,14 @@ class AIDiscordBot(discord.Client):
 
         is_dm = isinstance(message.channel, discord.DMChannel)
         is_mention = self.user in message.mentions
+        is_allowed = not self.allowed_user_ids or message.author.id in self.allowed_user_ids
 
-        # Only respond to DMs or direct mentions
-        if not is_dm and not is_mention:
+        if not is_allowed:
+            # Unknown user — only reply to reject if they DM'd or @mentioned directly
+            if is_dm or is_mention:
+                await message.reply("You're not authorised to use this bot.")
             return
-
-        # User whitelist check (if configured)
-        if self.allowed_user_ids and message.author.id not in self.allowed_user_ids:
-            await message.reply("You're not authorised to use this bot.")
-            return
+        # Allowed user — respond to everything (no @ required)
 
         # Strip bot mention from message text
         text = message.content
