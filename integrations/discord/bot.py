@@ -14,13 +14,15 @@ Setup:
 Usage:
   - DM the bot directly, or
   - Mention @BotName in any channel it has access to
-  - Say "screenshot" to get a screenshot of the PC
+  - "screenshot" → all monitors combined
+  - "screenshot monitor 2" / "screenshot left monitor" → specific monitor
 """
 
 import argparse
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -69,11 +71,9 @@ class AIDiscordBot(discord.Client):
         is_allowed = not self.allowed_user_ids or message.author.id in self.allowed_user_ids
 
         if not is_allowed:
-            # Unknown user — only reply to reject if they DM'd or @mentioned directly
             if is_dm or is_mention:
                 await message.reply("You're not authorised to use this bot.")
             return
-        # Allowed user — respond to everything (no @ required)
 
         # Strip bot mention from message text
         text = message.content
@@ -84,21 +84,28 @@ class AIDiscordBot(discord.Client):
 
         msg_lower = text.lower()
 
-        # Screenshot request — grab and send without going through Leon
+        # Screenshot request
         if any(kw in msg_lower for kw in SCREENSHOT_KEYWORDS):
             async with message.channel.typing():
-                path = await _take_screenshot()
+                loop = asyncio.get_event_loop()
+                monitors = await loop.run_in_executor(None, _get_monitors)
+                monitor = _pick_monitor(monitors, msg_lower)
+                path = await _take_screenshot(monitor)
+
+            if monitor:
+                idx = monitors.index(monitor) + 1
+                label = f"Monitor {idx} ({monitor['name']}, {monitor['width']}×{monitor['height']})"
+            else:
+                label = f"All {len(monitors)} monitors" if monitors else "Screen"
+
             if path:
-                await message.reply(
-                    "Here's your screen:",
-                    file=discord.File(path, filename="screenshot.png"),
-                )
+                await message.reply(f"{label}:", file=discord.File(path, filename="screenshot.png"))
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
             else:
-                await message.reply("Couldn't take a screenshot — scrot/gnome-screenshot not installed.")
+                await message.reply("Couldn't take a screenshot — scrot not installed.")
             return
 
         # Show typing indicator while waiting for Leon
@@ -109,12 +116,10 @@ class AIDiscordBot(discord.Client):
         wants_screenshot = "[SCREENSHOT]" in response
         clean_response = response.replace("[SCREENSHOT]", "").strip()
 
-        # Send text response in chunks
         chunks = _split_message(clean_response) if clean_response else []
         for i, chunk in enumerate(chunks):
             if i == 0 and wants_screenshot:
-                # Attach screenshot to the first chunk
-                path = await _take_screenshot()
+                path = await _take_screenshot(None)
                 if path:
                     await message.reply(chunk, file=discord.File(path, filename="screenshot.png"))
                     try:
@@ -126,9 +131,8 @@ class AIDiscordBot(discord.Client):
             else:
                 await message.reply(chunk)
 
-        # No text but screenshot requested
         if not chunks and wants_screenshot:
-            path = await _take_screenshot()
+            path = await _take_screenshot(None)
             if path:
                 await message.reply(file=discord.File(path, filename="screenshot.png"))
                 try:
@@ -162,25 +166,111 @@ class AIDiscordBot(discord.Client):
             return f"Something went wrong: {e}"
 
 
-async def _take_screenshot() -> str | None:
-    """Take a screenshot and return the temp file path, or None on failure."""
+# ── Screenshot helpers ────────────────────────────────────────────────────────
+
+def _get_monitors() -> list[dict]:
+    """Parse xrandr output and return connected monitors sorted left → right."""
+    try:
+        env = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")}
+        result = subprocess.run(["xrandr"], capture_output=True, text=True, timeout=5, env=env)
+        monitors = []
+        for line in result.stdout.splitlines():
+            m = re.match(r"(\S+) connected (primary )?(\d+)x(\d+)\+(\d+)\+(\d+)", line)
+            if m:
+                monitors.append({
+                    "name":    m.group(1),
+                    "primary": bool(m.group(2)),
+                    "width":   int(m.group(3)),
+                    "height":  int(m.group(4)),
+                    "x":       int(m.group(5)),
+                    "y":       int(m.group(6)),
+                })
+        monitors.sort(key=lambda mon: mon["x"])
+        logger.info("Detected %d monitor(s): %s", len(monitors),
+                    [(m["name"], f"{m['width']}x{m['height']}+{m['x']}+{m['y']}") for m in monitors])
+        return monitors
+    except Exception as e:
+        logger.warning("xrandr failed: %s", e)
+        return []
+
+
+def _pick_monitor(monitors: list[dict], hint: str) -> dict | None:
+    """
+    Pick a monitor from natural language. Returns None → capture all.
+
+    Examples:
+      "screenshot monitor 2"     → monitors[1]
+      "screenshot left monitor"  → monitors[0]
+      "screenshot right screen"  → monitors[-1]
+      "screenshot middle"        → monitors[middle index]
+      "screenshot main"          → whichever is primary
+      "screenshot"               → None (all)
+    """
+    if not monitors:
+        return None
+
+    h = hint.lower()
+
+    # Primary / main
+    if any(w in h for w in ["primary", "main", "default"]):
+        for mon in monitors:
+            if mon["primary"]:
+                return mon
+        return monitors[0]
+
+    # Numbered: "monitor 1", "screen 2", "display 3", "#2"
+    num_match = re.search(r"(?:monitor|screen|display|#)\s*(\d+)", h)
+    if num_match:
+        n = int(num_match.group(1))
+        if 1 <= n <= len(monitors):
+            return monitors[n - 1]
+
+    # Position keywords
+    if any(w in h for w in ["left", "first", "1st"]):
+        return monitors[0]
+    if any(w in h for w in ["right", "last", "third", "3rd"]):
+        return monitors[-1]
+    if any(w in h for w in ["center", "centre", "middle", "second", "2nd"]):
+        return monitors[len(monitors) // 2]
+
+    # Named monitor (e.g. "show me DP-1")
+    for mon in monitors:
+        if mon["name"].lower() in h:
+            return mon
+
+    return None  # no hint → capture everything
+
+
+async def _take_screenshot(monitor: dict | None = None) -> str | None:
+    """
+    Capture the screen (or a single monitor) and return the temp file path.
+    Uses scrot with geometry for per-monitor crops; falls back to ImageMagick import.
+    """
     path = os.path.join(tempfile.gettempdir(), "leon_discord_screenshot.png")
+    env  = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")}
     loop = asyncio.get_event_loop()
 
     def _run():
-        # Try tools in order of preference
-        for cmd in [
-            ["scrot", "-q", "85", path],
-            ["gnome-screenshot", "-f", path],
-            ["import", "-window", "root", path],
-            ["xwd", "-root", "-silent", "-out", path + ".xwd"],  # fallback, different format
-        ]:
+        if monitor:
+            x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
+            cmds = [
+                # scrot: -a x,y,w,h
+                ["scrot", "-a", f"{x},{y},{w},{h}", "-q", "85", path],
+                # ImageMagick import with crop
+                ["import", "-window", "root",
+                 "-crop", f"{w}x{h}+{x}+{y}", "+repage", path],
+            ]
+        else:
+            cmds = [
+                ["scrot", "-q", "85", path],
+                ["gnome-screenshot", "-f", path],
+                ["import", "-window", "root", path],
+            ]
+
+        for cmd in cmds:
             try:
-                result = subprocess.run(
-                    cmd, capture_output=True, timeout=10,
-                    env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")}
-                )
-                if result.returncode == 0 and os.path.exists(path):
+                r = subprocess.run(cmd, capture_output=True, timeout=10, env=env)
+                if r.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
                     return path
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
@@ -189,9 +279,11 @@ async def _take_screenshot() -> str | None:
     try:
         return await loop.run_in_executor(None, _run)
     except Exception as e:
-        logger.error("Screenshot failed: %s", e)
+        logger.error("Screenshot error: %s", e)
         return None
 
+
+# ── Message helpers ───────────────────────────────────────────────────────────
 
 def _split_message(text: str) -> list[str]:
     """Split a long message into Discord-safe chunks."""
@@ -202,7 +294,6 @@ def _split_message(text: str) -> list[str]:
         if len(text) <= MAX_DISCORD_LENGTH:
             chunks.append(text)
             break
-        # Try to split on newline boundary
         split_at = text.rfind("\n", 0, MAX_DISCORD_LENGTH)
         if split_at == -1:
             split_at = MAX_DISCORD_LENGTH
@@ -219,13 +310,15 @@ def _load_token_from_config(config_dir: str) -> str:
     return ""
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(description="Discord bridge for Leon AI")
-    parser.add_argument("--token",        required=True, help="Discord bot token")
-    parser.add_argument("--leon-url",     default="http://localhost:3000", help="Leon dashboard URL")
-    parser.add_argument("--leon-token",   default="", help="Leon API bearer token")
-    parser.add_argument("--config-dir",   default="config", help="Path to Leon config dir")
-    parser.add_argument("--allowed-users", default="", help="Comma-separated Discord user IDs allowed to use bot")
+    parser.add_argument("--token",         required=True,                      help="Discord bot token")
+    parser.add_argument("--leon-url",      default="http://localhost:3000",    help="Leon dashboard URL")
+    parser.add_argument("--leon-token",    default="",                         help="Leon API bearer token")
+    parser.add_argument("--config-dir",    default="config",                   help="Path to Leon config dir")
+    parser.add_argument("--allowed-users", default="",                         help="Comma-separated Discord user IDs")
     args = parser.parse_args()
 
     leon_token = args.leon_token or _load_token_from_config(args.config_dir)
