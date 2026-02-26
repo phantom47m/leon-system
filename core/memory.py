@@ -241,3 +241,135 @@ class MemorySystem:
         """Store a learned context key-value pair."""
         self.memory.setdefault("learned_context", {})[key] = value
         self.save()
+
+    # ------------------------------------------------------------------
+    # Autonomy: memory compaction + daily archive
+    # ------------------------------------------------------------------
+
+    CONVERSATION_HARD_LIMIT = 200   # lines before compaction triggers
+    COMPACTION_TARGET       = 40    # keep last N messages after compaction
+
+    def memory_update(self, summary: str, source: str = "agent"):
+        """
+        Store a compact summary artifact in long-term memory.
+        Called at end of each Plan/REFLECT step.
+        Also writes memory/long_term.md for human review.
+        """
+        entry = {
+            "ts":      datetime.now().isoformat(),
+            "source":  source,
+            "summary": summary[:500],
+        }
+        self.memory.setdefault("memory_updates", []).append(entry)
+        # Keep last 100 summaries
+        self.memory["memory_updates"] = self.memory["memory_updates"][-100:]
+        self.save()
+
+        # Write human-readable long_term.md
+        lt_path = Path("memory/long_term.md")
+        lt_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = lt_path.read_text() if lt_path.exists() else "# Long-Term Memory\n\n"
+            ts_short = datetime.now().strftime("%Y-%m-%d %H:%M")
+            lt_path.write_text(
+                existing + f"\n## [{ts_short}] {source}\n{summary[:500]}\n"
+            )
+        except Exception as e:
+            logger.warning(f"Could not write long_term.md: {e}")
+
+    def compact(self) -> bool:
+        """
+        Compress conversation history if it exceeds CONVERSATION_HARD_LIMIT.
+        Keeps the last COMPACTION_TARGET messages; older ones are summarized
+        as a single archive entry and written to memory/daily/<date>.md.
+        Returns True if compaction was performed.
+        """
+        history = self.memory.get("conversation_history", [])
+        if len(history) <= self.CONVERSATION_HARD_LIMIT:
+            return False
+
+        # Archive the old messages
+        archive    = history[: -self.COMPACTION_TARGET]
+        kept       = history[-self.COMPACTION_TARGET :]
+        today      = datetime.now().strftime("%Y-%m-%d")
+        archive_dir = Path("memory/daily")
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"{today}.md"
+
+        # Build archive content
+        lines = [f"# Conversation Archive — {today}\n"]
+        lines.append(f"_Compacted {len(archive)} messages at {datetime.now().strftime('%H:%M')}_\n\n")
+        for msg in archive[-50:]:  # Last 50 of the archive for context
+            role    = msg.get("role", "?")
+            content = msg.get("content", "")[:200]
+            ts      = msg.get("timestamp", "")[:16]
+            lines.append(f"**[{ts}] {role}:** {content}\n")
+
+        try:
+            with open(archive_path, "a") as f:
+                f.write("\n".join(lines))
+        except Exception as e:
+            logger.warning(f"Could not write archive: {e}")
+
+        self.memory["conversation_history"] = kept
+        self.save(force=True)
+        logger.info(
+            f"Memory compacted: archived {len(archive)} messages, kept {len(kept)}"
+        )
+        return True
+
+    def save_daily(self) -> str:
+        """
+        Write memory/daily/YYYY-MM-DD.md with today's stats.
+        Idempotent — safe to call multiple times per day.
+        Returns path written.
+        """
+        today     = datetime.now().strftime("%Y-%m-%d")
+        daily_dir = Path("memory/daily")
+        daily_dir.mkdir(parents=True, exist_ok=True)
+        path      = daily_dir / f"{today}.md"
+
+        completed = self.memory.get("completed_tasks", [])
+        today_tasks = [
+            t for t in completed
+            if t.get("completed_at", "").startswith(today)
+        ]
+        updates = [
+            u for u in self.memory.get("memory_updates", [])
+            if u.get("ts", "").startswith(today)
+        ]
+
+        content = (
+            f"# Leon Daily — {today}\n\n"
+            f"## Tasks Completed Today ({len(today_tasks)})\n"
+        )
+        for t in today_tasks[-20:]:
+            content += (
+                f"- [{t.get('completed_at','?')[:16]}] "
+                f"**{t.get('project','?')}** — {t.get('description','?')[:80]}\n"
+            )
+
+        if updates:
+            content += f"\n## Memory Updates ({len(updates)})\n"
+            for u in updates:
+                content += f"- [{u.get('ts','?')[:16]}] {u.get('summary','')[:120]}\n"
+
+        content += f"\n_Saved at {datetime.now().strftime('%H:%M')}_\n"
+
+        try:
+            path.write_text(content)
+        except Exception as e:
+            logger.warning(f"Could not write daily memory: {e}")
+
+        return str(path)
+
+    def ensure_working_context(self):
+        """Create memory/working_context.md if it doesn't exist."""
+        wc = Path("memory/working_context.md")
+        wc.parent.mkdir(parents=True, exist_ok=True)
+        if not wc.exists():
+            wc.write_text(
+                "# Working Context\n\n"
+                "_This file is auto-managed by Leon. "
+                "Add notes here that should persist across sessions._\n"
+            )

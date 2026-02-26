@@ -21,12 +21,35 @@ api:
   temperature: 0.7
 
 agents:
-  max_concurrent: 10
+  max_concurrent: 3       # Hard cap — 16GB RAM safety. Do not raise above 5.
   timeout_minutes: 60
   auto_retry: true
   retry_attempts: 2
   output_directory: "data/agent_outputs"
   brief_directory: "data/task_briefs"
+
+router:
+  # Model routing: heartbeat/trivial → local, code → Claude
+  ollama_model: "llama3.2:3b"         # Local model for $0 health checks
+  ollama_base_url: "http://localhost:11434"
+  heartbeat_to_ollama: true           # NEVER use paid API for health checks
+  trivial_to_ollama: true             # Route simple classification to Ollama too
+
+rag:
+  enabled: true
+  db_dir: "data/rag_db"
+  embedding_model: "all-MiniLM-L6-v2" # Local sentence-transformers (no API cost)
+  chunk_size: 1200
+  chunk_overlap: 150
+  lexical_timeout_ms: 300             # Fail fast if ripgrep is slow
+
+autonomy:
+  # 9-hour overnight run settings
+  max_run_hours: 9
+  pause_for_confirmation: false        # Never block — write pending_action.md instead
+  pending_action_file: "data/pending_action.md"
+  failure_alert_threshold: 3          # Write alert after N consecutive failures
+  alert_dir: "data/alerts"
 
 openclaw:
   config_path: "~/.openclaw/openclaw.json"
@@ -42,15 +65,43 @@ ui:
   show_notifications: true
 
 scheduler:
+  # Non-interactive execution only — tasks must never prompt for input
+  ci_mode: true
   tasks:
     - name: "Daily briefing"
       command: "daily briefing"
       interval_hours: 24
       enabled: true
-    - name: "System health report"
-      command: "/status"
-      interval_hours: 6
-      enabled: false
+      max_runtime_minutes: 5
+      priority: 2
+
+    - name: "Hourly health check"
+      command: "__health_check__"       # Built-in: uses Ollama only ($0)
+      interval_hours: 1
+      enabled: true
+      max_runtime_minutes: 1
+      priority: 1
+
+    - name: "Daily index update"
+      command: "__index_all__"          # Built-in: re-indexes all projects
+      interval_hours: 24
+      enabled: true
+      max_runtime_minutes: 15
+      priority: 3
+
+    - name: "Daily memory summary"
+      command: "__daily_summary__"      # Built-in: writes memory/daily/YYYY-MM-DD.md
+      interval_hours: 24
+      enabled: true
+      max_runtime_minutes: 3
+      priority: 3
+
+    - name: "Weekly repo hygiene"
+      command: "__repo_hygiene__"       # Built-in: checks deps, stale branches
+      interval_hours: 168              # 7 days
+      enabled: true
+      max_runtime_minutes: 10
+      priority: 4
 
 voice:
   stt_provider: "deepgram"

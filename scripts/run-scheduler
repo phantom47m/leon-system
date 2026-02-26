@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""
+Leon Scheduler Runner — executed by the systemd one-shot service.
+Checks which built-in tasks are due and runs them.
+"""
+import asyncio
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
+
+import yaml
+from core.scheduler import run_builtin, TaskScheduler
+
+cfg = yaml.safe_load((ROOT / "config" / "settings.yaml").read_text())
+tasks_cfg = cfg.get("scheduler", {}).get("tasks", [])
+sched = TaskScheduler(tasks_cfg)
+due = sched.get_due_tasks()
+
+if not due:
+    print("No tasks due.")
+    sys.exit(0)
+
+
+async def main():
+    for task in due:
+        cmd = task.get("command", "")
+        if cmd.startswith("__"):
+            ok, msg = await run_builtin(cmd)
+            if ok:
+                sched.mark_completed(task["name"])
+            else:
+                sched.mark_failed(task["name"], msg)
+            print(f"{task['name']}: {msg[:80]}")
+
+
+asyncio.run(main())

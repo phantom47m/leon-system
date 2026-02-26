@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# leon-index — Index a project's source code for RAG search.
+#
+# Usage:
+#   leon-index --project Motorev
+#   leon-index --project Motorev --force
+#   leon-index --all
+#
+# Requires: chromadb + sentence-transformers  (install via upgrade script)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$ROOT"
+exec "${ROOT}/venv/bin/python3" -m tools.indexer "$@"

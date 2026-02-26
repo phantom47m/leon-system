@@ -1,0 +1,1 @@
+{"ts": "2026-02-26T02:24:07.483339", "event": "health_check", "source": "scheduler.__health_check__", "checks": {"system": "Ollama unavailable \u2014 check `ollama serve`", "memory": "Ollama unavailable \u2014 check `ollama serve`"}}

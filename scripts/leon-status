@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""
+leon-status — Autonomous system status report.
+
+Shows: uptime, active tasks, last failures, token routing stats, RAM/CPU/GPU.
+
+Usage:
+    leon-status
+    leon-status --json
+    leon-status --watch    (refresh every 5s)
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# Resolve project root relative to this script
+ROOT = Path(__file__).parent.parent
+
+
+def _read_json(path: Path, default=None):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default if default is not None else {}
+
+
+def get_uptime() -> str:
+    """System uptime."""
+    try:
+        with open("/proc/uptime") as f:
+            secs = float(f.read().split()[0])
+        h, rem = divmod(int(secs), 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    except Exception:
+        return "unknown"
+
+
+def get_leon_uptime() -> str:
+    """How long the Leon main process has been running."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python3 main.py"],
+            capture_output=True, text=True
+        )
+        pid = result.stdout.strip().split("\n")[0]
+        if not pid:
+            return "not running"
+        stat = Path(f"/proc/{pid}/stat").read_text().split()
+        start_jiffies = int(stat[21])
+        hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+        boot_secs = float(open("/proc/uptime").read().split()[0])
+        proc_secs = boot_secs - (start_jiffies / hz)
+        h, rem = divmod(int(proc_secs), 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    except Exception:
+        return "?"
+
+
+def get_memory() -> dict:
+    """RAM stats from /proc/meminfo."""
+    try:
+        info = {}
+        for line in open("/proc/meminfo"):
+            k, v = line.split(":", 1)
+            info[k.strip()] = int(v.strip().split()[0])  # kB
+        total_mb   = info.get("MemTotal",     0) // 1024
+        avail_mb   = info.get("MemAvailable", 0) // 1024
+        used_mb    = total_mb - avail_mb
+        swap_total = info.get("SwapTotal",    0) // 1024
+        swap_free  = info.get("SwapFree",     0) // 1024
+        swap_used  = swap_total - swap_free
+        return {
+            "total_mb": total_mb, "used_mb": used_mb, "avail_mb": avail_mb,
+            "pct": round(used_mb / total_mb * 100, 1) if total_mb else 0,
+            "swap_used_mb": swap_used, "swap_total_mb": swap_total,
+        }
+    except Exception:
+        return {}
+
+
+def get_cpu_pct() -> str:
+    """Snapshot CPU usage."""
+    try:
+        result = subprocess.run(
+            ["top", "-bn1"], capture_output=True, text=True, timeout=3
+        )
+        for line in result.stdout.split("\n"):
+            if "Cpu(s)" in line or "%Cpu" in line:
+                import re
+                m = re.search(r"([\d.]+)\s*us", line)
+                if m:
+                    return f"{m.group(1)}%"
+    except Exception:
+        pass
+    return "?"
+
+
+def get_gpu() -> dict:
+    """nvidia-smi stats."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3
+        )
+        if r.returncode == 0:
+            parts = [p.strip() for p in r.stdout.strip().split(",")]
+            return {
+                "util": f"{parts[0]}%",
+                "vram": f"{parts[1]}MB / {parts[2]}MB",
+                "temp": f"{parts[3]}°C",
+            }
+    except Exception:
+        pass
+    return {}
+
+
+def get_active_agents(root: Path) -> list[dict]:
+    """Read active agents from agent_index.json and task_queue.json."""
+    agents = []
+    idx = _read_json(root / "data" / "agent_index.json", {})
+    for aid, info in idx.items():
+        agents.append({
+            "id":      aid[:8],
+            "status":  info.get("status", "?"),
+            "project": info.get("project_name", "?"),
+            "desc":    info.get("description", "")[:60],
+        })
+    return agents
+
+
+def get_task_stats(root: Path) -> dict:
+    """Aggregate from logs_structured/tasks.jsonl."""
+    log_path = root / "logs_structured" / "tasks.jsonl"
+    if not log_path.exists():
+        # Fall back to memory file
+        mem = _read_json(root / "data" / "leon_memory.json", {})
+        completed = mem.get("completed_tasks", [])
+        active    = mem.get("active_tasks", {})
+        return {
+            "active":    len(active),
+            "completed": len(completed),
+            "failed":    0,
+            "avg_s":     0,
+        }
+    total = completed = failed = 0
+    durations = []
+    try:
+        for line in log_path.read_text().strip().split("\n")[-1000:]:
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                ev = e.get("event", "")
+                if ev == "task_start":    total     += 1
+                elif ev == "task_complete":
+                    completed += 1
+                    if "duration_s" in e: durations.append(float(e["duration_s"]))
+                elif ev == "task_fail":   failed    += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    avg = sum(durations) / len(durations) if durations else 0
+    return {"active": total - completed - failed, "completed": completed,
+            "failed": failed, "avg_s": round(avg, 1)}
+
+
+def get_routing_stats(root: Path) -> dict:
+    """Model routing distribution from logs_structured/router.jsonl."""
+    log_path = root / "logs_structured" / "router.jsonl"
+    stats: dict[str, int] = {}
+    if not log_path.exists():
+        return stats
+    try:
+        for line in log_path.read_text().strip().split("\n")[-200:]:
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                m = e.get("model", "unknown")
+                stats[m] = stats.get(m, 0) + 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return stats
+
+
+def get_recent_failures(root: Path, limit: int = 5) -> list[str]:
+    log_path = root / "logs_structured" / "failures.jsonl"
+    if not log_path.exists():
+        return []
+    entries = []
+    try:
+        for line in reversed(log_path.read_text().strip().split("\n")):
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                msg = e.get("message") or e.get("error") or e.get("description") or "?"
+                ts  = e.get("ts", "")[:16]
+                entries.append(f"[{ts}] {msg[:80]}")
+            except Exception:
+                pass
+            if len(entries) >= limit:
+                break
+    except Exception:
+        pass
+    return entries
+
+
+def get_night_mode(root: Path) -> dict:
+    tasks_path = root / "data" / "night_tasks.json"
+    if not tasks_path.exists():
+        return {"enabled": False, "pending": 0}
+    try:
+        tasks = json.loads(tasks_path.read_text())
+        pending = sum(1 for t in tasks if t.get("status") == "pending")
+        running = sum(1 for t in tasks if t.get("status") == "running")
+        return {"pending": pending, "running": running}
+    except Exception:
+        return {}
+
+
+def get_scheduler_summary(root: Path) -> list[dict]:
+    state_path = root / "data" / "scheduler_state.json"
+    if not state_path.exists():
+        return []
+    try:
+        state = json.loads(state_path.read_text())
+        now = datetime.now()
+        rows = []
+        for name, last_str in state.items():
+            try:
+                last = datetime.fromisoformat(last_str)
+                delta_h = (now - last).total_seconds() / 3600
+                rows.append({"name": name[:40], "last_run": f"{delta_h:.1f}h ago"})
+            except Exception:
+                rows.append({"name": name[:40], "last_run": last_str[:16]})
+        return rows[:8]
+    except Exception:
+        return []
+
+
+# ── Formatters ────────────────────────────────────────────────────────────────
+
+C_RESET  = "\033[0m"
+C_BOLD   = "\033[1m"
+C_CYAN   = "\033[96m"
+C_GREEN  = "\033[92m"
+C_YELLOW = "\033[93m"
+C_RED    = "\033[91m"
+C_DIM    = "\033[2m"
+
+
+def c(text, code):
+    return f"{code}{text}{C_RESET}"
+
+
+def print_status(root: Path):
+    mem      = get_memory()
+    gpu      = get_gpu()
+    stats    = get_task_stats(root)
+    route    = get_routing_stats(root)
+    failures = get_recent_failures(root)
+    night    = get_night_mode(root)
+    sched    = get_scheduler_summary(root)
+    cpu_pct  = get_cpu_pct()
+
+    now_str  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    leon_up  = get_leon_uptime()
+    sys_up   = get_uptime()
+
+    print(f"\n{c('═' * 60, C_CYAN)}")
+    print(f"  {c('LEON STATUS', C_BOLD)}  {c(now_str, C_DIM)}")
+    print(f"{c('═' * 60, C_CYAN)}\n")
+
+    # ── Uptime ────────────────────────────────────────────────────────────────
+    print(f"  {c('UPTIME', C_BOLD)}")
+    print(f"    Leon process : {c(leon_up, C_GREEN)}")
+    print(f"    System       : {sys_up}")
+
+    # ── Resources ─────────────────────────────────────────────────────────────
+    print(f"\n  {c('RESOURCES', C_BOLD)}")
+    mem_color = C_RED if mem.get("pct", 0) > 85 else C_GREEN
+    print(f"    CPU  : {cpu_pct}")
+    print(
+        f"    RAM  : {c(f\"{mem.get('used_mb',0)}MB / {mem.get('total_mb',0)}MB ({mem.get('pct',0)}%)\", mem_color)}"
+    )
+    if mem.get("swap_used_mb", 0) > 0:
+        print(f"    SWAP : {mem['swap_used_mb']}MB / {mem['swap_total_mb']}MB")
+    if gpu:
+        print(f"    GPU  : {gpu.get('util','?')} util — {gpu.get('vram','?')} VRAM — {gpu.get('temp','?')}")
+
+    # ── Tasks ─────────────────────────────────────────────────────────────────
+    print(f"\n  {c('TASKS', C_BOLD)}")
+    print(f"    Active    : {c(str(stats.get('active', 0)), C_YELLOW)}")
+    print(f"    Completed : {stats.get('completed', 0)}")
+    fail_count = stats.get('failed', 0)
+    fail_color = C_RED if fail_count > 0 else C_GREEN
+    print(f"    Failed    : {c(str(fail_count), fail_color)}")
+    if stats.get("avg_s"):
+        print(f"    Avg time  : {stats['avg_s']}s")
+
+    # ── Night mode ────────────────────────────────────────────────────────────
+    if night:
+        print(f"\n  {c('NIGHT MODE', C_BOLD)}")
+        print(f"    Pending : {night.get('pending', 0)}")
+        print(f"    Running : {night.get('running', 0)}")
+
+    # ── Model routing ─────────────────────────────────────────────────────────
+    if route:
+        print(f"\n  {c('MODEL ROUTING (last 200)', C_BOLD)}")
+        total_r = sum(route.values())
+        for model, count in sorted(route.items(), key=lambda x: -x[1]):
+            pct = count / total_r * 100 if total_r else 0
+            tag = " (local $0)" if "llama" in model.lower() or model == "canned" else ""
+            print(f"    {model:<30} {count:>4} ({pct:.0f}%){tag}")
+
+    # ── Scheduler ─────────────────────────────────────────────────────────────
+    if sched:
+        print(f"\n  {c('SCHEDULER', C_BOLD)}")
+        for row in sched:
+            print(f"    {row['name']:<40} last: {row['last_run']}")
+
+    # ── Failures ─────────────────────────────────────────────────────────────
+    if failures:
+        print(f"\n  {c('RECENT FAILURES', C_BOLD)}")
+        for f in failures:
+            print(f"    {c(f, C_RED)}")
+    else:
+        print(f"\n  {c('No recent failures ✓', C_GREEN)}")
+
+    # ── Alerts ───────────────────────────────────────────────────────────────
+    alert_dir = root / "data" / "alerts"
+    if alert_dir.exists():
+        alerts = sorted(alert_dir.glob("alert_*.md"), reverse=True)[:3]
+        if alerts:
+            print(f"\n  {c('ALERT FILES', C_BOLD)}")
+            for a in alerts:
+                print(f"    {c(a.name, C_RED)}")
+
+    print(f"\n{c('═' * 60, C_CYAN)}\n")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Leon autonomous system status")
+    parser.add_argument("--json",  action="store_true", help="Output as JSON")
+    parser.add_argument("--watch", action="store_true", help="Refresh every 5 seconds")
+    args = parser.parse_args()
+
+    if args.json:
+        data = {
+            "memory":   get_memory(),
+            "gpu":      get_gpu(),
+            "tasks":    get_task_stats(ROOT),
+            "routing":  get_routing_stats(ROOT),
+            "failures": get_recent_failures(ROOT),
+            "night":    get_night_mode(ROOT),
+            "ts":       datetime.now().isoformat(),
+        }
+        print(json.dumps(data, indent=2))
+        return
+
+    if args.watch:
+        try:
+            while True:
+                os.system("clear")
+                print_status(ROOT)
+                time.sleep(5)
+        except KeyboardInterrupt:
+            pass
+    else:
+        print_status(ROOT)
+
+
+if __name__ == "__main__":
+    main()
