@@ -168,6 +168,7 @@ class AgentZeroRunner:
         task_desc: str,
         project_path: str,
         project_name: str = "",
+        leon_context: str = "",
     ) -> dict:
         """
         Submit a job to Agent Zero and wait for completion.
@@ -191,8 +192,8 @@ class AgentZeroRunner:
             # 1. Copy project into isolated workspace (agent works on COPY)
             src_dir = await self._setup_workspace(job, project_path)
 
-            # 2. Build the task prompt with security constraints
-            prompt = self._build_prompt(task_desc, project_name, src_dir)
+            # 2. Build the task prompt with security constraints + Leon's memory context
+            prompt = self._build_prompt(task_desc, project_name, src_dir, leon_context)
 
             # 3. Submit and stream response
             job.log("Submitting to Agent Zero...")
@@ -332,34 +333,46 @@ class AgentZeroRunner:
 
     # ── Prompt construction ────────────────────────────────────────────────────
 
-    def _build_prompt(self, task_desc: str, project_name: str, src_dir: Path) -> str:
+    def _build_prompt(
+        self,
+        task_desc: str,
+        project_name: str,
+        src_dir: Path,
+        leon_context: str = "",
+    ) -> str:
         denylist_str = ", ".join(f"`{c}`" for c in _DENYLIST)
-        # Container sees the workspace as /a0/work_dir — map the host path
         container_path = "/a0/work_dir/jobs/" + src_dir.parent.parent.name + "/" + src_dir.parent.name + "/src"
 
-        return f"""You are an expert software engineer working autonomously.
+        context_block = ""
+        if leon_context.strip():
+            context_block = f"""
+CONTEXT FROM LEON (operational memory — use this to inform your work):
+{leon_context.strip()}
+"""
 
+        return f"""You are an expert software engineer working autonomously as part of the Leon AI system.
+Leon (the orchestrator) has dispatched this job to you because you have the best execution environment for it.
+{context_block}
 TASK: {task_desc}
 
 PROJECT: {project_name}
 WORKING DIRECTORY: {container_path}
-(All files are already copied there — work directly in that directory.)
+(All project files are already copied there — work directly in that directory.)
 
 RULES (non-negotiable):
 1. Never use: {denylist_str}
 2. Never access paths outside your working directory.
 3. Never install system packages with apt/yum/dnf — use pip/npm/cargo inside the project.
-4. If you need to run tests, run them inside the working directory.
-5. Write a final summary at the end listing: what you changed, files modified, test results.
-6. If you encounter a destructive action (deleting files outside workdir, system config changes),
-   write the action to a file called PENDING_ACTION.md and skip it — do NOT ask the user.
+4. Run tests to verify your work if a test suite exists.
+5. If you encounter a destructive action (deleting files outside workdir, system config changes),
+   write it to PENDING_ACTION.md and skip it — do NOT pause and ask.
 
 DELIVERABLES:
 - Modified source files (in place)
-- REPORT.md — summary of changes, decisions made, test results
-- Run linting/tests if a test suite exists
+- REPORT.md — what you changed, decisions made, test results, anything Leon should remember
+- Run linting/tests if available
 
-Begin immediately. Do not ask for clarification — make reasonable assumptions and document them in REPORT.md.
+Begin immediately. Make reasonable assumptions and document them in REPORT.md.
 """.strip()
 
     # ── API interaction ────────────────────────────────────────────────────────

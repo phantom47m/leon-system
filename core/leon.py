@@ -2259,6 +2259,56 @@ spawned_by: {self.ai_name} v1.0
             f"I'll let you know when it's done."
         )
 
+    def _build_az_memory_context(self, project: dict) -> str:
+        """
+        Pull what Leon knows about this project and user and format it as
+        context that Agent Zero receives at the start of every job.
+        Leon = operational memory.  Agent Zero = coding/technical memory.
+        This bridges the two.
+        """
+        lines = []
+
+        # User preferences
+        learned = self.memory.memory.get("learned_context", {})
+        if learned.get("owner_name"):
+            lines.append(f"Owner: {learned['owner_name']}")
+        if learned.get("coding_preferences"):
+            lines.append(f"Coding preferences: {learned['coding_preferences']}")
+        if learned.get("favorite_language"):
+            lines.append(f"Primary language: {learned['favorite_language']}")
+
+        # Project-specific context from projects.yaml
+        if project.get("context"):
+            lines.append(f"\nProject context:\n{project['context'].strip()}")
+        if project.get("tech_stack"):
+            lines.append(f"Tech stack: {', '.join(project['tech_stack'])}")
+
+        # Recent completed Agent Zero jobs on this project (last 3)
+        completed = self.memory.memory.get("completed_tasks", {})
+        proj_jobs = [
+            v for v in completed.values()
+            if v.get("project_name") == project.get("name")
+            and v.get("executor") == "agent_zero"
+        ]
+        if proj_jobs:
+            lines.append(f"\nPrevious Agent Zero jobs on this project:")
+            for job in proj_jobs[-3:]:
+                lines.append(f"  - {job.get('description', '')[:80]} [{job.get('status', '?')}]")
+
+        # Recent memory updates mentioning this project
+        updates = self.memory.memory.get("memory_updates", [])
+        proj_name = project.get("name", "")
+        relevant = [
+            u["summary"] for u in updates[-20:]
+            if proj_name.lower() in u.get("summary", "").lower()
+        ]
+        if relevant:
+            lines.append(f"\nLeon's notes on {proj_name} (most recent first):")
+            for u in relevant[-3:]:
+                lines.append(f"  • {u[:120]}")
+
+        return "\n".join(lines) if lines else ""
+
     async def _dispatch_to_agent_zero(
         self, task_desc: str, project: dict, original_message: str
     ) -> str:
@@ -2282,6 +2332,10 @@ spawned_by: {self.ai_name} v1.0
         }
         self.memory.add_active_task(job_id_preview, task_obj)
 
+        # Gather Leon's memory context to inject into the Agent Zero job.
+        # This bridges Leon's operational knowledge → Agent Zero's coding execution.
+        leon_context = self._build_az_memory_context(project)
+
         # Fire-and-forget: job runs in background, Discord delivers results
         async def _run_and_cleanup():
             try:
@@ -2289,8 +2343,16 @@ spawned_by: {self.ai_name} v1.0
                     task_desc=task_desc,
                     project_path=project["path"],
                     project_name=project["name"],
+                    leon_context=leon_context,
                 )
-                # Update memory with completion
+                # Write compact summary back into Leon's memory so future
+                # jobs and conversations benefit from what Agent Zero learned.
+                summary = result.get("summary", "")
+                if summary:
+                    self.memory.memory_update(
+                        f"[Agent Zero] {project['name']}: {task_desc[:80]} — {summary[:300]}",
+                        source="agent_zero",
+                    )
                 completed = dict(task_obj)
                 completed.update({"status": result["status"], "job_id": result["job_id"]})
                 self.memory.memory.setdefault("completed_tasks", {})[result["job_id"]] = completed
