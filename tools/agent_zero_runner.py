@@ -43,14 +43,26 @@ _SETTINGS_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
 _DISCORD_CHANNEL_FILE = Path("/tmp/leon_discord_channel.json")
 _DISCORD_TOKEN_FILE   = Path("/tmp/leon_discord_bot_token.txt")
 
-# Keywords that trigger Agent Zero routing
+# Keywords that trigger Agent Zero routing.
+# These are HEAVY multi-step execution tasks — NOT everyday fix/refactor/feature work.
+# Leon's Claude agents handle single-file edits, bug fixes, small features, refactors.
+# Agent Zero handles: long CI runs, full test suites, infra setup, data pipelines, multi-tool builds.
 _AZ_SIGNALS = {
-    "build", "implement", "feature", "refactor", "debug", "write test",
-    "run ci", "run tests", "data analysis", "devops", "write script",
-    "migrate", "dockerize", "set up", "infrastructure", "pipeline",
-    "add endpoint", "create api", "write migration", "schema", "database",
-    "performance", "optimize", "benchmark", "profil", "lint", "format code",
-    "ci/cd", "deployment", "kubernetes", "helm", "terraform", "ansible",
+    # CI / test execution
+    "run ci", "run the ci", "run all tests", "run the test suite", "run the full test",
+    "run integration tests", "run e2e tests", "execute tests",
+    # Infra / DevOps (these need actual shell execution, not just code edits)
+    "set up kubernetes", "deploy to kubernetes", "write terraform", "apply terraform",
+    "write ansible", "helm chart", "ci/cd pipeline", "build pipeline",
+    "dockerize", "write dockerfile", "build docker",
+    # Data / analysis jobs (long-running scripts)
+    "data pipeline", "etl pipeline", "data analysis script", "run the analysis",
+    "process the dataset", "batch process",
+    # Full project scaffolding (multi-step, not a single file change)
+    "scaffold a", "bootstrap a new", "create a new project", "set up a new",
+    "generate the boilerplate",
+    # Explicit "Agent Zero" invocation
+    "use agent zero", "send to agent zero", "agent zero:",
 }
 
 # Commands that Agent Zero must NEVER run (injected into every task prompt)
