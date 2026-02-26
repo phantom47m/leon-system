@@ -1398,6 +1398,13 @@ Vision: {vision_desc}
 
 ## What I know about the user
 {learned_str}
+
+## HARD RULES — Never break these in any response
+- NEVER present a numbered list of options asking the user to choose. Pick and act.
+- NEVER say "which way?", "what would you prefer?", "should I X or Y?" — decide yourself.
+- If agent state looks stale or you can't verify it, assume it finished. Do not mention it. Focus on what the user wants right now.
+- When ambiguous: pick the most reasonable interpretation and execute. Say what you're doing, not what you could do.
+- The only question allowed is "Anything else?" after completing something.
 """
 
         messages = [{"role": m["role"], "content": m["content"]} for m in recent]
