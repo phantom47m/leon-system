@@ -727,6 +727,39 @@ class Leon:
                 return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
             return "Nothing pending to clear."
 
+        # ── Agent Zero — kill switch ────────────────────────────────────────────
+        if any(p in msg for p in ["kill agent zero", "stop agent zero", "kill az job", "abort agent zero"]):
+            try:
+                from tools.agent_zero_runner import get_runner
+                az = get_runner()
+                jobs = az.list_jobs()
+                if not jobs:
+                    return "No Agent Zero jobs running."
+                # Find job_id in message or kill most recent
+                job_id = next(
+                    (w for w in msg.split() if w.startswith("AZ-")),
+                    jobs[-1]["job_id"]
+                )
+                ok = await az.kill_job(job_id)
+                return f"{'Killed' if ok else 'Kill attempted for'} Agent Zero job `{job_id}`."
+            except ImportError:
+                return "Agent Zero not installed — run scripts/setup-agent-zero.sh first."
+
+        # ── Agent Zero — job status ─────────────────────────────────────────
+        if any(p in msg for p in ["agent zero status", "az jobs", "agent zero jobs", "list az"]):
+            try:
+                from tools.agent_zero_runner import get_runner
+                az = get_runner()
+                jobs = az.list_jobs()
+                if not jobs:
+                    return f"No Agent Zero jobs running. (Enabled: {az.is_enabled()}, Available: {az.is_available()})"
+                lines = [f"**Agent Zero jobs ({len(jobs)}):**"]
+                for j in jobs:
+                    lines.append(f"• `{j['job_id']}` — {j['task'][:60]}... [{j['status']} {j['elapsed_min']}min]")
+                return "\n".join(lines)
+            except ImportError:
+                return "Agent Zero not installed."
+
         # ── Plan Mode — cancel / status (triggering is handled by _analyze_request) ──
         # Cancel plan
         if any(p in msg for p in ["cancel plan", "stop plan", "abort plan", "stop the plan", "kill the plan"]):
@@ -1461,6 +1494,21 @@ Vision: {vision_desc}
             if not projects:
                 return "No projects configured — add one to config/projects.yaml first."
             return f"Couldn't match that to a project. Known projects: {', '.join(p['name'] for p in projects)}. Which one?"
+
+        # ── Agent Zero routing ─────────────────────────────────────────────
+        # For heavy coding/CI/infra tasks, dispatch to the Docker execution engine
+        try:
+            from tools.agent_zero_runner import get_runner
+            az = get_runner()
+            if az.is_enabled() and az.should_dispatch(task_desc):
+                if az.active_job_count() >= az.max_parallel:
+                    logger.info("Agent Zero at capacity (%d jobs) — falling back to Claude", az.max_parallel)
+                elif await az.is_available_async():
+                    return await self._dispatch_to_agent_zero(task_desc, project, message)
+                else:
+                    logger.warning("Agent Zero enabled but not reachable — run setup-agent-zero.sh")
+        except ImportError:
+            pass  # tools.agent_zero_runner not yet installed — skip silently
 
         brief_path = await self._create_task_brief(task_desc, project)
 
@@ -2209,6 +2257,57 @@ spawned_by: {self.ai_name} v1.0
             f"Homelab's not responding — running it locally instead. "
             f"Working on **{task_desc}** in {project['name']}.\n\n"
             f"I'll let you know when it's done."
+        )
+
+    async def _dispatch_to_agent_zero(
+        self, task_desc: str, project: dict, original_message: str
+    ) -> str:
+        """
+        Dispatch a heavy coding task to Agent Zero (Docker execution engine).
+        Runs the job as a background asyncio task so Leon can respond immediately.
+        Progress + completion are sent via Discord.
+        """
+        from tools.agent_zero_runner import get_runner
+        az = get_runner()
+
+        job_id_preview = f"AZ-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        logger.info("Routing to Agent Zero: %s → %s", task_desc[:60], job_id_preview)
+
+        # Track in memory so dashboard shows it
+        task_obj = {
+            "id": job_id_preview,
+            "description": task_desc,
+            "project_name": project["name"],
+            "executor": "agent_zero",
+        }
+        self.memory.add_active_task(job_id_preview, task_obj)
+
+        # Fire-and-forget: job runs in background, Discord delivers results
+        async def _run_and_cleanup():
+            try:
+                result = await az.run_job(
+                    task_desc=task_desc,
+                    project_path=project["path"],
+                    project_name=project["name"],
+                )
+                # Update memory with completion
+                completed = dict(task_obj)
+                completed.update({"status": result["status"], "job_id": result["job_id"]})
+                self.memory.memory.setdefault("completed_tasks", {})[result["job_id"]] = completed
+                self.memory.memory.get("active_tasks", {}).pop(job_id_preview, None)
+                self.memory.save()
+            except Exception as exc:
+                logger.exception("Agent Zero background job failed: %s", exc)
+
+        asyncio.create_task(_run_and_cleanup())
+
+        return (
+            f"Dispatched to **Agent Zero** (Docker execution engine) 🐳\n\n"
+            f"**Job ID:** `{job_id_preview}`\n"
+            f"**Task:** {task_desc}\n"
+            f"**Project:** {project['name']}\n\n"
+            f"I'll send you Discord updates every {az.progress_every // 60}min and ping you when it's done.\n"
+            f"Hard stop anytime: `kill agent zero job {job_id_preview}`"
         )
 
     async def _send_discord_message(self, text: str):

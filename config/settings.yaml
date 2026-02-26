@@ -119,6 +119,34 @@ update_check:
   repo: "GITHUB_USERNAME/REPO_NAME"   # owner sets this before publishing
   check_interval_hours: 12
 
+agent_zero:
+  # Agent Zero — Dockerized coding execution engine
+  # Run scripts/setup-agent-zero.sh first, then set enabled: true
+  enabled: false
+  base_url: "http://localhost:50080"
+  workspace: "/home/deansabr/agent-zero-workspace"
+  max_parallel_jobs: 2         # Hard cap — 2 × 4GB container = 8GB, leaves 8GB for host
+  max_runtime_minutes: 120     # Kill job if it runs longer than this
+  progress_interval_minutes: 5 # Discord update cadence
+  # Commands Agent Zero is NEVER allowed to run (injected into every task prompt)
+  command_denylist:
+    - "sudo"
+    - "rm -rf /"
+    - "chmod 777 /"
+    - "dd if="
+    - "mkfs"
+    - "fdisk"
+  # Task types that should route to Agent Zero (overrides router keywords)
+  route_keywords:
+    - "build me"
+    - "run ci"
+    - "run tests"
+    - "data pipeline"
+    - "dockerize"
+    - "terraform"
+    - "kubernetes"
+    - "ci/cd"
+
 vision:
   enabled: false   # set true only if you want camera/screen awareness — CPU intensive
 
