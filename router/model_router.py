@@ -4,8 +4,8 @@ Leon Model Router — Routes tasks to the cheapest/fastest capable model.
 Route rules:
   heartbeat / health check  → Ollama llama3.2:3b  ($0, local, <5s)
   trivial classification    → Ollama or Groq       ($0)
-  heavy coding / CI / infra → Agent Zero (Docker execution engine)
-  code / refactor / build   → Claude (subscription, existing api_client)
+  coding tasks (all)        → Agent Zero if enabled, else Claude agents
+  code / refactor / build   → Claude agents (fallback when Agent Zero is down)
   deep architecture         → Claude (same — Opus only if explicitly requested)
 
 All routing decisions are logged to logs_structured/router.jsonl.
@@ -48,39 +48,24 @@ _CODE_SIGNALS = {
     "debug", "install", "configure", "deploy",
 }
 
-# Heavy coding tasks → Agent Zero (Docker execution engine)
-# These go BEYOND what a single Claude agent handles well:
-# multi-step builds, CI runs, data pipelines, infra scripting
-_AGENT_ZERO_SIGNALS = {
-    "build me", "build the", "implement the", "implement a full",
-    "write tests for", "run ci", "run the tests", "run all tests",
-    "data analysis", "data pipeline", "etl", "devops script",
-    "dockerize", "write migration", "database migration",
-    "ci/cd pipeline", "deployment pipeline", "kubernetes",
-    "terraform", "ansible", "helm chart",
-    "benchmark", "performance profile", "load test",
-    "refactor the entire", "full refactor",
-    "set up the", "set up a",
-}
-
-
 class TaskTier(str, Enum):
-    HEARTBEAT   = "heartbeat"    # Health checks → Ollama only ($0)
-    TRIVIAL     = "trivial"      # Formatting/classification → Ollama/Groq ($0)
-    AGENT_ZERO  = "agent_zero"   # Heavy coding → Agent Zero Docker engine
-    STANDARD    = "standard"     # Code tasks → Claude (subscription)
-    COMPLEX     = "complex"      # Architecture → Claude Sonnet (not auto-Opus)
+    HEARTBEAT = "heartbeat"   # Health checks → Ollama only ($0)
+    TRIVIAL   = "trivial"     # Formatting/classification → Ollama/Groq ($0)
+    STANDARD  = "standard"    # Code tasks → Claude agents (or Agent Zero if enabled)
+    COMPLEX   = "complex"     # Architecture → Claude Sonnet (not auto-Opus)
 
 
 def classify_task(description: str) -> TaskTier:
-    """Classify a task description into a routing tier. O(n) string scan, no LLM."""
+    """
+    Classify a task description into a routing tier. O(n) string scan, no LLM.
+    Note: STANDARD/COMPLEX both go to Agent Zero if it's enabled — the tier
+    only matters when Agent Zero is unavailable (fallback to Claude agents).
+    """
     d = description.lower()
     if any(sig in d for sig in _HEARTBEAT_SIGNALS):
         return TaskTier.HEARTBEAT
     if any(sig in d for sig in _TRIVIAL_SIGNALS):
         return TaskTier.TRIVIAL
-    if any(sig in d for sig in _AGENT_ZERO_SIGNALS):
-        return TaskTier.AGENT_ZERO
     if any(sig in d for sig in _CODE_SIGNALS):
         return TaskTier.STANDARD
     # Default: standard (safe — won't route code tasks to local model)

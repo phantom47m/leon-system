@@ -43,26 +43,15 @@ _SETTINGS_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
 _DISCORD_CHANNEL_FILE = Path("/tmp/leon_discord_channel.json")
 _DISCORD_TOKEN_FILE   = Path("/tmp/leon_discord_bot_token.txt")
 
-# Keywords that trigger Agent Zero routing.
-# These are HEAVY multi-step execution tasks — NOT everyday fix/refactor/feature work.
-# Leon's Claude agents handle single-file edits, bug fixes, small features, refactors.
-# Agent Zero handles: long CI runs, full test suites, infra setup, data pipelines, multi-tool builds.
-_AZ_SIGNALS = {
-    # CI / test execution
-    "run ci", "run the ci", "run all tests", "run the test suite", "run the full test",
-    "run integration tests", "run e2e tests", "execute tests",
-    # Infra / DevOps (these need actual shell execution, not just code edits)
-    "set up kubernetes", "deploy to kubernetes", "write terraform", "apply terraform",
-    "write ansible", "helm chart", "ci/cd pipeline", "build pipeline",
-    "dockerize", "write dockerfile", "build docker",
-    # Data / analysis jobs (long-running scripts)
-    "data pipeline", "etl pipeline", "data analysis script", "run the analysis",
-    "process the dataset", "batch process",
-    # Full project scaffolding (multi-step, not a single file change)
-    "scaffold a", "bootstrap a new", "create a new project", "set up a new",
-    "generate the boilerplate",
-    # Explicit "Agent Zero" invocation
-    "use agent zero", "send to agent zero", "agent zero:",
+# Agent Zero is Claude + a full execution environment (shell, tools, file system, web).
+# It handles ALL coding tasks — not just heavy ones.
+# By the time Leon calls should_dispatch(), the task is already classified as a coding job.
+# Non-coding tasks (chat, scheduling, admin) never reach this path.
+# Only carve-outs: pure Q&A and non-actionable responses that don't need execution.
+_AZ_NON_DISPATCH = {
+    # Conversational — no code execution needed
+    "what is", "how does", "explain", "tell me about", "what's the difference",
+    "can you describe", "summarize",
 }
 
 # Commands that Agent Zero must NEVER run (injected into every task prompt)
@@ -149,9 +138,16 @@ class AgentZeroRunner:
             return False
 
     def should_dispatch(self, task_desc: str) -> bool:
-        """Return True if this task should route to Agent Zero."""
+        """
+        Return True if this task should route to Agent Zero.
+        Agent Zero handles ALL coding tasks — it's Claude with a better execution
+        environment, not a separate AI. Only skip for pure Q&A with no execution.
+        """
         d = task_desc.lower()
-        return any(sig in d for sig in _AZ_SIGNALS)
+        # Skip only if it's clearly a conversational/explanatory request
+        if any(sig in d for sig in _AZ_NON_DISPATCH):
+            return False
+        return True
 
     def active_job_count(self) -> int:
         return sum(1 for j in self._active.values() if j.status == "running")
