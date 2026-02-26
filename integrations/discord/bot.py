@@ -280,23 +280,39 @@ async def _take_screenshot(monitor: dict | None = None) -> str | None:
     env = {**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":1")}
 
     def _run() -> str | None:
-        # ── Method 1: pyscreenshot freedesktop D-Bus portal (Wayland-native) ──
-        # Works on GNOME/Wayland without sudo or special setup.
+        # ── Method 1: pyscreenshot via subprocess (Wayland-native, own D-Bus mainloop) ──
+        # freedesktop_dbus backend FAILS when called inside run_in_executor (thread pool)
+        # because the D-Bus portal is async and needs its own process/mainloop.
+        # Spawning a subprocess gives it a clean environment with its own event loop.
         if session_type == "wayland" or wayland_display:
             try:
-                import pyscreenshot as ImageGrab
-                full = ImageGrab.grab(backend="freedesktop_dbus")
-                if full and _is_real_image(full):
+                venv_python = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "venv", "bin", "python3"
+                )
+                if not os.path.exists(venv_python):
+                    venv_python = "python3"
+                script = (
+                    "import pyscreenshot as I, sys; "
+                    f"img=I.grab(backend='freedesktop_dbus'); "
+                    f"img.save({full_path!r}); "
+                    f"print('ok', img.size)"
+                )
+                r = subprocess.run(
+                    [venv_python, "-c", script],
+                    capture_output=True, timeout=20, env=env
+                )
+                logger.debug("pyscreenshot subprocess rc=%s stdout=%s stderr=%s",
+                             r.returncode, r.stdout[:200], r.stderr[:200])
+                if r.returncode == 0 and _file_ok(full_path):
                     if monitor:
-                        x, y, w, h = monitor["x"], monitor["y"], monitor["width"], monitor["height"]
-                        cropped = full.crop((x, y, x + w, y + h))
-                        cropped.save(path, "PNG", optimize=True, quality=85)
+                        _crop_and_save(full_path, path, monitor)
                     else:
-                        full.save(path, "PNG", optimize=True, quality=85)
-                    if os.path.exists(path) and os.path.getsize(path) > 1000:
+                        import shutil; shutil.copy2(full_path, path)
+                    if _file_ok(path):
                         return path
             except Exception as e:
-                logger.debug("freedesktop_dbus failed: %s", e)
+                logger.debug("pyscreenshot subprocess failed: %s", e)
 
         # ── Method 2: gnome-screenshot (works on X11 and Wayland via portal) ──
         try:

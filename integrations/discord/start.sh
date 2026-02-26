@@ -49,6 +49,10 @@ if [ -n "$ALLOWED_USERS" ]; then
 fi
 
 echo "[discord] Starting Discord bridge..."
+# Export Wayland env vars so the screenshot subprocess can reach the compositor
+export DISPLAY="${DISPLAY:-:1}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 "$PYTHON" "$SCRIPT_DIR/bot.py" $ARGS >> logs/discord_bridge.log 2>&1 &
 echo $! > /tmp/leon_discord.pid
 echo "[discord] Bridge started (PID: $!)"
