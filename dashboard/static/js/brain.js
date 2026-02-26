@@ -537,6 +537,16 @@ function connectWS() {
                 }
                 return;
             }
+            if (d.type === 'plan_update') {
+                feed(d.timestamp || now(), `PLAN: ${d.message || ''}`, 'feed-agent-ok');
+                return;
+            }
+            if (d.type === 'plan_created') {
+                if (d.status) brainState = { ...brainState, planMode: d.status };
+                feed(d.timestamp || now(), `PLAN: Generated — ${(d.status || {}).totalTasks || '?'} tasks across ${(d.plan || {phases:[]}).phases.length} phases`, 'feed-agent-ok');
+                updateUI();
+                return;
+            }
             brainState = { ...brainState, ...d };
             updateUI();
         };
@@ -730,6 +740,42 @@ function updateUI() {
         // Only show if provider is configured but claude CLI is missing
         const showCliWarn = hasProvider && brainState.claudeCliAvailable === false;
         ncb.style.display = showCliWarn ? 'block' : 'none';
+    }
+
+    // Plan mode progress bar
+    const planBar = document.getElementById('plan-bar');
+    if (planBar) {
+        const pm = brainState.planMode;
+        if (pm && (pm.active || pm.goal)) {
+            planBar.style.display = 'block';
+            const goalEl = document.getElementById('plan-bar-goal');
+            if (goalEl) goalEl.textContent = pm.goal || '';
+            const progEl = document.getElementById('plan-bar-progress');
+            if (progEl) {
+                const done = pm.doneTasks || 0;
+                const total = pm.totalTasks || 0;
+                const running = pm.runningTasks || 0;
+                const failed = pm.failedTasks || 0;
+                let prog = `${done}/${total} tasks`;
+                if (running) prog += ` · ${running} running`;
+                if (failed) prog += ` · ${failed} failed`;
+                if (!pm.active && done === total && total > 0) prog = `DONE — ${done}/${total} tasks`;
+                progEl.textContent = prog;
+            }
+            // Phase summary
+            const phEl = document.getElementById('plan-bar-phases');
+            if (phEl && pm.phases) {
+                const parts = pm.phases.map(ph => {
+                    const taskStates = (ph.tasks || []).map(t =>
+                        ({completed:'✓',running:'⚡',failed:'✗',pending:'○'}[t.status] || '○')
+                    ).join('');
+                    return `Ph${ph.phase}[${taskStates}]`;
+                });
+                phEl.textContent = parts.join(' ');
+            }
+        } else {
+            planBar.style.display = 'none';
+        }
     }
 
     // Stack banners vertically if multiple visible

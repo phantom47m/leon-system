@@ -62,6 +62,14 @@
         <a href="https://claude.ai/download" target="_blank" style="color:#ff8800">Install Claude CLI</a>, then run <code>claude</code> once to log in.
     </div>
 
+    <!-- Plan mode progress bar (hidden when inactive) -->
+    <div id="plan-bar" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9990;background:#0a1628;border-top:1px solid #ff7700;padding:6px 16px;font-family:monospace;font-size:11px;color:#ff7700">
+        <span style="color:#ffaa33;font-weight:bold">PLAN</span>
+        &nbsp;<span id="plan-bar-goal" style="color:#aaa;max-width:400px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle"></span>
+        &nbsp;&mdash;&nbsp;<span id="plan-bar-progress"></span>
+        <span id="plan-bar-phases" style="margin-left:12px;color:#666"></span>
+    </div>
+
     <!-- Hub universe — full screen, hub centered, panels float around it -->
     <div id="hub-universe">
 

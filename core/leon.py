@@ -36,6 +36,7 @@ from .screen_awareness import ScreenAwareness
 from .notifications import NotificationManager, Priority
 from .project_watcher import ProjectWatcher
 from .night_mode import NightMode
+from .plan_mode import PlanMode
 
 logger = logging.getLogger("leon")
 
@@ -254,6 +255,8 @@ class Leon:
         self._vision_task = None
         # Overnight autonomous coding mode
         self.night_mode = NightMode(self)
+        # Structured multi-phase plan execution
+        self.plan_mode = PlanMode(self)
 
         # Update checker
         from .update_checker import UpdateChecker
@@ -683,6 +686,77 @@ class Leon:
             if cleared:
                 return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
             return "Nothing pending to clear."
+
+        # ── Plan Mode — structured multi-phase autonomous execution ────────
+        _plan_triggers = [
+            "plan and build", "plan and code", "make a plan and", "create a plan and",
+            "auto plan", "plan mode", "structured plan", "make a plan for",
+            "build a plan for", "plan out", "plan this:", "full plan:", "plan:",
+        ]
+        if any(p in msg for p in _plan_triggers):
+            if self.plan_mode.active:
+                status = self.plan_mode.get_status()
+                done = status["doneTasks"]
+                total = status["totalTasks"]
+                return f"Plan already running: {done}/{total} tasks done. Say 'cancel plan' to stop."
+
+            # Extract goal — everything after the trigger phrase
+            goal = message
+            for trigger in sorted(_plan_triggers, key=len, reverse=True):
+                if trigger in msg:
+                    idx = msg.index(trigger) + len(trigger)
+                    candidate = message[idx:].strip().lstrip(":").strip()
+                    if len(candidate) > 10:
+                        goal = candidate
+                    break
+
+            # Resolve project from goal text
+            project = self._resolve_project("", goal)
+            if not project:
+                projects = self.projects_config.get("projects", [])
+                project = projects[0] if projects else None
+            if not project:
+                return "No projects configured — add one in config/projects.yaml first."
+
+            asyncio.create_task(self.plan_mode.run(goal, project))
+            return (
+                f"Planning in progress — analyzing {project['name']} codebase and generating "
+                f"a phased execution plan. Check the dashboard for live progress. "
+                f"I'll let you know when it's done."
+            )
+
+        # Cancel plan
+        if any(p in msg for p in ["cancel plan", "stop plan", "abort plan", "stop the plan"]):
+            if not self.plan_mode.active:
+                return "No plan is currently running."
+            await self.plan_mode.cancel()
+            return "Plan cancelled. Running agents will finish their current task."
+
+        # Plan status
+        if any(p in msg for p in ["plan status", "plan progress", "how's the plan", "what's the plan"]):
+            status = self.plan_mode.get_status()
+            if not status["active"] and not status["goal"]:
+                return "No plan is running. Say 'plan and build [goal]' to start one."
+            done = status["doneTasks"]
+            total = status["totalTasks"]
+            running = status["runningTasks"]
+            failed = status["failedTasks"]
+            active = "Running" if status["active"] else "Complete"
+            phases_text = []
+            for ph in status.get("phases", []):
+                task_summaries = []
+                for t in ph.get("tasks", []):
+                    icon = {"completed": "✓", "running": "⚡", "failed": "✗", "pending": "○"}.get(t["status"], "○")
+                    task_summaries.append(f"  {icon} {t['title']}")
+                phases_text.append(f"Phase {ph['phase']}: {ph['name']}\n" + "\n".join(task_summaries))
+            phases_block = "\n\n".join(phases_text) if phases_text else ""
+            return (
+                f"**Plan: {status['goal']}**\n"
+                f"Status: {active} — {done}/{total} tasks done"
+                + (f", {running} running" if running else "")
+                + (f", {failed} failed" if failed else "")
+                + ("\n\n" + phases_block if phases_block else "")
+            )
 
         # ── Self-optimization / code review ─────────────────────────────
         # Self-optimize triggers — must clearly refer to Leon's OWN code, not task briefs
@@ -1251,6 +1325,11 @@ Rules:
         modules.append("- `/retry <id>` — retry failed agent")
         modules.append("- `/history` — recent completed tasks")
         modules.append("- `/bridge` — Right Brain connection status")
+        modules.append("- `/plan` — show active plan status")
+        modules.append("\n**Plan Mode:**")
+        modules.append("- \"plan and build [goal]\" — generate + execute a multi-phase plan")
+        modules.append("- \"plan status\" — check plan progress")
+        modules.append("- \"cancel plan\" — stop execution (agents finish current task)")
         return "\n".join(modules)
 
     # ------------------------------------------------------------------

@@ -22,6 +22,7 @@ data/.auth.json
 data/voice_cache/
 data/night_log.json
 data/night_tasks.json
+data/current_plan.json
 .clawhub/
 config/api_token.txt
 config/bridge_*.pem

@@ -941,6 +941,33 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
             ]
             return "\n".join(lines)
 
+        elif cmd == "/plan":
+            pm = getattr(leon, 'plan_mode', None)
+            if not pm:
+                return "Plan mode not available."
+            status = pm.get_status()
+            if not status["active"] and not status.get("goal"):
+                return "No plan running. Say 'plan and build [goal]' to start one."
+            done = status["doneTasks"]
+            total = status["totalTasks"]
+            running = status["runningTasks"]
+            failed = status["failedTasks"]
+            state = "RUNNING" if status["active"] else "COMPLETE"
+            lines = [
+                f"**Plan Mode — {state}**\n",
+                f"Goal: {status.get('goal', '?')}",
+                f"Progress: {done}/{total} tasks"
+                + (f" ({running} running)" if running else "")
+                + (f" ({failed} failed)" if failed else ""),
+                "",
+            ]
+            for ph in status.get("phases", []):
+                lines.append(f"**Phase {ph['phase']}: {ph['name']}**")
+                for t in ph.get("tasks", []):
+                    icon = {"completed": "✓", "running": "⚡", "failed": "✗", "pending": "○"}.get(t["status"], "○")
+                    lines.append(f"  {icon} {t['title']}")
+            return "\n".join(lines)
+
         elif cmd == "/setkey":
             if not arg:
                 return (
@@ -1294,6 +1321,7 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                 "- `/export` — export conversation history to markdown\n"
                 "- `/context` — memory usage and context stats\n"
                 "- `/bridge` — Right Brain connection status\n"
+                "- `/plan` — show active plan mode status\n"
                 "- `/setkey groq <key>` — set Groq free API key (console.groq.com)\n"
                 "- `/setkey <key>` — set Anthropic API key\n"
                 "- `/vault list` — show stored vault keys\n"
@@ -1413,6 +1441,7 @@ def _build_state(leon) -> dict:
             "aiName": status.get("ai_name", "AI"),
             "openclawAvailable": status.get("openclaw_available", False),
             "claudeCliAvailable": status.get("claude_cli_available", False),
+            "planMode": leon.plan_mode.get_status() if getattr(leon, 'plan_mode', None) else {"active": False},
         }
     except Exception as e:
         logger.error(f"Error building state: {e}")
