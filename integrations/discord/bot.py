@@ -14,13 +14,16 @@ Setup:
 Usage:
   - DM the bot directly, or
   - Mention @BotName in any channel it has access to
+  - Say "screenshot" to get a screenshot of the PC
 """
 
 import argparse
 import asyncio
 import logging
 import os
+import subprocess
 import sys
+import tempfile
 
 import aiohttp
 import discord
@@ -30,6 +33,13 @@ logger = logging.getLogger("leon.discord")
 
 MAX_DISCORD_LENGTH = 1900   # Discord limit is 2000 — leave headroom for splitting
 RESPONSE_TIMEOUT   = 120    # seconds to wait for Leon response
+
+SCREENSHOT_KEYWORDS = [
+    "screenshot", "screen shot", "screengrab",
+    "show me your screen", "show me the screen", "what's on your screen",
+    "what's on the screen", "show me what's on", "show me what you see",
+    "show me the monitor", "show me what's happening",
+]
 
 
 class AIDiscordBot(discord.Client):
@@ -72,13 +82,59 @@ class AIDiscordBot(discord.Client):
         if not text:
             return
 
+        msg_lower = text.lower()
+
+        # Screenshot request — grab and send without going through Leon
+        if any(kw in msg_lower for kw in SCREENSHOT_KEYWORDS):
+            async with message.channel.typing():
+                path = await _take_screenshot()
+            if path:
+                await message.reply(
+                    "Here's your screen:",
+                    file=discord.File(path, filename="screenshot.png"),
+                )
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            else:
+                await message.reply("Couldn't take a screenshot — scrot/gnome-screenshot not installed.")
+            return
+
         # Show typing indicator while waiting for Leon
         async with message.channel.typing():
             response = await self._ask_leon(text, str(message.author))
 
-        # Split long responses so they fit Discord's 2000-char limit
-        for chunk in _split_message(response):
-            await message.reply(chunk)
+        # Check if Leon flagged a screenshot should be sent alongside the response
+        wants_screenshot = "[SCREENSHOT]" in response
+        clean_response = response.replace("[SCREENSHOT]", "").strip()
+
+        # Send text response in chunks
+        chunks = _split_message(clean_response) if clean_response else []
+        for i, chunk in enumerate(chunks):
+            if i == 0 and wants_screenshot:
+                # Attach screenshot to the first chunk
+                path = await _take_screenshot()
+                if path:
+                    await message.reply(chunk, file=discord.File(path, filename="screenshot.png"))
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                else:
+                    await message.reply(chunk)
+            else:
+                await message.reply(chunk)
+
+        # No text but screenshot requested
+        if not chunks and wants_screenshot:
+            path = await _take_screenshot()
+            if path:
+                await message.reply(file=discord.File(path, filename="screenshot.png"))
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
     async def _ask_leon(self, text: str, author: str) -> str:
         try:
@@ -104,6 +160,37 @@ class AIDiscordBot(discord.Client):
         except Exception as e:
             logger.error("Unexpected error: %s", e)
             return f"Something went wrong: {e}"
+
+
+async def _take_screenshot() -> str | None:
+    """Take a screenshot and return the temp file path, or None on failure."""
+    path = os.path.join(tempfile.gettempdir(), "leon_discord_screenshot.png")
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        # Try tools in order of preference
+        for cmd in [
+            ["scrot", "-q", "85", path],
+            ["gnome-screenshot", "-f", path],
+            ["import", "-window", "root", path],
+            ["xwd", "-root", "-silent", "-out", path + ".xwd"],  # fallback, different format
+        ]:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=10,
+                    env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":0")}
+                )
+                if result.returncode == 0 and os.path.exists(path):
+                    return path
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+    try:
+        return await loop.run_in_executor(None, _run)
+    except Exception as e:
+        logger.error("Screenshot failed: %s", e)
+        return None
 
 
 def _split_message(text: str) -> list[str]:
