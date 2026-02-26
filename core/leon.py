@@ -502,16 +502,21 @@ class Leon:
         # Analyze what the user wants
         analysis = await self._analyze_request(message)
 
-        # Check for special command routing
-        routed = await self._route_special_commands(message)
-        if routed:
-            response = routed
-        elif analysis is None or analysis.get("type") == "simple":
-            response = await self._respond_conversationally(message)
-        elif analysis.get("type") == "single_task":
-            response = await self._handle_single_task(message, analysis)
+        # Plan mode — LLM detected a large autonomous build goal
+        if analysis and analysis.get("type") == "plan":
+            routed = await self._route_special_commands(message)
+            response = routed if routed else await self._handle_plan_request(message, analysis)
         else:
-            response = await self._orchestrate(message, analysis)
+            # Check for special command routing (night mode, plan status/cancel, etc.)
+            routed = await self._route_special_commands(message)
+            if routed:
+                response = routed
+            elif analysis is None or analysis.get("type") == "simple":
+                response = await self._respond_conversationally(message)
+            elif analysis.get("type") == "single_task":
+                response = await self._handle_single_task(message, analysis)
+            else:
+                response = await self._orchestrate(message, analysis)
 
         # Hard filter — strip any "sir" the LLM snuck in, no exceptions
         response = self._strip_sir(response)
@@ -687,61 +692,24 @@ class Leon:
                 return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
             return "Nothing pending to clear."
 
-        # ── Plan Mode — structured multi-phase autonomous execution ────────
-        _plan_triggers = [
-            "plan and build", "plan and code", "make a plan and", "create a plan and",
-            "auto plan", "plan mode", "structured plan", "make a plan for",
-            "build a plan for", "plan out", "plan this:", "full plan:", "plan:",
-        ]
-        if any(p in msg for p in _plan_triggers):
-            if self.plan_mode.active:
-                status = self.plan_mode.get_status()
-                done = status["doneTasks"]
-                total = status["totalTasks"]
-                return f"Plan already running: {done}/{total} tasks done. Say 'cancel plan' to stop."
-
-            # Extract goal — everything after the trigger phrase
-            goal = message
-            for trigger in sorted(_plan_triggers, key=len, reverse=True):
-                if trigger in msg:
-                    idx = msg.index(trigger) + len(trigger)
-                    candidate = message[idx:].strip().lstrip(":").strip()
-                    if len(candidate) > 10:
-                        goal = candidate
-                    break
-
-            # Resolve project from goal text
-            project = self._resolve_project("", goal)
-            if not project:
-                projects = self.projects_config.get("projects", [])
-                project = projects[0] if projects else None
-            if not project:
-                return "No projects configured — add one in config/projects.yaml first."
-
-            asyncio.create_task(self.plan_mode.run(goal, project))
-            return (
-                f"Planning in progress — analyzing {project['name']} codebase and generating "
-                f"a phased execution plan. Check the dashboard for live progress. "
-                f"I'll let you know when it's done."
-            )
-
+        # ── Plan Mode — cancel / status (triggering is handled by _analyze_request) ──
         # Cancel plan
-        if any(p in msg for p in ["cancel plan", "stop plan", "abort plan", "stop the plan"]):
+        if any(p in msg for p in ["cancel plan", "stop plan", "abort plan", "stop the plan", "kill the plan"]):
             if not self.plan_mode.active:
                 return "No plan is currently running."
             await self.plan_mode.cancel()
             return "Plan cancelled. Running agents will finish their current task."
 
         # Plan status
-        if any(p in msg for p in ["plan status", "plan progress", "how's the plan", "what's the plan"]):
+        if any(p in msg for p in ["plan status", "plan progress", "how's the plan", "what's the plan", "how's it going with the plan"]):
             status = self.plan_mode.get_status()
             if not status["active"] and not status["goal"]:
-                return "No plan is running. Say 'plan and build [goal]' to start one."
+                return "No plan running — just describe what you want built and I'll take it from there."
             done = status["doneTasks"]
             total = status["totalTasks"]
             running = status["runningTasks"]
             failed = status["failedTasks"]
-            active = "Running" if status["active"] else "Complete"
+            active_str = "Running" if status["active"] else "Complete"
             phases_text = []
             for ph in status.get("phases", []):
                 task_summaries = []
@@ -752,7 +720,7 @@ class Leon:
             phases_block = "\n\n".join(phases_text) if phases_text else ""
             return (
                 f"**Plan: {status['goal']}**\n"
-                f"Status: {active} — {done}/{total} tasks done"
+                f"Status: {active_str} — {done}/{total} tasks done"
                 + (f", {running} running" if running else "")
                 + (f", {failed} failed" if failed else "")
                 + ("\n\n" + phases_block if phases_block else "")
@@ -1341,26 +1309,32 @@ Rules:
         # Build context from memory
         active_tasks = self.memory.get_all_active_tasks()
         projects = self.memory.list_projects()
+        project_names = [p['name'] for p in projects] if projects else []
 
         prompt = f"""Analyze this user request and classify it.
 
 User message: "{message}"
 
 Current active tasks: {json.dumps(list(active_tasks.values()), default=str) if active_tasks else "None"}
-Known projects: {json.dumps([p['name'] for p in projects]) if projects else "None"}
+Known projects: {json.dumps(project_names) if project_names else "None"}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
-  "type": "simple" | "single_task" | "multi_task",
+  "type": "simple" | "single_task" | "multi_task" | "plan",
   "tasks": ["description of each discrete task"],
   "projects": ["project name for each task or 'unknown'"],
-  "complexity": 1-10
+  "complexity": 1-10,
+  "plan_goal": "concise goal if type is plan, else null",
+  "plan_project": "project name if type is plan, else null"
 }}
 
 Rules:
-- "simple" = status question, quick answer, clarification, greeting
-- "single_task" = one coding/research task
-- "multi_task" = 2+ distinct tasks that can be parallelized"""
+- "simple" = status question, quick answer, clarification, greeting, asking what you did
+- "single_task" = one focused coding/research task
+- "multi_task" = 2+ distinct tasks that can be parallelized
+- "plan" = user wants a large, multi-hour autonomous build — they want you to take over a whole project or goal and execute it fully without interruption. Detect this from intent, not exact phrases. Examples that should classify as "plan": "go ham on X", "just go build it", "make it production ready", "work through the whole thing", "do everything needed to launch X", "take it from here and run with it", "build out the whole feature", "overhaul X completely", "just fix everything wrong with it"
+
+For "plan" type, set plan_goal to a precise one-line description of what should be achieved, and plan_project to the most relevant known project name (or 'unknown')."""
 
         result = await self.api.analyze_json(prompt)
         if result:
@@ -1369,6 +1343,32 @@ Rules:
 
     # ------------------------------------------------------------------
     # Response strategies
+    # ------------------------------------------------------------------
+
+    async def _handle_plan_request(self, message: str, analysis: dict) -> str:
+        """Route a plan-type request from _analyze_request into PlanMode."""
+        if self.plan_mode.active:
+            status = self.plan_mode.get_status()
+            done = status["doneTasks"]
+            total = status["totalTasks"]
+            return f"There's already a plan running ({done}/{total} tasks done). Say 'cancel plan' if you want to start a new one."
+
+        goal = analysis.get("plan_goal") or message
+        project_name = analysis.get("plan_project") or ""
+
+        project = self._resolve_project(project_name, message)
+        if not project:
+            projects = self.projects_config.get("projects", [])
+            project = projects[0] if projects else None
+        if not project:
+            return "No projects configured — add one in config/projects.yaml first."
+
+        asyncio.create_task(self.plan_mode.run(goal, project))
+        return (
+            f"On it. Analyzing {project['name']} and building a plan now — "
+            f"I'll execute everything automatically. Check the dashboard for live progress."
+        )
+
     # ------------------------------------------------------------------
 
     async def _respond_conversationally(self, message: str) -> str:
