@@ -692,8 +692,9 @@ function updateUI() {
                                 <div class="agent-terminal-dot"></div>
                             </div>
                         </div>
+                        <div class="agent-terminal-action" id="ataction-${a.id}">Initializing...</div>
                         <div class="agent-terminal-body" id="atbody-${a.id}">
-                            <div class="agent-terminal-line dim">Initializing...</div>
+                            <div class="agent-terminal-line dim">Waiting for output...</div>
                         </div>`;
                     al.appendChild(card);
                 }
@@ -705,6 +706,8 @@ function updateUI() {
                 }
             });
             _startAgentLogPolling(agents);
+            // Auto-open agents panel when agents are running
+            if (!activePanel) openPanel('agents');
         }
         const arc = document.getElementById('arc-agents');
         if (arc) arc.style.opacity = agents.length > 0 ? '0.8' : '0.38';
@@ -1384,36 +1387,42 @@ function _stopAgentLogPolling() {
 }
 
 async function _fetchAgentLogs(agents) {
-    // Only poll when agents panel is open — no wasted requests
-    if (activePanel !== 'agents') return;
     const currentAgents = brainState.activeAgents || [];
     if (!currentAgents.length) { _stopAgentLogPolling(); return; }
     for (const a of currentAgents) {
         if (!a.id) continue;
-        const body = document.getElementById(`atbody-${a.id}`);
+        const body   = document.getElementById(`atbody-${a.id}`);
+        const action = document.getElementById(`ataction-${a.id}`);
         if (!body) continue;
         try {
             const r = await fetch(`/api/agent-log/${a.id}`);
             if (!r.ok) continue;
             const d = await r.json();
+
+            // Always update the current-action summary line
+            if (action && d.current_action) {
+                action.textContent = d.current_action.replace(/^#+\s*/, '');
+            }
+
+            // Only render full log when panel is open (saves DOM churn)
+            if (activePanel !== 'agents') continue;
             if (!d.lines || !d.lines.length) continue;
-            // Show last 20 lines
-            const lines = d.lines.slice(-20);
+            const lines = d.lines.slice(-25);
             body.innerHTML = lines.map(l => {
                 const escaped = esc(l);
                 let cls = '';
                 if (l.startsWith('✓') || l.includes('completed') || l.includes('✅')) cls = 'ok';
                 else if (l.startsWith('✗') || l.toLowerCase().includes('error') || l.includes('❌')) cls = 'err';
-                else if (l.startsWith('→') || l.includes('Tool:') || l.includes('Bash(') || l.includes('Edit(') || l.includes('Write(') || l.includes('Read(')) cls = 'tool';
+                else if (_re_tool.test(l)) cls = 'tool';
                 else if (l.startsWith('#') || l.includes('INFO') || l.startsWith('*')) cls = 'info';
                 else if (l.trim() === '' || l.startsWith('---')) cls = 'dim';
                 return `<div class="agent-terminal-line ${cls}">${escaped}</div>`;
             }).join('');
-            // Auto-scroll to bottom
             body.scrollTop = body.scrollHeight;
         } catch (_) {}
     }
 }
+const _re_tool = /\b(Bash|Edit|Write|Read|Glob|Grep|WebFetch|Task)\(/;
 
 // Connect and start
 connectWS();

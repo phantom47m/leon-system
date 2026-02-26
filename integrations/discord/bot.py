@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -29,6 +30,9 @@ import tempfile
 
 import aiohttp
 import discord
+
+CHANNEL_FILE = "/tmp/leon_discord_channel.json"
+TOKEN_FILE   = "/tmp/leon_discord_bot_token.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [discord] %(levelname)s: %(message)s")
 logger = logging.getLogger("leon.discord")
@@ -45,17 +49,24 @@ SCREENSHOT_KEYWORDS = [
 
 
 class AIDiscordBot(discord.Client):
-    def __init__(self, leon_url: str, leon_token: str, allowed_user_ids: list[int]):
+    def __init__(self, leon_url: str, leon_token: str, allowed_user_ids: list[int], bot_token: str = ""):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.leon_url = leon_url.rstrip("/")
         self.leon_token = leon_token
         self.allowed_user_ids = set(allowed_user_ids)   # empty = allow all DMs
+        self._bot_token = bot_token
 
     async def on_ready(self):
         logger.info("Discord bot online as %s (ID: %s)", self.user, self.user.id)
         logger.info("Allowed users: %s", self.allowed_user_ids or "all (DMs only)")
+        # Save bot token so Leon can send proactive messages
+        if self._bot_token:
+            try:
+                Path(TOKEN_FILE).write_text(self._bot_token)
+            except Exception:
+                pass
         await self.change_presence(activity=discord.Activity(
             type=discord.ActivityType.listening,
             name="your commands"
@@ -83,6 +94,15 @@ class AIDiscordBot(discord.Client):
             return
 
         msg_lower = text.lower()
+
+        # Save channel so Leon can send proactive updates
+        try:
+            Path(CHANNEL_FILE).write_text(json.dumps({
+                "channel_id": str(message.channel.id),
+                "is_dm": isinstance(message.channel, discord.DMChannel),
+            }))
+        except Exception:
+            pass
 
         # Screenshot request
         if any(kw in msg_lower for kw in SCREENSHOT_KEYWORDS):
@@ -338,6 +358,7 @@ def main():
         leon_url=args.leon_url,
         leon_token=leon_token,
         allowed_user_ids=allowed_ids,
+        bot_token=args.token,
     )
 
     logger.info("Starting Discord bot...")

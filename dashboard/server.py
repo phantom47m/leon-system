@@ -1502,20 +1502,46 @@ async def error_handling_middleware(request, handler):
 
 
 async def api_agent_log(request: web.Request) -> web.Response:
-    """GET /api/agent-log/{agent_id} — last N lines of agent's stdout log."""
+    """GET /api/agent-log/{agent_id} — last N lines of agent's stdout log + current action summary."""
     import re as _re
     agent_id = request.match_info.get("agent_id", "")
-    # Basic sanitization — agent_id should only be alphanumeric + underscore
-    if not _re.match(r'^agent_[a-f0-9]{8}$', agent_id):
+    # Sanitize — allow standard agent IDs and plan task IDs
+    if not _re.match(r'^[a-zA-Z0-9_-]{4,80}$', agent_id):
         return web.json_response({"error": "invalid"}, status=400)
     log_path = Path("data/agent_outputs") / f"{agent_id}.log"
     if not log_path.exists():
-        return web.json_response({"lines": [], "exists": False})
+        return web.json_response({"lines": [], "exists": False, "current_action": ""})
     try:
-        # Read last 80 lines efficiently
         content = log_path.read_text(errors="replace")
-        lines = content.splitlines()[-80:]
-        return web.json_response({"lines": lines, "exists": True})
+        lines = content.splitlines()
+        tail = lines[-80:]
+
+        # Extract "current action" — the most recent meaningful line
+        current_action = ""
+        for line in reversed(lines):
+            line = line.strip()
+            if not line or line.startswith("---") or line.startswith("```"):
+                continue
+            # Skip pure markdown headers and blank separators
+            if _re.match(r'^#{1,3}\s', line):
+                # Headers are meaningful — use them
+                current_action = line.lstrip("#").strip()
+                break
+            # Tool calls — very informative
+            if _re.search(r'\b(Bash|Edit|Write|Read|Glob|Grep|WebFetch)\(', line):
+                current_action = line[:120]
+                break
+            # Action phrases
+            if any(kw in line.lower() for kw in [
+                "installing", "downloading", "running", "creating", "setting up",
+                "configuring", "building", "testing", "checking", "verifying",
+                "cloning", "writing", "updating", "starting", "completed",
+                "failed", "error", "done", "success",
+            ]):
+                current_action = line[:120]
+                break
+
+        return web.json_response({"lines": tail, "exists": True, "current_action": current_action})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 

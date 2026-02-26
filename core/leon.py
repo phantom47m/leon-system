@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
 import yaml
 
 from .memory import MemorySystem
@@ -253,6 +254,7 @@ class Leon:
         self._awareness_task = None
         self._ram_watchdog_task = None
         self._vision_task = None
+        self._last_discord_update = 0.0   # timestamp of last proactive Discord update
         # Overnight autonomous coding mode
         self.night_mode = NightMode(self)
         # Structured multi-phase plan execution
@@ -1894,6 +1896,35 @@ spawned_by: {self.ai_name} v1.0
                         except Exception as e:
                             logger.debug("Update check error: %s", e)
 
+                # Proactive Discord update every 10 minutes when agents are running
+                import time as _time
+                _now_ts = _time.monotonic()
+                _active_agents = list(self.agent_manager.active_agents.keys())
+                _plan_running  = self.plan_mode.active if self.plan_mode else False
+                _night_running = self.night_mode.active if self.night_mode else False
+                if (_active_agents or _plan_running or _night_running) and \
+                        _now_ts - self._last_discord_update >= 600:  # 600s = 10 min
+                    self._last_discord_update = _now_ts
+                    try:
+                        _count = len(_active_agents)
+                        _nm_pending = len(self.night_mode.get_pending()) if self.night_mode else 0
+                        if _plan_running and self.plan_mode:
+                            _ps = self.plan_mode.get_status()
+                            _update = (
+                                f"**Plan update** — {_ps.get('goal','')[:60]}\n"
+                                f"{_ps['doneTasks']}/{_ps['totalTasks']} tasks done"
+                                + (f", {_ps['runningTasks']} running" if _ps['runningTasks'] else "")
+                                + (f", {_ps['failedTasks']} failed" if _ps['failedTasks'] else "")
+                            )
+                        else:
+                            _update = (
+                                f"**Agent update** — {_count} agent{'s' if _count != 1 else ''} running"
+                                + (f", {_nm_pending} queued" if _nm_pending else "")
+                            )
+                        await self._send_discord_message(_update)
+                    except Exception as _e:
+                        logger.debug("Discord update tick error: %s", _e)
+
                 # Periodic save
                 self.memory.save()
 
@@ -2146,6 +2177,27 @@ spawned_by: {self.ai_name} v1.0
             f"Working on **{task_desc}** in {project['name']}.\n\n"
             f"I'll let you know when it's done."
         )
+
+    async def _send_discord_message(self, text: str):
+        """Proactively push a message to the owner's Discord channel via the bot token."""
+        try:
+            channel_file = Path("/tmp/leon_discord_channel.json")
+            token_file   = Path("/tmp/leon_discord_bot_token.txt")
+            if not channel_file.exists() or not token_file.exists():
+                return
+            channel_id = json.loads(channel_file.read_text())["channel_id"]
+            token = token_file.read_text().strip()
+            if not token or not channel_id:
+                return
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                    headers={"Authorization": f"Bot {token}"},
+                    json={"content": text},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+        except Exception as e:
+            logger.debug("Discord proactive message failed: %s", e)
 
     async def _broadcast_to_dashboard(self, data: dict):
         """Push a notification to all connected dashboard WebSocket clients."""
