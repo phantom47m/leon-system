@@ -5510,6 +5510,259 @@ class TestRespondConversationallyNoDuplicate(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# HEALTH CHECK — Real System Metrics
+# ══════════════════════════════════════════════════════════
+
+class TestHealthCheckSystemMetrics(unittest.TestCase):
+    """Verify health check collects real system metrics instead of LLM calls."""
+
+    @staticmethod
+    def _run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_collect_system_metrics_returns_dict(self):
+        """_collect_system_metrics should return a dict of real metrics."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIsInstance(metrics, dict)
+        self.assertGreater(len(metrics), 0)
+
+    def test_cpu_percent_present_and_valid(self):
+        """CPU percentage should be a number between 0 and 100."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("cpu_percent", metrics)
+        self.assertGreaterEqual(metrics["cpu_percent"], 0)
+        self.assertLessEqual(metrics["cpu_percent"], 100)
+
+    def test_cpu_count_present(self):
+        """CPU count should be a positive integer."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("cpu_count", metrics)
+        self.assertGreaterEqual(metrics["cpu_count"], 1)
+
+    def test_memory_percent_present_and_valid(self):
+        """Memory percentage should be between 0 and 100."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("memory_percent", metrics)
+        self.assertGreaterEqual(metrics["memory_percent"], 0)
+        self.assertLessEqual(metrics["memory_percent"], 100)
+
+    def test_memory_available_gb_present(self):
+        """Available memory in GB should be positive."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("memory_available_gb", metrics)
+        self.assertGreater(metrics["memory_available_gb"], 0)
+
+    def test_memory_total_gb_present(self):
+        """Total memory in GB should be positive."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("memory_total_gb", metrics)
+        self.assertGreater(metrics["memory_total_gb"], 0)
+
+    def test_disk_percent_present_and_valid(self):
+        """Disk usage percentage should be between 0 and 100."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("disk_percent", metrics)
+        self.assertGreaterEqual(metrics["disk_percent"], 0)
+        self.assertLessEqual(metrics["disk_percent"], 100)
+
+    def test_disk_free_gb_present(self):
+        """Free disk space in GB should be non-negative."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("disk_free_gb", metrics)
+        self.assertGreaterEqual(metrics["disk_free_gb"], 0)
+
+    def test_leon_process_metrics_present(self):
+        """Leon's own process RSS and thread count should be present."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("leon_rss_mb", metrics)
+        self.assertGreater(metrics["leon_rss_mb"], 0)
+        self.assertIn("leon_threads", metrics)
+        self.assertGreaterEqual(metrics["leon_threads"], 1)
+
+    def test_ollama_available_key_present(self):
+        """ollama_available should always be present as a bool."""
+        from core.scheduler import _collect_system_metrics
+        metrics = self._run(_collect_system_metrics())
+        self.assertIn("ollama_available", metrics)
+        self.assertIsInstance(metrics["ollama_available"], bool)
+
+    def test_health_check_returns_ok_true_when_healthy(self):
+        """Health check should return ok=True when metrics are within thresholds."""
+        from core.scheduler import _builtin_health_check
+        ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertIsInstance(ok, bool)
+        self.assertIsInstance(msg, str)
+        self.assertIn("Health check:", msg)
+        self.assertIn("metrics collected", msg)
+
+    def test_health_check_no_llm_calls(self):
+        """Health check should NOT import or call run_health_checks (LLM-based)."""
+        import inspect
+        from core.scheduler import _builtin_health_check
+        source = inspect.getsource(_builtin_health_check)
+        self.assertNotIn("run_health_checks", source)
+        self.assertNotIn("ollama_call", source)
+
+    def test_health_check_warns_on_high_cpu(self):
+        """Health check should include 'CPU' in warnings when CPU > 90%."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 95.0, "cpu_count": 4,
+                "memory_percent": 50.0, "memory_available_gb": 8.0,
+                "memory_total_gb": 16.0,
+                "disk_percent": 50.0, "disk_free_gb": 100.0,
+                "leon_rss_mb": 200.0, "leon_threads": 10,
+                "ollama_available": True,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertFalse(ok)
+        self.assertIn("CPU", msg)
+
+    def test_health_check_warns_on_high_memory(self):
+        """Health check should include 'RAM' in warnings when RAM > 85%."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 30.0, "cpu_count": 4,
+                "memory_percent": 92.0, "memory_available_gb": 1.3,
+                "memory_total_gb": 16.0,
+                "disk_percent": 50.0, "disk_free_gb": 100.0,
+                "leon_rss_mb": 200.0, "leon_threads": 10,
+                "ollama_available": True,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertFalse(ok)
+        self.assertIn("RAM", msg)
+
+    def test_health_check_warns_on_high_disk(self):
+        """Health check should include 'Disk' in warnings when disk > 90%."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 30.0, "cpu_count": 4,
+                "memory_percent": 50.0, "memory_available_gb": 8.0,
+                "memory_total_gb": 16.0,
+                "disk_percent": 95.0, "disk_free_gb": 5.0,
+                "leon_rss_mb": 200.0, "leon_threads": 10,
+                "ollama_available": True,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertFalse(ok)
+        self.assertIn("Disk", msg)
+
+    def test_health_check_warns_ollama_offline(self):
+        """Health check should warn when Ollama is not available."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 30.0, "cpu_count": 4,
+                "memory_percent": 50.0, "memory_available_gb": 8.0,
+                "memory_total_gb": 16.0,
+                "disk_percent": 50.0, "disk_free_gb": 100.0,
+                "leon_rss_mb": 200.0, "leon_threads": 10,
+                "ollama_available": False,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertFalse(ok)
+        self.assertIn("Ollama", msg)
+
+    def test_health_check_ok_when_all_normal(self):
+        """Health check should return ok=True when all metrics are normal."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 25.0, "cpu_count": 4,
+                "memory_percent": 45.0, "memory_available_gb": 8.8,
+                "memory_total_gb": 16.0,
+                "disk_percent": 40.0, "disk_free_gb": 200.0,
+                "leon_rss_mb": 150.0, "leon_threads": 8,
+                "ollama_available": True,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertTrue(ok)
+        self.assertNotIn("warnings", msg)
+
+    def test_health_check_multiple_warnings(self):
+        """Multiple threshold breaches should all appear in the warning."""
+        from core.scheduler import _builtin_health_check
+        import unittest.mock as mock
+
+        async def fake_metrics():
+            return {
+                "cpu_percent": 95.0, "cpu_count": 4,
+                "memory_percent": 90.0, "memory_available_gb": 1.6,
+                "memory_total_gb": 16.0,
+                "disk_percent": 95.0, "disk_free_gb": 5.0,
+                "leon_rss_mb": 500.0, "leon_threads": 20,
+                "ollama_available": False,
+            }
+
+        with mock.patch("core.scheduler._collect_system_metrics", side_effect=fake_metrics):
+            ok, msg = self._run(_builtin_health_check(leon=None))
+        self.assertFalse(ok)
+        self.assertIn("CPU", msg)
+        self.assertIn("RAM", msg)
+        self.assertIn("Disk", msg)
+        self.assertIn("Ollama", msg)
+
+    def test_collect_metrics_never_raises(self):
+        """_collect_system_metrics should handle errors gracefully, never raise."""
+        from core.scheduler import _collect_system_metrics
+        import unittest.mock as mock
+
+        # Even with psutil mocked to raise, it should return a dict
+        with mock.patch("psutil.cpu_percent", side_effect=OSError("test")):
+            metrics = self._run(_collect_system_metrics())
+        self.assertIsInstance(metrics, dict)
+        # CPU failed but memory/disk should still work
+        self.assertIn("cpu_error", metrics)
+        self.assertIn("memory_percent", metrics)
+
+    def test_run_builtin_health_check_still_returns_tuple(self):
+        """run_builtin('__health_check__') should still return (bool, str)."""
+        from core.scheduler import run_builtin
+        result = self._run(run_builtin("__health_check__", leon=None))
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], bool)
+        self.assertIsInstance(result[1], str)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

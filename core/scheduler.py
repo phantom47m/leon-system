@@ -10,7 +10,7 @@ New features:
   - max_runtime_minutes enforcement
 
 Built-in commands (prefix __):
-  __health_check__   — Ollama health ping ($0, never paid API)
+  __health_check__   — Real system metrics (CPU/RAM/disk/Ollama connectivity)
   __index_all__      — Re-index all configured projects
   __daily_summary__  — Write memory/daily/YYYY-MM-DD.md
   __repo_hygiene__   — Lightweight dep + stale-branch check
@@ -27,6 +27,7 @@ Config example (settings.yaml):
         priority: 1
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -309,19 +310,88 @@ async def run_builtin(command: str, leon=None) -> tuple[bool, str]:
 
 
 async def _builtin_health_check(leon=None) -> tuple[bool, str]:
-    """$0 health check via Ollama — never uses paid API."""
-    from router.model_router import run_health_checks
+    """Real system metrics health check — no LLM calls needed."""
     from core.structured_logger import get_logger
 
-    checks = {
-        "system": "Is this system message delivered? Reply yes or no.",
-        "memory": "Is memory pressure a concern with 16GB RAM and standard Linux usage?",
-    }
+    checks = await _collect_system_metrics()
+    get_logger().health_check(checks, source="scheduler.__health_check__")
 
-    results = await run_health_checks(checks)
-    get_logger().health_check(results, source="scheduler.__health_check__")
-    logger.info(f"Health check done: {list(results.keys())}")
-    return True, f"Health check: {len(results)} checks completed via Ollama"
+    # Determine overall health from thresholds
+    warnings = []
+    if checks.get("cpu_percent", 0) > 90:
+        warnings.append(f"CPU {checks['cpu_percent']}%")
+    if checks.get("memory_percent", 0) > 85:
+        warnings.append(f"RAM {checks['memory_percent']}%")
+    if checks.get("disk_percent", 0) > 90:
+        warnings.append(f"Disk {checks['disk_percent']}%")
+    if not checks.get("ollama_available", False):
+        warnings.append("Ollama offline")
+
+    if warnings:
+        logger.warning("Health check warnings: %s", ", ".join(warnings))
+    else:
+        logger.info("Health check passed: CPU %.0f%%, RAM %.0f%%, Disk %.0f%%",
+                     checks.get("cpu_percent", 0),
+                     checks.get("memory_percent", 0),
+                     checks.get("disk_percent", 0))
+
+    ok = len(warnings) == 0
+    summary = f"{len(checks)} metrics collected"
+    if warnings:
+        summary += f" — warnings: {', '.join(warnings)}"
+    return ok, f"Health check: {summary}"
+
+
+async def _collect_system_metrics() -> dict:
+    """Gather real system metrics using psutil. Never raises."""
+    import psutil
+
+    metrics: dict = {}
+
+    # CPU usage (non-blocking 1-second sample)
+    try:
+        cpu = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: psutil.cpu_percent(interval=1)
+        )
+        metrics["cpu_percent"] = cpu
+        metrics["cpu_count"] = psutil.cpu_count()
+    except Exception as e:
+        metrics["cpu_error"] = str(e)
+
+    # Memory
+    try:
+        mem = psutil.virtual_memory()
+        metrics["memory_percent"] = mem.percent
+        metrics["memory_available_gb"] = round(mem.available / (1024 ** 3), 1)
+        metrics["memory_total_gb"] = round(mem.total / (1024 ** 3), 1)
+    except Exception as e:
+        metrics["memory_error"] = str(e)
+
+    # Disk (root partition)
+    try:
+        disk = psutil.disk_usage("/")
+        metrics["disk_percent"] = disk.percent
+        metrics["disk_free_gb"] = round(disk.free / (1024 ** 3), 1)
+    except Exception as e:
+        metrics["disk_error"] = str(e)
+
+    # Leon's own process
+    try:
+        proc = psutil.Process()
+        metrics["leon_rss_mb"] = round(proc.memory_info().rss / (1024 ** 2), 1)
+        metrics["leon_threads"] = proc.num_threads()
+    except Exception as e:
+        metrics["leon_process_error"] = str(e)
+
+    # Ollama connectivity (simple HTTP ping, no LLM call)
+    try:
+        from router.model_router import is_ollama_available
+        metrics["ollama_available"] = await is_ollama_available()
+    except Exception as e:
+        metrics["ollama_available"] = False
+        metrics["ollama_error"] = str(e)
+
+    return metrics
 
 
 async def _builtin_index_all(leon=None) -> tuple[bool, str]:
