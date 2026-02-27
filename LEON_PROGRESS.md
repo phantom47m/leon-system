@@ -6,6 +6,13 @@
 
 ## Completed This Session
 
+### Phase 12: Keyword Pre-Router for System Skills (Issue #20)
+
+- **Added keyword pre-routing table** (`core/routing_mixin.py`) — 39 compiled regex patterns map unambiguous system commands (cpu usage, screenshot, next track, lock screen, etc.) directly to skills, skipping the ~1000-token LLM classification call. Saves latency and tokens for the most common voice/text commands.
+- **Fixed "open terminal" bug** — "open terminal" previously opened `https://terminal.com`; now correctly routes to `open_app("terminal")` via a `_DESKTOP_APPS` allowlist (18 known desktop apps).
+- **39 new tests** in `TestKeywordPreRouter` — pattern matching, ordering (gpu_temp before temperature), negative cases (weather with location falls through to LLM), table structure validation, and desktop apps table.
+- **Total: 284 tests passing** (3 pre-existing failures in task queue persistence and voice ID config)
+
 ### Phase 11: Reliability, Code Quality & Security Tests
 
 #### Leon System — Reliability Improvements (8 Fixes)
@@ -111,6 +118,7 @@
 | #17 Groq truncation logging | **Fixed (Phase 11)** |
 | #18 Rate limiter cleanup | **Fixed (Phase 11)** |
 | #21 Security tests | **Fixed (Phase 11)** |
+| #20 Keyword pre-router | **Fixed (Phase 12)** |
 | #23 sentByBridge unbounded | **Fixed (Phase 11)** |
 
 ## Phase 12: Pre-Ride Safety Checklist Reset
@@ -129,10 +137,12 @@
 - [ ] Backend API for multi-device sync
 
 ### Leon System
-- [ ] Sandbox/confirmation for `python_exec` (Issue #4 from audit)
+- [x] Sandbox/confirmation for `python_exec` (Issue #4 from audit)
 - [ ] Evaluate `--dangerously-skip-permissions` alternatives (Issue #5)
 - [ ] Fix event loop threading model (Issue #7)
 - [ ] Fix SSL cert verification for bridge (Issue #12 — generate self-signed cert)
-- [ ] Add keyword pre-router for system skills (Issue #20)
+- [x] Add keyword pre-router for system skills (Issue #20)
 - [ ] Refactor `leon.py` into smaller modules (Issue #19)
 - [ ] Update stale stt_provider config (Issue #22)
+
+**2026-02-27 — Issue #4 fixed:** `python_exec` now blocks 10 dangerous module imports (subprocess, shutil, ctypes, socket, etc.) and 15 dangerous patterns (os.system, os.remove, __import__, open, eval, exec, compile) before execution; 33 new security tests added.

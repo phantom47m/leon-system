@@ -2582,6 +2582,160 @@ class TestSchedulerDispatchLogic(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# SECURITY — python_exec blocklist
+# ══════════════════════════════════════════════════════════
+
+class TestPythonExecSecurity(unittest.TestCase):
+    """Verify python_exec blocks dangerous imports and operations."""
+
+    def setUp(self):
+        from core.system_skills import SystemSkills
+        self.skills = SystemSkills()
+
+    # --- Blocked imports ---
+
+    def test_blocks_subprocess_import(self):
+        result = self.skills.python_exec("import subprocess; subprocess.run(['ls'])")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_shutil_import(self):
+        result = self.skills.python_exec("import shutil; shutil.rmtree('/tmp/x')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_socket_import(self):
+        result = self.skills.python_exec("import socket; socket.socket()")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_ctypes_import(self):
+        result = self.skills.python_exec("import ctypes")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_urllib_import(self):
+        result = self.skills.python_exec("from urllib.request import urlopen")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_requests_import(self):
+        result = self.skills.python_exec("import requests; requests.get('http://evil.com')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_multiprocessing_import(self):
+        result = self.skills.python_exec("import multiprocessing")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_signal_import(self):
+        result = self.skills.python_exec("import signal; signal.alarm(0)")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_importlib_import(self):
+        result = self.skills.python_exec("import importlib; importlib.import_module('os')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_http_import(self):
+        result = self.skills.python_exec("from http.client import HTTPConnection")
+        self.assertIn("Blocked", result)
+
+    # --- Blocked patterns ---
+
+    def test_blocks_os_system(self):
+        result = self.skills.python_exec("import os; os.system('rm -rf /')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_popen(self):
+        result = self.skills.python_exec("import os; os.popen('id').read()")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_exec(self):
+        result = self.skills.python_exec("import os; os.execvp('bash', ['bash'])")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_spawn(self):
+        result = self.skills.python_exec("import os; os.spawnlp(os.P_NOWAIT, 'bash', 'bash')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_remove(self):
+        result = self.skills.python_exec("import os; os.remove('/etc/passwd')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_unlink(self):
+        result = self.skills.python_exec("import os; os.unlink('/etc/passwd')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_rmdir(self):
+        result = self.skills.python_exec("import os; os.rmdir('/tmp/x')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_kill(self):
+        result = self.skills.python_exec("import os; os.kill(1, 9)")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_fork(self):
+        result = self.skills.python_exec("import os; os.fork()")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_dunder_import(self):
+        result = self.skills.python_exec("__import__('subprocess').run(['ls'])")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_open(self):
+        result = self.skills.python_exec("open('/etc/shadow').read()")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_eval(self):
+        result = self.skills.python_exec("eval('__import__(\"os\").system(\"id\")')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_exec(self):
+        result = self.skills.python_exec("exec('import subprocess')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_compile(self):
+        result = self.skills.python_exec("compile('import os', '<x>', 'exec')")
+        self.assertIn("Blocked", result)
+
+    # --- Safe code still works ---
+
+    def test_allows_math(self):
+        result = self.skills.python_exec("print(2 + 2)")
+        self.assertIn("4", result)
+
+    def test_allows_math_import(self):
+        result = self.skills.python_exec("import math; print(math.sqrt(16))")
+        self.assertIn("4", result)
+
+    def test_allows_json_import(self):
+        result = self.skills.python_exec("import json; print(json.dumps({'a': 1}))")
+        self.assertNotIn("Blocked", result)
+
+    def test_allows_string_operations(self):
+        result = self.skills.python_exec("print('hello world'.upper())")
+        self.assertIn("HELLO WORLD", result)
+
+    def test_allows_list_comprehension(self):
+        result = self.skills.python_exec("print([x**2 for x in range(5)])")
+        self.assertIn("[0, 1, 4, 9, 16]", result)
+
+    def test_empty_code_handled(self):
+        result = self.skills.python_exec("")
+        self.assertIsInstance(result, str)
+
+    # --- Bypass attempts ---
+
+    def test_blocks_from_import_bypass(self):
+        """'from X import Y' should also be caught."""
+        result = self.skills.python_exec("from subprocess import run; run(['ls'])")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_semicolon_chained_import(self):
+        """Import chained after safe code via semicolon should be caught."""
+        result = self.skills.python_exec("x=1;import subprocess;subprocess.run(['ls'])")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_removedirs(self):
+        result = self.skills.python_exec("import os; os.removedirs('/tmp/a/b/c')")
+        self.assertIn("Blocked", result)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

@@ -9,11 +9,97 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("leon")
+
+# ── Keyword pre-routing table (Issue #20) ──────────────────────────────────
+# Maps unambiguous natural language to system skills WITHOUT an LLM call.
+# Only zero-arg or fixed-arg commands — anything needing extracted args
+# falls through to the AI classifier.
+# Patterns are tested against the voice-prefix-stripped, lowercased message.
+# First match wins — put more specific patterns before broader ones.
+
+_KEYWORD_ROUTES: list[tuple[re.Pattern, str, dict]] = [
+    # ── System Info ──
+    (re.compile(r'\bcpu\s+(?:usage|load)\b'), 'cpu_usage', {}),
+    (re.compile(r'\b(?:ram|memory)\s+usage\b'), 'ram_usage', {}),
+    (re.compile(r'\b(?:disk|storage)\s+usage\b'), 'disk_usage', {}),
+    (re.compile(r'\b(?:disk\s+free|free\s+space)\b'), 'disk_free', {}),
+    (re.compile(r'\bsystem\s+(?:info|summary)\b'), 'system_info', {}),
+    (re.compile(r'\buptime\b'), 'uptime', {}),
+    (re.compile(r'\b(?:ip\s+address|my\s+ip)\b'), 'ip_address', {}),
+    (re.compile(r'\bbattery(?:\s+(?:level|status|life))?\b'), 'battery', {}),
+    (re.compile(r'\bgpu\s+temp'), 'gpu_temp', {}),  # before generic temp
+    (re.compile(r'\b(?:cpu\s+temp|temperature)\b'), 'temperature', {}),
+    (re.compile(r'\bhostname\b'), 'hostname', {}),
+    (re.compile(r'\bwho\s*am\s*i\b'), 'who_am_i', {}),
+    (re.compile(r'\b(?:what\s+time|current\s+time|what.s\s+the\s+time)\b'), 'date_time', {}),
+
+    # ── Media (volume/play/pause handled by earlier fast paths) ──
+    (re.compile(r'\b(?:next|skip)\s+(?:track|song)\b'), 'next_track', {}),
+    (re.compile(r'\bprev(?:ious)?\s+(?:track|song)\b'), 'prev_track', {}),
+    (re.compile(r'\b(?:now\s+playing|what.s\s+playing|current\s+(?:track|song))\b'), 'now_playing', {}),
+
+    # ── Desktop ──
+    (re.compile(r'\bscreenshot\b|\bscreen\s*cap(?:ture)?\b'), 'screenshot', {}),
+    (re.compile(r'\block\s+(?:(?:the|my)\s+)?(?:screen|computer|pc|desktop)\b'), 'lock_screen', {}),
+    (re.compile(r'\bbrightness\s+up\b|\bincrease\s+brightness\b|\bbrighter\b'), 'brightness_up', {}),
+    (re.compile(r'\bbrightness\s+down\b|\bdecrease\s+brightness\b|\bdimmer\b'), 'brightness_down', {}),
+
+    # ── Clipboard ──
+    (re.compile(r'\bclipboard\s+histor'), 'clipboard_history', {}),
+    (re.compile(r'\b(?:get|show)\s+clipboard\b|\bwhat.s\s+(?:on\s+)?(?:my\s+)?clipboard\b|\bpaste\s+buffer\b'), 'clipboard_get', {}),
+
+    # ── Network ──
+    (re.compile(r'\bwifi\s+(?:status|info)\b'), 'wifi_status', {}),
+    (re.compile(r'\bwifi\s+list\b|\bavailable\s+(?:wifi|networks)\b|\bscan\s+wifi\b'), 'wifi_list', {}),
+    (re.compile(r'\bspeed\s*test\b|\binternet\s+speed\b'), 'speedtest', {}),
+
+    # ── GPU ──
+    (re.compile(r'\bgpu\s+(?:usage|info|status)\b|\bvram\s+usage\b|\bgraphics\s+card\b'), 'gpu_usage', {}),
+
+    # ── Window Management ──
+    (re.compile(r'\bminimize(?:\s+(?:this\s+)?window)?\b'), 'minimize_window', {}),
+    (re.compile(r'\bmaximize(?:\s+(?:this\s+)?window)?\b'), 'maximize_window', {}),
+    (re.compile(r'\btile\s+left\b|\bsnap\s+left\b'), 'tile_left', {}),
+    (re.compile(r'\btile\s+right\b|\bsnap\s+right\b'), 'tile_right', {}),
+    (re.compile(r'\bclose\s+(?:this\s+)?window\b'), 'close_window', {}),
+    (re.compile(r'\blist\s+workspaces\b|\bshow\s+workspaces\b'), 'list_workspaces', {}),
+    (re.compile(r'\b(?:list\s+)?running\s+apps?\b|\bwhat.s\s+running\b'), 'list_running', {}),
+
+    # ── OCR ──
+    (re.compile(r'\bocr\b|\bread\s+(?:the\s+)?screen\b|\bwhat.s\s+on\s+(?:my\s+)?screen\b'), 'ocr_screen', {}),
+
+    # ── Notes (list only — add/search need args from LLM) ──
+    (re.compile(r'\b(?:show|list)\s+(?:my\s+)?notes\b|\bmy\s+notes\b'), 'note_list', {}),
+
+    # ── Downloads ──
+    (re.compile(r'\b(?:list|show|recent)\s+downloads\b'), 'list_downloads', {}),
+
+    # ── Timers ──
+    (re.compile(r'\b(?:list|show|active)\s+timers?\b'), 'list_timers', {}),
+
+    # ── Volume info ──
+    (re.compile(r'\bvolume\s+level\b|\bcurrent\s+volume\b|\bwhat.s\s+(?:the\s+|my\s+)?volume\b'), 'volume_get', {}),
+
+    # ── Process info (fixed default arg) ──
+    (re.compile(r'\btop\s+processes\b|\bwhat.s\s+(?:eating|hogging)\b|\bresource\s+hog'), 'top_processes', {'n': 10}),
+
+    # ── Weather (no location → default; "weather in X" falls through to LLM) ──
+    (re.compile(r'\b(?:weather|forecast)\b(?!\s+(?:in|for|at)\b)'), 'weather', {}),
+]
+
+# Desktop apps that should open via open_app, not as browser URLs
+_DESKTOP_APPS = frozenset({
+    "terminal", "code", "vscode", "spotify", "files", "nautilus",
+    "dolphin", "nemo", "slack", "zoom", "obs", "gimp", "inkscape",
+    "blender", "steam", "settings", "calculator", "system monitor",
+    "gedit", "text editor", "file manager", "task manager",
+})
 
 
 class RoutingMixin:
@@ -431,6 +517,10 @@ class RoutingMixin:
             site_raw = _open_m.group(1).strip().rstrip(".!?")
             # Exact table lookup
             url = self._SITE_MAP.get(site_raw)
+            # Desktop apps → open_app, not browser (fixes "open terminal" → terminal.com bug)
+            if not url and site_raw in _DESKTOP_APPS:
+                logger.info("Keyword pre-route: open_app(%s)", site_raw)
+                return await self.system_skills.execute("open_app", {"name": site_raw})
             # Fallback: try appending .com for single bare words
             if not url and " " not in site_raw and "." not in site_raw:
                 url = f"https://{site_raw}.com"
@@ -511,6 +601,12 @@ class RoutingMixin:
         if any(h in msg for h in cron_list_hints):
             jobs = self.openclaw.cron.list_jobs(include_disabled=True)
             return self.openclaw.cron.format_jobs(jobs)
+
+        # ── Keyword pre-route: skip LLM for unambiguous system commands ────
+        for _pattern, _skill, _args in _KEYWORD_ROUTES:
+            if _pattern.search(_clean):
+                logger.info("Keyword pre-route: %s (no LLM call)", _skill)
+                return await self.system_skills.execute(_skill, _args)
 
         skill_list = self.system_skills.get_skill_list()
 

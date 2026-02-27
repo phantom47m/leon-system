@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -1302,6 +1303,35 @@ TELEGRAM:
     # Shell metacharacters that indicate injection attempts
     _UNSAFE_CHARS = [";", "|", "$(", "`", "&&", "||", ">>", "<<", "<("]
 
+    # Modules that must never be imported in python_exec code
+    _BLOCKED_PYTHON_IMPORTS = frozenset({
+        "subprocess", "shutil", "ctypes", "socket",
+        "urllib", "requests", "multiprocessing", "signal",
+        "importlib", "http",
+    })
+
+    # Dangerous Python patterns — blocked by substring match
+    _BLOCKED_PYTHON_PATTERNS = [
+        "os.system",       # Command execution
+        "os.popen",        # Command execution
+        "os.exec",         # Process replacement (execv, execve, etc.)
+        "os.spawn",        # Process spawning
+        "os.remove",       # File deletion
+        "os.unlink",       # File deletion
+        "os.rmdir",        # Directory deletion
+        "os.removedirs",   # Recursive directory deletion
+        "os.kill",         # Process killing
+        "os.fork",         # Process forking
+        "__import__",      # Import blocklist bypass
+        "open(",           # File I/O — use shell_exec for file operations
+        "eval(",           # Code injection bypass
+        "exec(",           # Code injection bypass
+        "compile(",        # Code compilation bypass
+    ]
+
+    # Regex to extract module names from import statements
+    _PYTHON_IMPORT_RE = re.compile(r'(?:^|;|\n)\s*(?:import|from)\s+(\w+)')
+
     def shell_exec(self, command: str) -> str:
         """Run a shell command and return its output (stdout + stderr).
 
@@ -1463,7 +1493,22 @@ TELEGRAM:
     # ==================================================================
 
     def python_exec(self, code: str) -> str:
-        """Run Python code in a subprocess sandbox (15s timeout)."""
+        """Run Python code in a subprocess sandbox (15s timeout).
+
+        Blocks dangerous imports and operations to prevent filesystem
+        damage, command execution, and network access.
+        """
+        # Check for blocked imports
+        for match in self._PYTHON_IMPORT_RE.finditer(code):
+            module = match.group(1)
+            if module in self._BLOCKED_PYTHON_IMPORTS:
+                return f"Blocked: import of '{module}' is not allowed in python_exec."
+
+        # Check for dangerous patterns
+        for pattern in self._BLOCKED_PYTHON_PATTERNS:
+            if pattern in code:
+                return f"Blocked: '{pattern}' is not allowed in python_exec."
+
         try:
             result = subprocess.run(
                 ["python3", "-c", code],
