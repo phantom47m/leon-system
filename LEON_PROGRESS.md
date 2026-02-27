@@ -146,3 +146,5 @@
 - [ ] Update stale stt_provider config (Issue #22)
 
 **2026-02-27 — Issue #4 fixed:** `python_exec` now blocks 10 dangerous module imports (subprocess, shutil, ctypes, socket, etc.) and 15 dangerous patterns (os.system, os.remove, __import__, open, eval, exec, compile) before execution; 33 new security tests added.
+
+**2026-02-27 — Issue #7 hardened:** `python_exec` sandbox hardened — subprocess env stripped to {PATH, HOME, LANG} (no API keys/tokens exposed), cwd set to /tmp (no project file access), denylist expanded to 34 patterns (adds os.environ, os.path, os.listdir, os.walk, builtins, getattr, globals, locals, breakpoint) and 13 blocked imports (adds pathlib, tempfile, webbrowser); 23 new sandbox tests added.

@@ -2736,6 +2736,163 @@ class TestPythonExecSecurity(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# PYTHON_EXEC SANDBOX HARDENING
+# ══════════════════════════════════════════════════════════
+
+class TestPythonExecSandbox(unittest.TestCase):
+    """Verify python_exec environment isolation and expanded denylist."""
+
+    def setUp(self):
+        from core.system_skills import SystemSkills
+        self.skills = SystemSkills()
+
+    # --- Environment variable stripping ---
+
+    def test_env_vars_stripped_by_pattern(self):
+        """os.environ access itself must be blocked (defense in depth)."""
+        result = self.skills.python_exec(
+            "import os; print(os.environ)"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_env_config_has_minimal_path(self):
+        """The sandbox env config should contain only /usr/bin:/bin."""
+        from core.system_skills import SystemSkills
+        env = SystemSkills._PYTHON_EXEC_ENV
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+
+    def test_env_config_home_is_tmp(self):
+        """The sandbox env config should set HOME to /tmp."""
+        from core.system_skills import SystemSkills
+        env = SystemSkills._PYTHON_EXEC_ENV
+        self.assertEqual(env["HOME"], "/tmp")
+
+    def test_env_config_no_secrets(self):
+        """The sandbox env config must not contain any secret keys."""
+        from core.system_skills import SystemSkills
+        env = SystemSkills._PYTHON_EXEC_ENV
+        secret_keys = {"ANTHROPIC_API_KEY", "GROQ_API_KEY", "HA_TOKEN",
+                       "DISCORD_TOKEN", "OPENAI_API_KEY"}
+        for key in secret_keys:
+            self.assertNotIn(key, env)
+
+    # --- Working directory isolation ---
+
+    def test_cwd_is_tmp(self):
+        """Subprocess should run in /tmp, not the project directory."""
+        result = self.skills.python_exec(
+            "import os; print(os.getcwd())"
+        )
+        # os.getcwd() itself is blocked by pattern, so verify the block works
+        self.assertIn("Blocked", result)
+
+    def test_cannot_read_project_files_via_os(self):
+        """os.listdir should be blocked."""
+        result = self.skills.python_exec("import os; os.listdir('.')")
+        self.assertIn("Blocked", result)
+
+    def test_cannot_traverse_with_os_walk(self):
+        """os.walk should be blocked."""
+        result = self.skills.python_exec(
+            "import os; list(os.walk('.'))"
+        )
+        self.assertIn("Blocked", result)
+
+    # --- Expanded blocked imports ---
+
+    def test_blocks_pathlib_import(self):
+        """pathlib can bypass open() to read/write files."""
+        result = self.skills.python_exec(
+            "from pathlib import Path; print(Path('/etc/passwd').read_text())"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_blocks_tempfile_import(self):
+        result = self.skills.python_exec("import tempfile")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_webbrowser_import(self):
+        result = self.skills.python_exec("import webbrowser; webbrowser.open('http://evil.com')")
+        self.assertIn("Blocked", result)
+
+    # --- Expanded blocked patterns ---
+
+    def test_blocks_os_environ(self):
+        """Direct os.environ access should be blocked."""
+        result = self.skills.python_exec(
+            "import os; print(os.environ)"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_path(self):
+        result = self.skills.python_exec(
+            "import os; print(os.path.exists('/etc/passwd'))"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_makedirs(self):
+        result = self.skills.python_exec("import os; os.makedirs('/tmp/evil/dir')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_rename(self):
+        result = self.skills.python_exec("import os; os.rename('a', 'b')")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_os_chmod(self):
+        result = self.skills.python_exec("import os; os.chmod('/tmp/x', 0o777)")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_builtins_access(self):
+        """builtins.__import__ bypass should be blocked."""
+        result = self.skills.python_exec(
+            "import builtins; builtins.__import__('subprocess')"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_blocks_getattr_bypass(self):
+        """getattr() can be used to bypass pattern matching."""
+        result = self.skills.python_exec(
+            "import os; getattr(os, 'system')('id')"
+        )
+        self.assertIn("Blocked", result)
+
+    def test_blocks_globals_inspection(self):
+        result = self.skills.python_exec("print(globals())")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_locals_inspection(self):
+        result = self.skills.python_exec("print(locals())")
+        self.assertIn("Blocked", result)
+
+    def test_blocks_breakpoint(self):
+        result = self.skills.python_exec("breakpoint()")
+        self.assertIn("Blocked", result)
+
+    # --- Safe code still works with sandbox ---
+
+    def test_math_still_works(self):
+        """Basic math should still execute correctly in sandbox."""
+        result = self.skills.python_exec("print(sum(range(10)))")
+        self.assertIn("45", result)
+
+    def test_datetime_still_works(self):
+        """datetime import should still work."""
+        result = self.skills.python_exec(
+            "from datetime import datetime; print(datetime.now().year)"
+        )
+        self.assertNotIn("Blocked", result)
+        self.assertIn("202", result)
+
+    def test_collections_still_works(self):
+        """Standard library safe modules should still work."""
+        result = self.skills.python_exec(
+            "from collections import Counter; print(Counter('aabbc'))"
+        )
+        self.assertNotIn("Blocked", result)
+        self.assertIn("Counter", result)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

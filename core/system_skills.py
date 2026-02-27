@@ -1307,7 +1307,8 @@ TELEGRAM:
     _BLOCKED_PYTHON_IMPORTS = frozenset({
         "subprocess", "shutil", "ctypes", "socket",
         "urllib", "requests", "multiprocessing", "signal",
-        "importlib", "http",
+        "importlib", "http", "pathlib", "tempfile",
+        "webbrowser", "antigravity", "turtle",
     })
 
     # Dangerous Python patterns — blocked by substring match
@@ -1322,11 +1323,28 @@ TELEGRAM:
         "os.removedirs",   # Recursive directory deletion
         "os.kill",         # Process killing
         "os.fork",         # Process forking
+        "os.environ",      # Environment variable access
+        "os.path",         # Filesystem traversal
+        "os.listdir",      # Directory listing
+        "os.walk",         # Recursive directory listing
+        "os.getcwd",       # Working directory discovery
+        "os.chdir",        # Working directory change
+        "os.makedirs",     # Directory creation
+        "os.mkdir",        # Directory creation
+        "os.rename",       # File renaming
+        "os.replace",      # File replacement
+        "os.chmod",        # Permission change
+        "os.chown",        # Ownership change
         "__import__",      # Import blocklist bypass
+        "builtins",        # Builtins access for import bypass
+        "globals(",        # Globals inspection
+        "locals(",         # Locals inspection
+        "getattr(",        # Attribute access bypass
         "open(",           # File I/O — use shell_exec for file operations
         "eval(",           # Code injection bypass
         "exec(",           # Code injection bypass
         "compile(",        # Code compilation bypass
+        "breakpoint(",     # Debugger access
     ]
 
     # Regex to extract module names from import statements
@@ -1492,11 +1510,22 @@ TELEGRAM:
     # PYTHON CODE EXECUTION
     # ==================================================================
 
+    # Minimal environment for python_exec — strips all secrets (API keys,
+    # tokens, credentials) that would otherwise be inherited by the subprocess.
+    _PYTHON_EXEC_ENV = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
     def python_exec(self, code: str) -> str:
         """Run Python code in a subprocess sandbox (15s timeout).
 
-        Blocks dangerous imports and operations to prevent filesystem
-        damage, command execution, and network access.
+        Security measures:
+        - Blocks dangerous imports (subprocess, pathlib, etc.)
+        - Blocks dangerous builtins/patterns (open, eval, getattr, etc.)
+        - Strips environment variables (no API keys/tokens accessible)
+        - Runs in /tmp (no access to project directory)
         """
         # Check for blocked imports
         for match in self._PYTHON_IMPORT_RE.finditer(code):
@@ -1513,6 +1542,8 @@ TELEGRAM:
             result = subprocess.run(
                 ["python3", "-c", code],
                 capture_output=True, text=True, timeout=15,
+                env=self._PYTHON_EXEC_ENV,
+                cwd="/tmp",
             )
             out = (result.stdout + result.stderr).strip()
             return out[:2000] if out else "(no output)"

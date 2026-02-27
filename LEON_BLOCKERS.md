@@ -16,7 +16,7 @@
 ## Leon System Blockers
 
 ### Medium
-7. **python_exec runs unsandboxed** — No confirmation or restricted execution.
+7. ~~**python_exec runs unsandboxed**~~ — **Fixed:** env stripped, cwd=/tmp, expanded denylist (34 patterns, 13 imports).
 8. **--dangerously-skip-permissions** — All spawned agents run with full permissions.
 9. **Event loop threading** — Multiple event loops in threads (not thread-safe).
 
