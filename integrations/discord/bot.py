@@ -126,6 +126,16 @@ class AIDiscordBot(discord.Client):
                     Path(CHANNEL_FILE).write_text(
                         json.dumps({"channel_id": str(chat_ch.id), "is_dm": False})
                     )
+                # Write ALL channel name→ID mappings so Leon can post to any channel
+                # without needing the in-process dashboard singleton
+                try:
+                    all_ids = {name: str(ch.id) for name, ch in db._channels.items()}
+                    Path("/tmp/leon_discord_channel_map.json").write_text(
+                        json.dumps(all_ids)
+                    )
+                    logger.info("Wrote channel map: %s", list(all_ids.keys()))
+                except Exception as _e:
+                    logger.warning("Failed to write channel map: %s", _e)
         except Exception as e:
             logger.error("Dashboard setup failed (non-fatal): %s", e)
 

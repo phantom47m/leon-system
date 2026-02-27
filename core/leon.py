@@ -1399,48 +1399,46 @@ Vision: {vision_desc}
         """
         Proactively push a message to the owner's Discord.
 
-        channel:
-          "updates" → #updates  (proactive messages, briefs, alerts — default)
-          "chat"    → #chat     (direct conversational replies)
-          "log"     → #log      (autonomous action one-liners)
+        channel: any Discord channel name — "chat", "dev", "updates", "log", etc.
+        Posts directly to Discord API using channel map written by the bot on startup.
         """
         try:
-            from integrations.discord.dashboard import get_dashboard
-            db = get_dashboard()
-            if db:
-                if channel == "log":
-                    await db.post_to_log(text)
-                    return
-                elif channel == "chat":
-                    ch = db._channels.get("chat")
-                    if ch:
-                        await ch.send(text[:2000])
-                        return
-                elif channel == "dev":
-                    await db.post_to_dev(text)
-                    return
-                else:
-                    await db.post_to_updates(text)
-                    return
-        except Exception:
-            pass
-
-        try:
-            channel_file = Path("/tmp/leon_discord_channel.json")
             token_file   = Path("/tmp/leon_discord_bot_token.txt")
-            if not channel_file.exists() or not token_file.exists():
+            channel_map_file = Path("/tmp/leon_discord_channel_map.json")
+            if not token_file.exists():
                 return
-            channel_id = json.loads(channel_file.read_text())["channel_id"]
             token = token_file.read_text().strip()
-            if not token or not channel_id:
+            if not token:
                 return
+
+            # Resolve channel ID — try the channel map first, fall back to default #chat
+            channel_id = None
+            if channel_map_file.exists():
+                try:
+                    ch_map = json.loads(channel_map_file.read_text())
+                    channel_id = ch_map.get(channel)
+                    if not channel_id:
+                        # Fallback: chat
+                        channel_id = ch_map.get("chat")
+                except Exception:
+                    pass
+            if not channel_id:
+                # Last resort: use the single-channel tmp file
+                channel_file = Path("/tmp/leon_discord_channel.json")
+                if channel_file.exists():
+                    channel_id = json.loads(channel_file.read_text()).get("channel_id")
+            if not channel_id:
+                return
+
             async with aiohttp.ClientSession() as session:
-                await session.post(
+                resp = await session.post(
                     f"https://discord.com/api/v10/channels/{channel_id}/messages",
                     headers={"Authorization": f"Bot {token}"},
-                    json={"content": text},
+                    json={"content": text[:2000]},
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
+                if resp.status not in (200, 201):
+                    logger.debug("Discord post to #%s status %s", channel, resp.status)
         except Exception as e:
             logger.debug("Discord proactive message failed: %s", e)
 
