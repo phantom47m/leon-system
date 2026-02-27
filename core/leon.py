@@ -708,6 +708,9 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
             self.vault.lock()
         if self.audit_log:
             self.audit_log.log("system_stop", "Leon stopped", "info")
+        # Terminate active agents and close their file handles
+        if self.agent_manager:
+            await self.agent_manager.shutdown()
         # Force-flush memory (bypasses debounce) to ensure no data is lost
         self.memory.save(force=True)
         logger.info("Leon stopped")

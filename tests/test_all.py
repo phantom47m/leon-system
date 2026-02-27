@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import ssl
+import subprocess
 import sys
 import tempfile
 import time
@@ -1570,6 +1571,264 @@ class TestAgentManagerFileHandles(unittest.TestCase):
             # We verify indirectly: no open handles = no ResourceWarning
         finally:
             subprocess.Popen = original_popen
+
+
+# ══════════════════════════════════════════════════════════
+# AGENT MANAGER — LIFECYCLE HARDENING
+# ══════════════════════════════════════════════════════════
+
+class TestAgentManagerLifecycle(unittest.TestCase):
+    """Tests for agent lifecycle hardening: zombie prevention, non-blocking
+    termination, file handle cleanup on status check, and graceful shutdown."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.config = {
+            "output_directory": os.path.join(self.tmp_dir, "out"),
+            "brief_directory": os.path.join(self.tmp_dir, "briefs"),
+            "timeout_minutes": 1,
+        }
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _make_manager_with_fake_agent(self, returncode=0, poll_value=None,
+                                       output="done", agent_id="agent_test1"):
+        """Create an AgentManager with a fake agent for testing."""
+        from core.agent_manager import AgentManager
+
+        mgr = AgentManager(openclaw=None, config=self.config)
+
+        # Create fake output files
+        output_file = os.path.join(self.config["output_directory"], f"{agent_id}.log")
+        error_file = os.path.join(self.config["output_directory"], f"{agent_id}.err")
+        with open(output_file, "w") as f:
+            f.write(output)
+        with open(error_file, "w") as f:
+            f.write("")
+
+        # Create mock file handles
+        fh1 = open(output_file, "r")
+        fh2 = open(error_file, "r")
+
+        # Create mock process
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.poll.return_value = poll_value  # None=running, 0=exited
+        mock_proc.returncode = returncode
+        mock_proc.pid = 12345
+        mock_proc.wait = unittest.mock.MagicMock()
+        mock_proc.terminate = unittest.mock.MagicMock()
+        mock_proc.kill = unittest.mock.MagicMock()
+
+        mgr.active_agents[agent_id] = {
+            "process": mock_proc,
+            "pid": mock_proc.pid,
+            "brief_path": "/tmp/brief.md",
+            "project_path": "/tmp",
+            "output_file": output_file,
+            "error_file": error_file,
+            "started_at": datetime.now().isoformat(),
+            "status": "running",
+            "last_check": datetime.now().isoformat(),
+            "retries": 0,
+            "_file_handles": [fh1, fh2],
+        }
+
+        return mgr, mock_proc, fh1, fh2
+
+    def test_terminate_reaps_after_kill(self):
+        """After kill(), process.wait() must be called to reap zombie."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=None  # still running
+        )
+        # Simulate terminate() succeeding but wait() timing out
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="claude", timeout=5),  # first wait
+            None,  # second wait (after kill)
+        ]
+
+        asyncio.get_event_loop().run_until_complete(
+            mgr.terminate_agent("agent_test1")
+        )
+
+        # terminate() called first
+        mock_proc.terminate.assert_called_once()
+        # kill() called after timeout
+        mock_proc.kill.assert_called_once()
+        # wait() called twice: once after terminate, once after kill
+        self.assertEqual(mock_proc.wait.call_count, 2)
+        # File handles closed
+        self.assertTrue(fh1.closed)
+        self.assertTrue(fh2.closed)
+
+    def test_terminate_handles_already_dead_process(self):
+        """terminate() should not crash if process is already dead (OSError)."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=None
+        )
+        mock_proc.terminate.side_effect = OSError("No such process")
+
+        asyncio.get_event_loop().run_until_complete(
+            mgr.terminate_agent("agent_test1")
+        )
+
+        # Should not crash — agent marked as terminated
+        self.assertEqual(mgr.active_agents["agent_test1"]["status"], "terminated")
+        # File handles still closed
+        self.assertTrue(fh1.closed)
+        self.assertTrue(fh2.closed)
+
+    def test_terminate_nonblocking_wait(self):
+        """process.wait() runs in asyncio.to_thread, not blocking the loop."""
+        mgr, mock_proc, _, _ = self._make_manager_with_fake_agent(poll_value=None)
+        mock_proc.wait.return_value = None
+
+        # Verify terminate works via the event loop (to_thread is used)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(mgr.terminate_agent("agent_test1"))
+        finally:
+            loop.close()
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
+
+    def test_check_status_closes_handles_on_completion(self):
+        """File handles should be closed as soon as the process exits."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=0, returncode=0, output="task done"
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            mgr.check_status("agent_test1")
+        )
+
+        self.assertTrue(result["completed"])
+        self.assertFalse(result["running"])
+        # File handles closed immediately — not waiting for cleanup_agent()
+        self.assertTrue(fh1.closed)
+        self.assertTrue(fh2.closed)
+
+    def test_check_status_closes_handles_on_failure(self):
+        """File handles should be closed when an agent fails (no retry)."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=1, returncode=1, output=""
+        )
+        mgr.auto_retry = False  # No retries
+
+        result = asyncio.get_event_loop().run_until_complete(
+            mgr.check_status("agent_test1")
+        )
+
+        self.assertTrue(result["failed"])
+        self.assertTrue(fh1.closed)
+        self.assertTrue(fh2.closed)
+
+    def test_check_status_keeps_handles_open_while_running(self):
+        """File handles should stay open while agent is still running."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=None  # still running
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            mgr.check_status("agent_test1")
+        )
+
+        self.assertTrue(result["running"])
+        # Handles still open — process is writing to them
+        self.assertFalse(fh1.closed)
+        self.assertFalse(fh2.closed)
+
+    def test_shutdown_terminates_running_agents(self):
+        """shutdown() should terminate all running agents."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=None, agent_id="agent_a"
+        )
+        mock_proc.wait.return_value = None
+
+        asyncio.get_event_loop().run_until_complete(mgr.shutdown())
+
+        mock_proc.terminate.assert_called_once()
+        # All agents cleared
+        self.assertEqual(len(mgr.active_agents), 0)
+
+    def test_shutdown_closes_handles_for_finished_agents(self):
+        """shutdown() should close file handles for already-finished agents."""
+        mgr, mock_proc, fh1, fh2 = self._make_manager_with_fake_agent(
+            poll_value=0, returncode=0, agent_id="agent_b"
+        )
+
+        asyncio.get_event_loop().run_until_complete(mgr.shutdown())
+
+        # Process already exited — no terminate call
+        mock_proc.terminate.assert_not_called()
+        # But handles are closed
+        self.assertTrue(fh1.closed)
+        self.assertTrue(fh2.closed)
+        self.assertEqual(len(mgr.active_agents), 0)
+
+    def test_shutdown_no_agents_is_noop(self):
+        """shutdown() with no active agents should return cleanly."""
+        from core.agent_manager import AgentManager
+
+        mgr = AgentManager(openclaw=None, config=self.config)
+        # Should not raise
+        asyncio.get_event_loop().run_until_complete(mgr.shutdown())
+        self.assertEqual(len(mgr.active_agents), 0)
+
+    def test_shutdown_multiple_agents(self):
+        """shutdown() should handle multiple agents (mix of running + finished)."""
+        from core.agent_manager import AgentManager
+
+        mgr = AgentManager(openclaw=None, config=self.config)
+
+        for i, (poll_val, rc) in enumerate([(None, None), (0, 0), (None, None)]):
+            aid = f"agent_{i}"
+            output_file = os.path.join(self.config["output_directory"], f"{aid}.log")
+            error_file = os.path.join(self.config["output_directory"], f"{aid}.err")
+            with open(output_file, "w") as f:
+                f.write("output")
+            with open(error_file, "w") as f:
+                f.write("")
+
+            mock_proc = unittest.mock.MagicMock()
+            mock_proc.poll.return_value = poll_val
+            mock_proc.returncode = rc
+            mock_proc.pid = 10000 + i
+            mock_proc.wait.return_value = None
+
+            fh1 = open(output_file, "r")
+            fh2 = open(error_file, "r")
+            mgr.active_agents[aid] = {
+                "process": mock_proc,
+                "pid": mock_proc.pid,
+                "brief_path": "/tmp/brief.md",
+                "project_path": "/tmp",
+                "output_file": output_file,
+                "error_file": error_file,
+                "started_at": datetime.now().isoformat(),
+                "status": "running",
+                "last_check": datetime.now().isoformat(),
+                "retries": 0,
+                "_file_handles": [fh1, fh2],
+            }
+
+        asyncio.get_event_loop().run_until_complete(mgr.shutdown())
+        self.assertEqual(len(mgr.active_agents), 0)
+
+    def test_terminate_logs_unkillable_process(self):
+        """If process doesn't die even after SIGKILL, error is logged."""
+        mgr, mock_proc, _, _ = self._make_manager_with_fake_agent(poll_value=None)
+        # Both waits timeout
+        mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=5)
+
+        with self.assertLogs("leon.agents", level="ERROR") as cm:
+            asyncio.get_event_loop().run_until_complete(
+                mgr.terminate_agent("agent_test1")
+            )
+
+        self.assertTrue(any("did not die after SIGKILL" in m for m in cm.output))
 
 
 # ══════════════════════════════════════════════════════════

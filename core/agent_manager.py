@@ -188,6 +188,13 @@ class AgentManager:
         agent["status"] = "running" if is_running else ("completed" if completed else "failed")
         agent["last_check"] = datetime.now().isoformat()
 
+        # Close file handles as soon as the process exits — the files can
+        # still be read (by get_agent_results) but the handles are no longer
+        # needed.  This prevents leaking file descriptors if cleanup_agent()
+        # is delayed or never called.
+        if not is_running:
+            self._close_file_handles(agent_id)
+
         return {
             "running": is_running,
             "completed": completed,
@@ -241,16 +248,32 @@ class AgentManager:
         }
 
     async def terminate_agent(self, agent_id: str):
-        """Kill a running agent."""
+        """Kill a running agent.
+
+        Uses asyncio.to_thread for process.wait() to avoid blocking the
+        event loop, and always reaps the process after kill() to prevent
+        zombie accumulation.
+        """
         if agent_id not in self.active_agents:
             return
         agent = self.active_agents[agent_id]
         process: subprocess.Popen = agent["process"]
         try:
             process.terminate()
-            process.wait(timeout=5)
+            await asyncio.to_thread(process.wait, timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+            # Reap the killed process to prevent zombie accumulation
+            try:
+                await asyncio.to_thread(process.wait, timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "Agent %s (PID %s) did not die after SIGKILL",
+                    agent_id, process.pid,
+                )
+        except OSError:
+            # Process already dead — nothing to do
+            pass
         agent["status"] = "terminated"
         self._close_file_handles(agent_id)
         logger.info(f"Agent {agent_id} terminated")
@@ -259,6 +282,30 @@ class AgentManager:
         """Remove agent from active tracking (call after results are collected)."""
         self._close_file_handles(agent_id)
         self.active_agents.pop(agent_id, None)
+
+    async def shutdown(self):
+        """Terminate all active agents and close all file handles.
+
+        Called during Leon's graceful shutdown to prevent orphaned agent
+        processes and leaked file descriptors.
+        """
+        agent_ids = list(self.active_agents.keys())
+        if not agent_ids:
+            return
+        logger.info("Shutting down %d active agent(s)...", len(agent_ids))
+        for agent_id in agent_ids:
+            agent = self.active_agents.get(agent_id)
+            if not agent:
+                continue
+            process: subprocess.Popen = agent["process"]
+            if process.poll() is None:
+                # Still running — terminate it
+                await self.terminate_agent(agent_id)
+            else:
+                # Already exited — just close file handles
+                self._close_file_handles(agent_id)
+        self.active_agents.clear()
+        logger.info("All agents shut down")
 
     # ------------------------------------------------------------------
     # Helpers
