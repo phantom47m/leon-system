@@ -43,13 +43,69 @@ STATE_PATH      = Path("data/scheduler_state.json")
 
 # ── Minimal cron parser (no external deps) ───────────────────────────────────
 
+def _cron_matches_field(field: str, value: int) -> bool:
+    """
+    Check if *value* matches a single cron field.
+
+    Supported syntax (combinable via comma):
+      *        — any value
+      5        — exact match
+      1-5      — inclusive range
+      */15     — step from 0
+      1-5/2    — step within range
+    """
+    for token in field.split(","):
+        token = token.strip()
+        if not token:
+            continue
+
+        # Step handling:  */N  or  A-B/N
+        step = 1
+        if "/" in token:
+            base, step_str = token.split("/", 1)
+            try:
+                step = int(step_str)
+            except ValueError:
+                continue          # malformed — skip token
+            if step < 1:
+                continue
+            token = base          # continue parsing the base part
+
+        if token == "*":
+            if value % step == 0:
+                return True
+            continue
+
+        if "-" in token:
+            parts = token.split("-", 1)
+            try:
+                lo, hi = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if lo <= value <= hi and (value - lo) % step == 0:
+                return True
+            continue
+
+        # Plain integer
+        try:
+            if int(token) == value:
+                return True
+        except ValueError:
+            continue
+
+    return False
+
+
 def _cron_is_due(cron_expr: str, last_run: Optional[datetime], now: datetime) -> bool:
     """
     Return True if the cron expression fires at `now` and hasn't run since
     the last matching window.
 
     Supports standard 5-field cron: minute hour dom month dow
-    Wildcards (*) and single values only (no ranges/lists for simplicity).
+    Fields may use *, single values, ranges (1-5), steps (*/15), lists (0,6,12),
+    and combinations (1-5/2).
+
+    Day-of-week follows cron convention: 0=Sunday … 6=Saturday (7=Sunday alias).
     """
     parts = cron_expr.strip().split()
     if len(parts) != 5:
@@ -58,14 +114,14 @@ def _cron_is_due(cron_expr: str, last_run: Optional[datetime], now: datetime) ->
 
     minute, hour, dom, month, dow = parts
 
-    def _matches(field: str, value: int) -> bool:
-        return field == "*" or int(field) == value
+    # Convert Python weekday (0=Mon … 6=Sun) to cron dow (0=Sun … 6=Sat)
+    cron_dow = (now.weekday() + 1) % 7
 
-    if not _matches(month,  now.month):     return False
-    if not _matches(dow,    now.weekday()): return False
-    if not _matches(dom,    now.day):       return False
-    if not _matches(hour,   now.hour):      return False
-    if not _matches(minute, now.minute):    return False
+    if not _cron_matches_field(month,  now.month):  return False
+    if not _cron_matches_field(dow,    cron_dow):    return False
+    if not _cron_matches_field(dom,    now.day):     return False
+    if not _cron_matches_field(hour,   now.hour):    return False
+    if not _cron_matches_field(minute, now.minute):  return False
 
     # Prevent double-firing within the same minute
     if last_run and (now - last_run) < timedelta(minutes=1):
