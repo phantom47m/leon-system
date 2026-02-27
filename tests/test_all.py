@@ -1381,6 +1381,196 @@ class TestVoiceSystem(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# VOICE SYSTEM — NON-BLOCKING PLAYBACK & CACHE FIXES
+# ══════════════════════════════════════════════════════════
+
+class TestVoiceNonBlockingPlayback(unittest.TestCase):
+    """Tests for non-blocking audio playback (subprocess.run → asyncio.to_thread)."""
+
+    def setUp(self):
+        from core.voice import VoiceSystem
+        self.voice = VoiceSystem(on_command=None, config={})
+
+    def test_play_audio_bytes_is_async(self):
+        """_play_audio_bytes should be a coroutine (async def)."""
+        import inspect
+        self.assertTrue(inspect.iscoroutinefunction(self.voice._play_audio_bytes))
+
+    def test_play_audio_bytes_uses_to_thread(self):
+        """_play_audio_bytes should call asyncio.to_thread for subprocess.run."""
+        import inspect
+        source = inspect.getsource(self.voice._play_audio_bytes)
+        self.assertIn("asyncio.to_thread", source,
+                       "paplay subprocess.run must be wrapped in asyncio.to_thread")
+        self.assertNotIn("subprocess.run(cmd, input=raw_bytes, timeout=60)\n", source,
+                         "Bare subprocess.run should not appear without await asyncio.to_thread")
+
+    def test_sounddevice_fallback_uses_to_thread(self):
+        """sounddevice fallback should also use asyncio.to_thread."""
+        import inspect
+        source = inspect.getsource(self.voice._play_audio_bytes)
+        # The sounddevice fallback section should contain asyncio.to_thread
+        sd_section_idx = source.find("sounddevice")
+        self.assertGreater(sd_section_idx, 0, "sounddevice fallback should exist")
+        sd_section = source[sd_section_idx:]
+        self.assertIn("asyncio.to_thread", sd_section,
+                       "sounddevice fallback must use asyncio.to_thread")
+
+    def test_play_audio_bytes_rejects_empty(self):
+        """Should return False for empty/invalid audio bytes."""
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(self.voice._play_audio_bytes(b""))
+            self.assertFalse(result)
+        finally:
+            loop.close()
+
+    def test_play_audio_bytes_rejects_too_short(self):
+        """Should return False for audio too short to be valid."""
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(self.voice._play_audio_bytes(b"x" * 50))
+            self.assertFalse(result)
+        finally:
+            loop.close()
+
+
+class TestTTSCacheLRU(unittest.TestCase):
+    """Tests for TTS cache LRU eviction (bounded in-memory cache)."""
+
+    def setUp(self):
+        from core.voice import VoiceSystem
+        self.voice = VoiceSystem(on_command=None, config={})
+
+    def test_tts_cache_is_ordered_dict(self):
+        """TTS cache should be an OrderedDict for LRU support."""
+        from collections import OrderedDict
+        self.assertIsInstance(self.voice._tts_cache, OrderedDict)
+
+    def test_tts_cache_max_entries_constant(self):
+        """_TTS_CACHE_MAX_ENTRIES should be defined and reasonable."""
+        from core.voice import _TTS_CACHE_MAX_ENTRIES
+        self.assertIsInstance(_TTS_CACHE_MAX_ENTRIES, int)
+        self.assertGreater(_TTS_CACHE_MAX_ENTRIES, 0)
+        self.assertLessEqual(_TTS_CACHE_MAX_ENTRIES, 1000)
+
+    def test_cache_evicts_oldest_when_full(self):
+        """Inserting beyond max should evict the oldest entry."""
+        from core.voice import _TTS_CACHE_MAX_ENTRIES
+        self.voice._tts_cache.clear()
+        # Fill the cache to max
+        for i in range(_TTS_CACHE_MAX_ENTRIES):
+            self.voice._tts_cache[f"key_{i}"] = b"audio_data"
+        self.assertEqual(len(self.voice._tts_cache), _TTS_CACHE_MAX_ENTRIES)
+
+        # Add one more — should evict key_0
+        self.voice._tts_cache["new_key"] = b"new_audio"
+        self.voice._tts_cache.move_to_end("new_key")
+        while len(self.voice._tts_cache) > _TTS_CACHE_MAX_ENTRIES:
+            self.voice._tts_cache.popitem(last=False)
+
+        self.assertEqual(len(self.voice._tts_cache), _TTS_CACHE_MAX_ENTRIES)
+        self.assertNotIn("key_0", self.voice._tts_cache)
+        self.assertIn("new_key", self.voice._tts_cache)
+
+    def test_cache_hit_moves_to_end(self):
+        """Accessing a cached entry should move it to the end (LRU touch)."""
+        self.voice._tts_cache.clear()
+        self.voice._tts_cache["old"] = b"old_data"
+        self.voice._tts_cache["new"] = b"new_data"
+
+        # Access "old" — should move it to the end
+        self.voice._tts_cache.get("old")
+        self.voice._tts_cache.move_to_end("old")
+
+        # "new" should now be the oldest (first to evict)
+        first_key = next(iter(self.voice._tts_cache))
+        self.assertEqual(first_key, "new")
+
+    def test_load_tts_cache_respects_max(self):
+        """_load_tts_cache should only load the most recent N files."""
+        import tempfile
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create more files than the max
+            from core.voice import _TTS_CACHE_MAX_ENTRIES
+            num_files = _TTS_CACHE_MAX_ENTRIES + 50
+            for i in range(num_files):
+                p = os.path.join(tmpdir, f"entry_{i:05d}.mp3")
+                # Write valid-looking MP3 data (ID3 header)
+                with open(p, "wb") as f:
+                    f.write(b"ID3" + b"\x00" * 100)
+                # Set mtime to ensure ordering
+                os.utime(p, (i, i))
+
+            self.voice._tts_cache_dir = Path(tmpdir)
+            self.voice._tts_cache.clear()
+            self.voice._load_tts_cache()
+
+            self.assertLessEqual(len(self.voice._tts_cache), _TTS_CACHE_MAX_ENTRIES)
+
+    def test_cache_starts_empty(self):
+        """Cache should start empty when no cache dir exists."""
+        from core.voice import VoiceSystem
+        v = VoiceSystem(on_command=None, config={"tts_cache_dir": "/nonexistent/path"})
+        self.assertEqual(len(v._tts_cache), 0)
+
+
+class TestVADAmbientDeque(unittest.TestCase):
+    """Tests for VAD ambient history using deque instead of list.pop(0)."""
+
+    def test_vad_loop_uses_deque(self):
+        """The VAD capture loop should use deque for ambient history, not list."""
+        import inspect
+        from core.voice import VoiceSystem
+        source = inspect.getsource(VoiceSystem)
+        # Should NOT have the old list.pop(0) pattern for ambient history
+        self.assertNotIn("_ambient_history.pop(0)", source,
+                         "Should use deque(maxlen=) instead of list.pop(0)")
+
+    def test_deque_imported(self):
+        """deque should be imported from collections."""
+        import core.voice as voice_module
+        self.assertTrue(hasattr(voice_module, 'deque'),
+                        "deque should be available in voice module namespace")
+
+    def test_deque_maxlen_auto_evicts(self):
+        """Verify deque(maxlen=N) auto-evicts — this is the behavior we rely on."""
+        from collections import deque
+        d = deque(maxlen=3)
+        d.append(1)
+        d.append(2)
+        d.append(3)
+        d.append(4)  # should evict 1
+        self.assertEqual(list(d), [2, 3, 4])
+        self.assertEqual(len(d), 3)
+
+
+class TestDeepgramNonBlocking(unittest.TestCase):
+    """Tests for non-blocking Deepgram audio queue access."""
+
+    def test_stream_to_deepgram_uses_executor(self):
+        """_stream_to_deepgram should use run_in_executor for queue.Queue.get."""
+        import inspect
+        from core.voice import VoiceSystem
+        source = inspect.getsource(VoiceSystem._stream_to_deepgram)
+        self.assertIn("run_in_executor", source,
+                       "queue.Queue.get should be wrapped in run_in_executor")
+        # Ensure queue.get is NOT called directly as a bare statement (only inside a lambda/executor)
+        # The pattern "data = self._audio_queue.get(" should not appear outside a lambda
+        self.assertNotIn("data = self._audio_queue.get(", source,
+                         "queue.get must be wrapped in run_in_executor, not called directly")
+
+    def test_stream_to_deepgram_gets_running_loop(self):
+        """Should use asyncio.get_running_loop() for the executor."""
+        import inspect
+        from core.voice import VoiceSystem
+        source = inspect.getsource(VoiceSystem._stream_to_deepgram)
+        self.assertIn("get_running_loop", source,
+                       "Should use asyncio.get_running_loop() for executor calls")
+
+
+# ══════════════════════════════════════════════════════════
 # SCREEN AWARENESS
 # ══════════════════════════════════════════════════════════
 

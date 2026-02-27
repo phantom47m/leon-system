@@ -21,6 +21,7 @@ import queue
 import re
 import threading
 import time
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -218,6 +219,9 @@ _CACHEABLE_RESPONSES = {
     "working on it", "right away", "understood", "absolutely", "of course",
 }
 
+# Max in-memory TTS cache entries — prevents unbounded RAM growth
+_TTS_CACHE_MAX_ENTRIES = 200
+
 # Default sleep timeout — 120s of silence ends conversation mode
 DEFAULT_SLEEP_TIMEOUT = 120.0
 
@@ -314,8 +318,8 @@ class VoiceSystem:
         self._elevenlabs_consecutive_failures = 0
         self._elevenlabs_degraded = False
 
-        # TTS audio cache (keyed by text hash -> audio bytes)
-        self._tts_cache: dict[str, bytes] = {}
+        # TTS audio cache (keyed by text hash -> audio bytes) with LRU eviction
+        self._tts_cache: OrderedDict[str, bytes] = OrderedDict()
         self._tts_cache_dir = Path(voice_cfg.get("tts_cache_dir", "data/voice_cache"))
 
         # Load any persisted cache entries
@@ -591,8 +595,8 @@ class VoiceSystem:
         rec_frame_count = 0   # total frames since recording started (includes middle-zone)
         _diag_counter = 0
         _speak_cooldown_until = 0.0  # don't record until this timestamp (prevents echo feedback)
-        _ambient_history: list[float] = []  # rolling ambient samples for re-calibration
         _AMBIENT_WINDOW = 150   # ~30s of history
+        _ambient_history: deque[float] = deque(maxlen=_AMBIENT_WINDOW)  # O(1) rolling window
 
         while self.is_listening:
             try:
@@ -627,9 +631,7 @@ class VoiceSystem:
 
             if not recording:
                 # Collect ambient samples for rolling re-calibration
-                _ambient_history.append(rms)
-                if len(_ambient_history) > _AMBIENT_WINDOW:
-                    _ambient_history.pop(0)
+                _ambient_history.append(rms)  # deque(maxlen) auto-evicts oldest
                 # Re-calibrate every ~30s of not-recording using recent ambient
                 if len(_ambient_history) == _AMBIENT_WINDOW and _diag_counter % 150 == 0:
                     sorted_h = sorted(_ambient_history)
@@ -910,9 +912,13 @@ class VoiceSystem:
         self._deepgram_healthy = True
 
         try:
+            loop = asyncio.get_running_loop()
             while self.is_listening:
                 try:
-                    data = self._audio_queue.get(timeout=0.1)
+                    # Run blocking queue.get in executor to avoid stalling the event loop
+                    data = await loop.run_in_executor(
+                        None, lambda: self._audio_queue.get(timeout=0.1)
+                    )
                     await connection.send(data)
                 except queue.Empty:
                     continue
@@ -1185,6 +1191,7 @@ class VoiceSystem:
         cached = self._tts_cache.get(cache_key)
         if cached:
             logger.debug("TTS cache hit: %s", text[:40])
+            self._tts_cache.move_to_end(cache_key)  # LRU touch
             if await self._play_audio_bytes(cached):
                 return
             # Cache entry was bad — remove it and fall through to API
@@ -1235,6 +1242,10 @@ class VoiceSystem:
                                 # Cache if it's a short common response
                                 if text.strip().lower().rstrip("?.!,") in _CACHEABLE_RESPONSES:
                                     self._tts_cache[cache_key] = audio_bytes
+                                    self._tts_cache.move_to_end(cache_key)
+                                    # Evict oldest entries if over capacity
+                                    while len(self._tts_cache) > _TTS_CACHE_MAX_ENTRIES:
+                                        self._tts_cache.popitem(last=False)
                                     self._persist_tts_cache_entry(cache_key, audio_bytes)
                                 return
 
@@ -1358,7 +1369,7 @@ class VoiceSystem:
                 f"--channels={channels}",
             ]
             logger.info("Playing audio: %dHz %dch %d bytes via paplay", samplerate, channels, len(raw_bytes))
-            result = subprocess.run(cmd, input=raw_bytes, timeout=60)
+            result = await asyncio.to_thread(subprocess.run, cmd, input=raw_bytes, timeout=60)
             if result.returncode == 0:
                 logger.info("Audio playback complete")
                 return True
@@ -1369,13 +1380,17 @@ class VoiceSystem:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        # Fallback: sounddevice
+        # Fallback: sounddevice (run in thread to avoid blocking event loop)
         try:
             import sounddevice as sd, soundfile as sf
             audio_data, samplerate = sf.read(io.BytesIO(audio_bytes))
             logger.info("Fallback: playing via sounddevice")
-            sd.play(audio_data, samplerate)
-            sd.wait()
+
+            def _play_sd():
+                sd.play(audio_data, samplerate)
+                sd.wait()
+
+            await asyncio.to_thread(_play_sd)
             return True
         except Exception as e:
             logger.error("sounddevice fallback error: %s", e)
@@ -1437,18 +1452,22 @@ class VoiceSystem:
         return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
     def _load_tts_cache(self):
-        """Load cached TTS audio from disk."""
+        """Load cached TTS audio from disk (most recent N entries by mtime)."""
         if not self._tts_cache_dir.exists():
             return
+        # Sort by modification time (oldest first) so most recent end up at the end (LRU order)
+        files = sorted(self._tts_cache_dir.glob("*.mp3"), key=lambda f: f.stat().st_mtime)
+        # Only load the most recent entries to respect the memory cap
+        files = files[-_TTS_CACHE_MAX_ENTRIES:]
         loaded = 0
-        for f in self._tts_cache_dir.glob("*.mp3"):
+        for f in files:
             try:
                 self._tts_cache[f.stem] = f.read_bytes()
                 loaded += 1
             except Exception:
                 pass
         if loaded:
-            logger.debug("Loaded %d cached TTS entries", loaded)
+            logger.debug("Loaded %d cached TTS entries (max %d)", loaded, _TTS_CACHE_MAX_ENTRIES)
 
     def _persist_tts_cache_entry(self, key: str, audio_bytes: bytes):
         """Save a TTS cache entry to disk."""
