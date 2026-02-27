@@ -211,7 +211,23 @@ class BridgeServer:
         if self._runner:
             await self._runner.cleanup()
         self._connected = False
+        self._cancel_pending("server shutdown")
         logger.info("Bridge server stopped")
+
+    def _cancel_pending(self, reason: str):
+        """Cancel all pending futures and clear the dict.
+
+        Called on disconnect / shutdown to prevent memory leaks from
+        orphaned futures that will never receive a response.
+        """
+        if not self._pending:
+            return
+        count = len(self._pending)
+        for msg_id, fut in self._pending.items():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+        logger.debug(f"Cancelled {count} pending bridge request(s) ({reason})")
 
     async def send(self, msg: BridgeMessage):
         """Send a message to the Right Brain (fire-and-forget)."""
@@ -229,12 +245,10 @@ class BridgeServer:
         for attempt in range(1, retries + 1):
             if not self.connected:
                 return None
-            # Use a fresh future each attempt but keep the same msg.id
-            future = asyncio.get_event_loop().create_future()
+            future = asyncio.get_running_loop().create_future()
             self._pending[msg.id] = future
             await self.send(msg)
             try:
-                # Increase timeout on each retry
                 attempt_timeout = timeout * attempt
                 return await asyncio.wait_for(future, attempt_timeout)
             except asyncio.TimeoutError:
@@ -293,6 +307,7 @@ class BridgeServer:
         finally:
             self._connected = False
             self._ws = None
+            self._cancel_pending("client disconnected")
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
             logger.info("Right Brain disconnected from bridge")
@@ -308,7 +323,11 @@ class BridgeServer:
 
         # Check if this is a response to a pending request
         if msg.id in self._pending:
-            self._pending.pop(msg.id).set_result(msg)
+            fut = self._pending.pop(msg.id)
+            if fut.done():
+                logger.debug(f"Stale bridge response for {msg.id} (already timed out)")
+            else:
+                fut.set_result(msg)
             return
 
         # Heartbeat
@@ -382,7 +401,23 @@ class BridgeClient:
         if self._session:
             await self._session.close()
         self._connected = False
+        self._cancel_pending("client shutdown")
         logger.info("Bridge client stopped")
+
+    def _cancel_pending(self, reason: str):
+        """Cancel all pending futures and clear the dict.
+
+        Called on disconnect / shutdown to prevent memory leaks from
+        orphaned futures that will never receive a response.
+        """
+        if not self._pending:
+            return
+        count = len(self._pending)
+        for msg_id, fut in self._pending.items():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+        logger.debug(f"Cancelled {count} pending bridge request(s) ({reason})")
 
     async def send(self, msg: BridgeMessage):
         """Send a message to the Left Brain."""
@@ -400,7 +435,7 @@ class BridgeClient:
         for attempt in range(1, retries + 1):
             if not self.connected:
                 return None
-            future = asyncio.get_event_loop().create_future()
+            future = asyncio.get_running_loop().create_future()
             self._pending[msg.id] = future
             await self.send(msg)
             try:
@@ -485,6 +520,7 @@ class BridgeClient:
         # Connection closed
         self._connected = False
         self._ws = None
+        self._cancel_pending("server disconnected")
         logger.info("Disconnected from Left Brain")
 
     async def _handle_message(self, raw: str):
@@ -496,7 +532,11 @@ class BridgeClient:
 
         # Check pending responses
         if msg.id in self._pending:
-            self._pending.pop(msg.id).set_result(msg)
+            fut = self._pending.pop(msg.id)
+            if fut.done():
+                logger.debug(f"Stale bridge client response for {msg.id} (already timed out)")
+            else:
+                fut.set_result(msg)
             return
 
         # Heartbeat — no-op

@@ -4332,6 +4332,184 @@ class TestAwarenessSubprocess(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# NEURAL BRIDGE — Pending Future Lifecycle
+# ══════════════════════════════════════════════════════════
+
+class TestBridgePendingCleanup(unittest.TestCase):
+    """Verify _pending dict cleanup prevents memory leaks and race conditions."""
+
+    def test_server_cancel_pending_clears_dict(self):
+        """_cancel_pending should cancel all futures and clear _pending."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut1 = loop.create_future()
+            fut2 = loop.create_future()
+            server._pending["aaa"] = fut1
+            server._pending["bbb"] = fut2
+            server._cancel_pending("test")
+            self.assertEqual(len(server._pending), 0)
+            self.assertTrue(fut1.cancelled())
+            self.assertTrue(fut2.cancelled())
+        finally:
+            loop.close()
+
+    def test_client_cancel_pending_clears_dict(self):
+        """_cancel_pending should cancel all futures and clear _pending."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut1 = loop.create_future()
+            fut2 = loop.create_future()
+            client._pending["aaa"] = fut1
+            client._pending["bbb"] = fut2
+            client._cancel_pending("test")
+            self.assertEqual(len(client._pending), 0)
+            self.assertTrue(fut1.cancelled())
+            self.assertTrue(fut2.cancelled())
+        finally:
+            loop.close()
+
+    def test_cancel_pending_skips_already_done_futures(self):
+        """_cancel_pending should not crash on futures that are already done."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        loop = asyncio.new_event_loop()
+        try:
+            done_fut = loop.create_future()
+            done_fut.set_result("already done")
+            pending_fut = loop.create_future()
+            server._pending["done"] = done_fut
+            server._pending["pending"] = pending_fut
+            # Should not raise
+            server._cancel_pending("test")
+            self.assertEqual(len(server._pending), 0)
+            self.assertTrue(pending_fut.cancelled())
+            # done_fut should still have its result (not cancelled)
+            self.assertEqual(done_fut.result(), "already done")
+        finally:
+            loop.close()
+
+    def test_cancel_pending_noop_when_empty(self):
+        """_cancel_pending on empty dict should not raise."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        # Should not raise
+        server._cancel_pending("test")
+        self.assertEqual(len(server._pending), 0)
+
+    def test_server_stop_clears_pending(self):
+        """BridgeServer.stop() should cancel all pending futures."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            server._pending["msg1"] = fut
+            loop.run_until_complete(server.stop())
+            self.assertEqual(len(server._pending), 0)
+            self.assertTrue(fut.cancelled())
+        finally:
+            loop.close()
+
+    def test_client_stop_clears_pending(self):
+        """BridgeClient.stop() should cancel all pending futures."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            client._pending["msg1"] = fut
+            loop.run_until_complete(client.stop())
+            self.assertEqual(len(client._pending), 0)
+            self.assertTrue(fut.cancelled())
+        finally:
+            loop.close()
+
+    def test_server_handle_message_stale_response_safe(self):
+        """Response arriving for already-timed-out future should not crash."""
+        from core.neural_bridge import BridgeServer, BridgeMessage
+        server = BridgeServer({})
+        loop = asyncio.new_event_loop()
+        try:
+            # Create a future and cancel it (simulating timeout)
+            fut = loop.create_future()
+            fut.cancel()
+            server._pending["stale123"] = fut
+            # Build a response message with the same id
+            response = BridgeMessage(type="task_result", id="stale123", payload={"ok": True})
+            # Should not raise InvalidStateError
+            loop.run_until_complete(server._handle_message(response.to_json()))
+            # Future should have been popped
+            self.assertNotIn("stale123", server._pending)
+        finally:
+            loop.close()
+
+    def test_client_handle_message_stale_response_safe(self):
+        """Response arriving for already-timed-out future should not crash."""
+        from core.neural_bridge import BridgeClient, BridgeMessage
+        client = BridgeClient({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            fut.cancel()
+            client._pending["stale456"] = fut
+            response = BridgeMessage(type="task_result", id="stale456", payload={"ok": True})
+            loop.run_until_complete(client._handle_message(response.to_json()))
+            self.assertNotIn("stale456", client._pending)
+        finally:
+            loop.close()
+
+    def test_server_handle_message_sets_result_on_live_future(self):
+        """Normal response should still set result on a live pending future."""
+        from core.neural_bridge import BridgeServer, BridgeMessage
+        server = BridgeServer({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            server._pending["live789"] = fut
+            response = BridgeMessage(type="task_result", id="live789", payload={"data": 42})
+            loop.run_until_complete(server._handle_message(response.to_json()))
+            self.assertNotIn("live789", server._pending)
+            self.assertTrue(fut.done())
+            self.assertEqual(fut.result().payload["data"], 42)
+        finally:
+            loop.close()
+
+    def test_client_handle_message_sets_result_on_live_future(self):
+        """Normal response should still set result on a live pending future."""
+        from core.neural_bridge import BridgeClient, BridgeMessage
+        client = BridgeClient({})
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            client._pending["live012"] = fut
+            response = BridgeMessage(type="task_result", id="live012", payload={"data": 99})
+            loop.run_until_complete(client._handle_message(response.to_json()))
+            self.assertNotIn("live012", client._pending)
+            self.assertTrue(fut.done())
+            self.assertEqual(fut.result().payload["data"], 99)
+        finally:
+            loop.close()
+
+    def test_server_has_cancel_pending_method(self):
+        """BridgeServer should expose _cancel_pending."""
+        from core.neural_bridge import BridgeServer
+        server = BridgeServer({})
+        self.assertTrue(hasattr(server, "_cancel_pending"))
+        self.assertTrue(callable(server._cancel_pending))
+
+    def test_client_has_cancel_pending_method(self):
+        """BridgeClient should expose _cancel_pending."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({})
+        self.assertTrue(hasattr(client, "_cancel_pending"))
+        self.assertTrue(callable(client._cancel_pending))
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
