@@ -97,6 +97,15 @@ class TaskMixin:
             str(self.agent_manager.output_dir / f"{agent_id}.log"),
         )
 
+        # Notify Discord #dev that an agent just started
+        import asyncio as _asyncio
+        _asyncio.create_task(self._send_discord_message(
+            f"🤖 **Agent spawned** — `{agent_id}`\n"
+            f"**Project:** {project['name']}\n"
+            f"**Task:** {task_desc[:200]}",
+            channel="dev",
+        ))
+
         return (
             f"On it. Spinning up an agent for **{task_desc}** "
             f"in {project['name']}.\n\n"

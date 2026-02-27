@@ -140,6 +140,18 @@ class AwarenessMixin:
                             agent_id, completion_msg
                         )
 
+                        # Post to Discord #dev so owner can see completions
+                        _summary = results.get("summary", "no summary") or "no summary"
+                        _files = results.get("files_modified", [])
+                        _dur = status.get("duration_seconds", 0)
+                        _files_str = (", ".join(_files[:5]) + (" ..." if len(_files) > 5 else "")) if _files else "no files"
+                        asyncio.create_task(self._send_discord_message(
+                            f"✅ **Agent done** ({int(_dur)}s)\n"
+                            f"**Summary:** {_summary[:300]}\n"
+                            f"**Files:** {_files_str}",
+                            channel="dev",
+                        ))
+
                         # Auto mode: mark done + refill queue if empty so it never stops.
                         # Always works on Leon System only — self-improvement loop.
                         self.night_mode.mark_agent_completed(agent_id, results.get("summary", ""))
@@ -184,6 +196,12 @@ class AwarenessMixin:
                         self.notifications.push_agent_failed(
                             agent_id, failure_msg
                         )
+
+                        # Post to Discord #dev so owner can see failures
+                        asyncio.create_task(self._send_discord_message(
+                            f"❌ **Agent failed**\n{raw_error[:300]}",
+                            channel="dev",
+                        ))
 
                         # Night mode: mark failed + try to dispatch next task
                         self.night_mode.mark_agent_failed(agent_id, raw_error)

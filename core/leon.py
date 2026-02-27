@@ -1416,6 +1416,9 @@ Vision: {vision_desc}
                     if ch:
                         await ch.send(text[:2000])
                         return
+                elif channel == "dev":
+                    await db.post_to_dev(text)
+                    return
                 else:
                     await db.post_to_updates(text)
                     return
