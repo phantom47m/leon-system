@@ -179,15 +179,19 @@ class AwarenessMixin:
                             agent_id, completion_msg
                         )
 
-                        # Post to Discord #dev so owner can see completions
-                        _summary = results.get("summary", "no summary") or "no summary"
-                        _files = results.get("files_modified", [])
+                        # Post to Discord #dev — translate technical summary to plain English
+                        _summary_raw = results.get("summary", "") or ""
                         _dur = status.get("duration_seconds", 0)
-                        _files_str = (", ".join(_files[:5]) + (" ..." if len(_files) > 5 else "")) if _files else "no files"
+                        try:
+                            _plain = await self.api.quick_request(
+                                f"Summarize this in 1-2 plain English sentences a non-developer can understand. "
+                                f"Say what was fixed or improved and why it matters. No code, no bullet points, no jargon:\n\n{_summary_raw[:600]}"
+                            )
+                            _plain = (_plain or _summary_raw).strip()[:300]
+                        except Exception:
+                            _plain = _summary_raw[:300]
                         create_safe_task(self._send_discord_message(
-                            f"✅ **Agent done** ({int(_dur)}s)\n"
-                            f"**Summary:** {_summary[:300]}\n"
-                            f"**Files:** {_files_str}",
+                            f"✅ **Agent done** ({int(_dur)}s)\n{_plain}",
                             channel="dev",
                         ), name="discord-agent-done")
 
@@ -250,8 +254,21 @@ class AwarenessMixin:
                             channel="dev",
                         ), name="discord-agent-failed")
 
-                        # Night mode: mark failed + try to dispatch next task
+                        # Night mode: mark failed + re-queue continuation so auto mode never stops on failure
                         self.night_mode.mark_agent_failed(agent_id, raw_error)
+                        if self.night_mode.active and not self.night_mode.get_pending():
+                            continuation = (
+                                "Continue improving the Leon System codebase (this AI's own code). "
+                                "Read LEON_PROGRESS.md to see what has already been done. "
+                                "Find the next highest-value thing to improve — bugs, missing error handling, "
+                                "performance, response quality, new features, integration improvements, "
+                                "code quality, security hardening, anything that makes Leon smarter or more reliable. "
+                                "Do ONE focused thing. Do not repeat work already in LEON_PROGRESS.md. "
+                                "Commit your changes with a clear message. "
+                                "Append a one-line summary to LEON_PROGRESS.md."
+                            )
+                            self.night_mode.add_task(continuation, "Leon System")
+                            logger.info("Auto mode: re-queued continuation after agent failure")
                         create_safe_task(self.night_mode.try_dispatch(), name="night-dispatch-after-fail")
 
                 # --- Per-cycle operations (outside per-agent loop) ---
