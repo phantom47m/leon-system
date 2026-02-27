@@ -6,11 +6,29 @@ All self.* references resolve through Leon's MRO at runtime.
 """
 
 import asyncio
+import functools
 import logging
+import subprocess
 
 from .neural_bridge import BridgeMessage, MSG_STATUS_REQUEST
 
 logger = logging.getLogger("leon")
+
+# Default timeout for subprocess calls within the awareness loop.
+# Prevents a hung git/python process from blocking the entire loop.
+_SUBPROCESS_TIMEOUT = 30
+
+
+async def _run_subprocess(*args, **kwargs) -> subprocess.CompletedProcess:
+    """Run subprocess.run in a thread pool with a default timeout.
+
+    Prevents blocking the async event loop and ensures hung processes
+    are killed after ``_SUBPROCESS_TIMEOUT`` seconds.
+    """
+    kwargs.setdefault("timeout", _SUBPROCESS_TIMEOUT)
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    return await asyncio.to_thread(functools.partial(subprocess.run, *args, **kwargs))
 
 
 class AwarenessMixin:
@@ -18,7 +36,6 @@ class AwarenessMixin:
 
     async def _ram_watchdog(self):
         """Monitor RAM every 60s. If above 80%, kill runaway OpenClaw renderer tabs."""
-        import subprocess as _sp
         while self.running:
             try:
                 await asyncio.sleep(60)
@@ -31,9 +48,8 @@ class AwarenessMixin:
 
                 if used_pct > 80:
                     # Find OpenClaw renderer PIDs
-                    r = _sp.run(
+                    r = await _run_subprocess(
                         ["pgrep", "-f", "remote-debugging-port=18800"],
-                        capture_output=True, text=True
                     )
                     pids = r.stdout.strip().split()
                     # Keep 2, kill the rest (oldest first = lowest PIDs)
@@ -42,7 +58,9 @@ class AwarenessMixin:
                     if to_kill:
                         for pid in to_kill:
                             try:
-                                _sp.run(["kill", str(pid)], check=False)
+                                await _run_subprocess(
+                                    ["kill", str(pid)], check=False, timeout=5
+                                )
                             except Exception:
                                 pass
                         logger.warning(
@@ -56,6 +74,8 @@ class AwarenessMixin:
                                 f"Heads up — RAM hit {used_pct:.0f}%. "
                                 "Cleaned up some browser processes to free memory."
                             ))
+            except subprocess.TimeoutExpired as e:
+                logger.warning("RAM watchdog: subprocess timed out: %s", e)
             except Exception as e:
                 logger.debug("RAM watchdog error: %s", e)
 
@@ -97,18 +117,28 @@ class AwarenessMixin:
                         task_obj = self.task_queue.active_tasks.get(agent_id, {})
                         _is_self = task_obj.get("project_name", "").lower() in ("leon system", "leon-system")
                         if _is_self:
-                            import subprocess as _sp
-                            _check = _sp.run(
-                                ["venv/bin/python", "-c", "from core.leon import Leon; print('ok')"],
-                                cwd=str(__import__("pathlib").Path(__file__).parent.parent),
-                                capture_output=True, text=True,
-                            )
+                            import pathlib as _pathlib
+                            _project_root = str(_pathlib.Path(__file__).parent.parent)
+                            try:
+                                _check = await _run_subprocess(
+                                    ["venv/bin/python", "-c", "from core.leon import Leon; print('ok')"],
+                                    cwd=_project_root, timeout=60,
+                                )
+                            except subprocess.TimeoutExpired:
+                                logger.error("Self-agent import check timed out after 60s")
+                                _check = type("FakeResult", (), {"returncode": 1, "stderr": "import check timed out"})()
                             if _check.returncode != 0:
                                 logger.error("Self-agent broke Leon imports — auto-reverting last commit")
-                                _sp.run(["git", "revert", "--no-edit", "HEAD"],
-                                        cwd=str(__import__("pathlib").Path(__file__).parent.parent))
-                                _sp.run(["git", "push"],
-                                        cwd=str(__import__("pathlib").Path(__file__).parent.parent))
+                                try:
+                                    await _run_subprocess(
+                                        ["git", "revert", "--no-edit", "HEAD"],
+                                        cwd=_project_root,
+                                    )
+                                    await _run_subprocess(
+                                        ["git", "push"], cwd=_project_root,
+                                    )
+                                except subprocess.TimeoutExpired:
+                                    logger.error("Git revert/push timed out during self-agent safety revert")
                                 await self._send_discord_message(
                                     "⚠️ **Self-agent safety revert** — last commit broke Leon's imports. "
                                     "Reverted automatically. Check the diff before re-queuing.",
@@ -313,7 +343,6 @@ class AwarenessMixin:
                             )
                         else:
                             # Build a meaningful update — show last git commit per active project
-                            import subprocess as _sp
                             _lines = [f"**Agent update** — {_count} agent{'s' if _count != 1 else ''} running" + (f", {_nm_pending} queued" if _nm_pending else "")]
                             _seen_paths = set()
                             for _aid in _active_agents:
@@ -323,11 +352,14 @@ class AwarenessMixin:
                                 _proj_path = _proj.get("path", "") if _proj else ""
                                 if _proj_path and _proj_path not in _seen_paths:
                                     _seen_paths.add(_proj_path)
-                                    _git = _sp.run(
-                                        ["git", "log", "--oneline", "-1"],
-                                        cwd=_proj_path, capture_output=True, text=True
-                                    )
-                                    _last_commit = _git.stdout.strip() if _git.returncode == 0 else "no commits yet"
+                                    try:
+                                        _git = await _run_subprocess(
+                                            ["git", "log", "--oneline", "-1"],
+                                            cwd=_proj_path,
+                                        )
+                                        _last_commit = _git.stdout.strip() if _git.returncode == 0 else "no commits yet"
+                                    except subprocess.TimeoutExpired:
+                                        _last_commit = "(git timed out)"
                                     _lines.append(f"**{_proj_name or 'Unknown'}:** {_last_commit[:120]}")
                             _update = "\n".join(_lines)
                         await self._send_discord_message(_update)

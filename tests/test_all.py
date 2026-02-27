@@ -4219,6 +4219,119 @@ class TestScheduledTaskTimeout(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# AWARENESS MIXIN — NON-BLOCKING SUBPROCESS
+# ══════════════════════════════════════════════════════════
+
+class TestAwarenessSubprocess(unittest.TestCase):
+    """Tests for the non-blocking subprocess helper in awareness_mixin."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_run_subprocess_returns_completed_process(self):
+        """_run_subprocess should return a CompletedProcess."""
+        from core.awareness_mixin import _run_subprocess
+        import subprocess
+
+        async def go():
+            result = await _run_subprocess(["echo", "hello"])
+            self.assertIsInstance(result, subprocess.CompletedProcess)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("hello", result.stdout)
+
+        self._run(go())
+
+    def test_run_subprocess_does_not_block_event_loop(self):
+        """_run_subprocess should yield control to the event loop (non-blocking)."""
+        from core.awareness_mixin import _run_subprocess
+
+        async def go():
+            # Run a subprocess and a sleep concurrently — if subprocess blocked
+            # the loop, the sleep would be delayed.
+            flag = []
+
+            async def set_flag():
+                flag.append(True)
+
+            # Schedule flag-setter, then run subprocess
+            task = asyncio.ensure_future(set_flag())
+            await _run_subprocess(["echo", "test"])
+            await task
+            self.assertTrue(flag, "Event loop should have run set_flag concurrently")
+
+        self._run(go())
+
+    def test_run_subprocess_default_timeout(self):
+        """_run_subprocess should apply _SUBPROCESS_TIMEOUT by default."""
+        from core.awareness_mixin import _run_subprocess, _SUBPROCESS_TIMEOUT
+        import subprocess
+
+        self.assertGreater(_SUBPROCESS_TIMEOUT, 0)
+
+        async def go():
+            # A fast command should complete within the default timeout
+            result = await _run_subprocess(["echo", "ok"])
+            self.assertEqual(result.returncode, 0)
+
+        self._run(go())
+
+    def test_run_subprocess_custom_timeout(self):
+        """_run_subprocess should allow overriding the timeout."""
+        from core.awareness_mixin import _run_subprocess
+        import subprocess
+
+        async def go():
+            with self.assertRaises(subprocess.TimeoutExpired):
+                # sleep 60 should timeout after 0.1s
+                await _run_subprocess(["sleep", "60"], timeout=0.1)
+
+        self._run(go())
+
+    def test_run_subprocess_captures_stderr(self):
+        """_run_subprocess should capture stderr by default."""
+        from core.awareness_mixin import _run_subprocess
+
+        async def go():
+            result = await _run_subprocess(
+                ["python3", "-c", "import sys; sys.stderr.write('err msg')"]
+            )
+            self.assertIn("err msg", result.stderr)
+
+        self._run(go())
+
+    def test_run_subprocess_nonzero_exit(self):
+        """_run_subprocess should handle non-zero exit codes without raising."""
+        from core.awareness_mixin import _run_subprocess
+
+        async def go():
+            result = await _run_subprocess(["python3", "-c", "exit(42)"])
+            self.assertEqual(result.returncode, 42)
+
+        self._run(go())
+
+    def test_run_subprocess_defaults_capture_and_text(self):
+        """_run_subprocess should default capture_output=True and text=True."""
+        from core.awareness_mixin import _run_subprocess
+
+        async def go():
+            result = await _run_subprocess(["echo", "typed"])
+            # text=True means stdout is a string, not bytes
+            self.assertIsInstance(result.stdout, str)
+
+        self._run(go())
+
+    def test_subprocess_timeout_constant_reasonable(self):
+        """_SUBPROCESS_TIMEOUT should be at least 10s and at most 120s."""
+        from core.awareness_mixin import _SUBPROCESS_TIMEOUT
+        self.assertGreaterEqual(_SUBPROCESS_TIMEOUT, 10)
+        self.assertLessEqual(_SUBPROCESS_TIMEOUT, 120)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
