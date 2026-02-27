@@ -5402,6 +5402,114 @@ class TestSTTProviderConfig(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# RESPOND CONVERSATIONALLY — NO DUPLICATE MESSAGE
+# ══════════════════════════════════════════════════════════
+
+class TestRespondConversationallyNoDuplicate(unittest.TestCase):
+    """_respond_conversationally must NOT duplicate the user's message.
+
+    The caller (process_user_input / process_voice_input) stores the
+    message via add_conversation() BEFORE calling _respond_conversationally.
+    So get_recent_context() already includes it — the method must NOT
+    append it again, otherwise the LLM sees the same message twice.
+    """
+
+    def _make_memory(self):
+        """Create a real MemorySystem backed by a temp file."""
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp.close()
+        from core.memory import MemorySystem
+        mem = MemorySystem(tmp.name)
+        self.addCleanup(os.unlink, tmp.name)
+        return mem
+
+    def test_message_appears_exactly_once_in_messages(self):
+        """After add_conversation, _respond_conversationally should not re-add the message."""
+        mem = self._make_memory()
+
+        # Simulate the caller storing the message first (as process_user_input does)
+        mem.add_conversation("Hello Leon", role="user")
+
+        # Build the messages list exactly as _respond_conversationally does
+        recent = mem.get_recent_context(limit=20)
+        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        # Count how many times the user message appears
+        user_msgs = [m for m in messages if m["role"] == "user" and m["content"] == "Hello Leon"]
+        self.assertEqual(len(user_msgs), 1, "User message should appear exactly once")
+
+    def test_no_consecutive_same_role_at_end(self):
+        """The messages list should not end with two consecutive user messages."""
+        mem = self._make_memory()
+
+        # Simulate a short conversation
+        mem.add_conversation("first question", role="user")
+        mem.add_conversation("first answer", role="assistant")
+        mem.add_conversation("second question", role="user")
+
+        recent = mem.get_recent_context(limit=20)
+        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        # Last message should be user, second-to-last should be assistant
+        self.assertEqual(messages[-1]["role"], "user")
+        self.assertEqual(messages[-1]["content"], "second question")
+        if len(messages) >= 2:
+            self.assertEqual(messages[-2]["role"], "assistant",
+                             "Second-to-last message should be assistant, not a duplicate user")
+
+    def test_recent_context_includes_latest_message(self):
+        """Verify get_recent_context returns the just-added message (precondition for the fix)."""
+        mem = self._make_memory()
+        mem.add_conversation("test message", role="user")
+        recent = mem.get_recent_context(limit=20)
+        self.assertTrue(
+            any(m["content"] == "test message" for m in recent),
+            "get_recent_context should include the message added via add_conversation"
+        )
+
+    def test_empty_history_still_has_message(self):
+        """Even with empty history, the one message added should be present exactly once."""
+        mem = self._make_memory()
+        mem.add_conversation("only message", role="user")
+
+        recent = mem.get_recent_context(limit=20)
+        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "only message")
+        self.assertEqual(messages[0]["role"], "user")
+
+    def test_large_history_keeps_latest_at_end(self):
+        """With 20+ messages, the latest user message should still be the last entry."""
+        mem = self._make_memory()
+        for i in range(25):
+            mem.add_conversation(f"user msg {i}", role="user")
+            mem.add_conversation(f"assistant msg {i}", role="assistant")
+        mem.add_conversation("final question", role="user")
+
+        recent = mem.get_recent_context(limit=20)
+        messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+
+        self.assertEqual(messages[-1]["content"], "final question")
+        self.assertEqual(messages[-1]["role"], "user")
+        # Should not have duplicate "final question"
+        finals = [m for m in messages if m["content"] == "final question"]
+        self.assertEqual(len(finals), 1)
+
+    def test_source_code_has_no_duplicate_append(self):
+        """Static check: _respond_conversationally must NOT append the message to messages list."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon._respond_conversationally)
+        self.assertNotIn(
+            'messages.append({"role": "user"',
+            source,
+            "_respond_conversationally should not append a duplicate user message — "
+            "the message is already in the conversation history from add_conversation()"
+        )
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

@@ -1032,7 +1032,6 @@ Vision: {vision_desc}
 """
 
         messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-        messages.append({"role": "user", "content": message})
 
         return await self.api.create_message(
             system=self.system_prompt + context_block,
