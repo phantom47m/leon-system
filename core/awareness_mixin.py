@@ -140,24 +140,44 @@ class AwarenessMixin:
                             agent_id, completion_msg
                         )
 
-                        # Auto mode: mark done + spawn a self-directed continuation if queue is empty
+                        # Auto mode: mark done + refill queue if empty so it never stops
                         self.night_mode.mark_agent_completed(agent_id, results.get("summary", ""))
                         if self.night_mode.active and not self.night_mode.get_pending():
-                            # Find the project from the last completed task
-                            last_task = next((t for t in reversed(self.night_mode._backlog)
-                                             if t.get("status") == "completed"), None)
-                            if last_task:
-                                project_name = last_task.get("project", "unknown")
-                                continuation = (
-                                    f"Continue improving the {project_name} codebase. "
-                                    f"Read LEON_PROGRESS.md to see what has already been done, "
-                                    f"then find the next highest-value things to improve — "
-                                    f"performance, code quality, UI polish, bugs, anything that makes it better. "
-                                    f"Do not repeat work already done. Self-direct entirely. "
-                                    f"Commit your changes. Log progress to LEON_PROGRESS.md."
-                                )
-                                self.night_mode.add_task(continuation, project_name)
-                                logger.info(f"Auto mode: queued self-directed continuation for {project_name}")
+                            # Rotate across all configured projects so every codebase gets attention,
+                            # not just the last one touched. Round-robin based on backlog history.
+                            all_projects = self.projects_config.get("projects", [])
+                            # Skip projects with no real path (e.g. macOS VM, system stubs)
+                            workable = [p for p in all_projects
+                                        if p.get("path") and p.get("type") not in ("system",)]
+                            if workable:
+                                # Pick the project least recently worked on this session
+                                completed_projects = [
+                                    t.get("project", "") for t in self.night_mode._backlog
+                                    if t.get("status") == "completed"
+                                ]
+                                # Find the workable project that appears least in recent history
+                                from collections import Counter
+                                counts = Counter(completed_projects)
+                                next_proj = min(workable, key=lambda p: counts.get(p["name"], 0))
+                                project_name = next_proj["name"]
+                            else:
+                                # Fallback: use last completed task's project
+                                last_task = next((t for t in reversed(self.night_mode._backlog)
+                                                 if t.get("status") == "completed"), None)
+                                project_name = last_task.get("project", "unknown") if last_task else "unknown"
+
+                            continuation = (
+                                f"Continue improving the {project_name} codebase. "
+                                f"Read LEON_PROGRESS.md (if it exists) to see what has already been done. "
+                                f"Find the next highest-value thing to improve — bugs, performance, "
+                                f"code quality, missing error handling, UI polish, test coverage, "
+                                f"documentation, security hardening — anything that makes it better. "
+                                f"Do ONE focused thing. Do not repeat work already logged. "
+                                f"Commit your changes with a clear message. "
+                                f"Append a one-line summary to LEON_PROGRESS.md."
+                            )
+                            self.night_mode.add_task(continuation, project_name)
+                            logger.info(f"Auto mode: queued self-directed continuation for {project_name}")
                         asyncio.create_task(self.night_mode.try_dispatch())
 
                     elif status.get("failed"):
