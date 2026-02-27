@@ -90,6 +90,32 @@ class AwarenessMixin:
 
                     elif status.get("completed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
+
+                        # Safety gate: if the agent worked on leon-system, verify we
+                        # still import cleanly before accepting the result.
+                        # A broken import = auto-revert so Leon can always restart.
+                        task_obj = self.task_queue.active_tasks.get(agent_id, {})
+                        _is_self = task_obj.get("project_name", "").lower() in ("leon system", "leon-system")
+                        if _is_self:
+                            import subprocess as _sp
+                            _check = _sp.run(
+                                ["venv/bin/python", "-c", "from core.leon import Leon; print('ok')"],
+                                cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+                                capture_output=True, text=True,
+                            )
+                            if _check.returncode != 0:
+                                logger.error("Self-agent broke Leon imports — auto-reverting last commit")
+                                _sp.run(["git", "revert", "--no-edit", "HEAD"],
+                                        cwd=str(__import__("pathlib").Path(__file__).parent.parent))
+                                _sp.run(["git", "push"],
+                                        cwd=str(__import__("pathlib").Path(__file__).parent.parent))
+                                await self._send_discord_message(
+                                    "⚠️ **Self-agent safety revert** — last commit broke Leon's imports. "
+                                    "Reverted automatically. Check the diff before re-queuing.",
+                                    channel="chat",
+                                )
+                                results["summary"] = f"[REVERTED] Import check failed: {_check.stderr[:200]}"
+
                         self.memory.complete_task(agent_id, results)
                         self.task_queue.complete_task(agent_id)
                         self.agent_index.record_completion(
