@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import uuid
 from datetime import datetime
@@ -114,6 +115,75 @@ _POSITIVE_I_DID_IT = [
     "i just deployed", "i just fixed", "we updated", "we pushed", "we fixed",
     "updated your", "improved your", "just pushed",
 ]
+
+
+# ── Conversational fast path ─────────────────────────────────────────────────
+# Short, unambiguous conversational messages that never need LLM classification
+# or system skill routing.  Skipping both _analyze_request and the LLM router
+# inside _route_special_commands saves 2 LLM calls (~2s latency) per trivial
+# interaction.  Mirrors the voice path (process_voice_input) which already
+# skips classification for all messages.
+#
+# High precision required: a false positive means a real command gets answered
+# conversationally instead of executed.  When in doubt, fall through.
+
+_TRIVIAL_EXACT = frozenset({
+    # Greetings
+    "hi", "hey", "hello", "yo", "howdy", "sup", "heyo",
+    # Acknowledgments
+    "ok", "okay", "sure", "bet", "cool", "nice", "great", "awesome",
+    "perfect", "sweet", "dope", "alright", "right",
+    # Thanks
+    "thanks", "thx", "ty", "thank you",
+    # Yes / no
+    "yes", "no", "yep", "nope", "yeah", "nah",
+    # Reactions
+    "lol", "lmao", "haha", "hahaha", "wow", "oh", "hmm", "mhm",
+    # Farewell
+    "bye", "goodbye", "later", "peace", "gn",
+    # Misc
+    "gotcha", "got it", "understood", "roger",
+    "good morning", "good evening", "good afternoon", "good night",
+    "never mind", "nevermind", "nvm", "forget it",
+})
+
+_TRIVIAL_CHAT_RE = re.compile(
+    r"^(?:"
+    r"how\s+are\s+you"
+    r"|what'?s\s+up"
+    r"|what'?s\s+good"
+    r"|how'?s\s+it\s+going"
+    r"|tell\s+me\s+(?:a\s+joke|something\s+(?:funny|interesting))"
+    r"|who\s+are\s+you"
+    r"|what\s+are\s+you"
+    r"|what'?s\s+your\s+name"
+    r"|are\s+you\s+(?:there|awake|alive|ready)"
+    r"|thank\s+you(?:\s+so\s+much)?"
+    r"|appreciate\s+it"
+    r"|good\s+talk"
+    r"|see\s+ya"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+_TRIVIAL_SUFFIX_RE = re.compile(r"\s+(?:leon|bro|man|dude|buddy)\s*$", re.IGNORECASE)
+_TRIVIAL_PUNCT_RE = re.compile(r"[.!?,;:'\"]+$")
+
+
+def _is_trivial_conversation(msg: str) -> bool:
+    """Return True if *msg* is a trivially conversational message.
+
+    These messages never need LLM classification or system skill routing —
+    they always end up at _respond_conversationally.  Skipping the classify
+    and route steps saves 2 LLM calls (~2 s latency).
+    """
+    cleaned = _TRIVIAL_PUNCT_RE.sub("", msg.strip()).strip()
+    cleaned = _TRIVIAL_SUFFIX_RE.sub("", cleaned).lower()
+    if cleaned in _TRIVIAL_EXACT:
+        return True
+    if _TRIVIAL_CHAT_RE.match(cleaned):
+        return True
+    return False
 
 
 def _detect_self_repair(msg: str) -> tuple[bool, str, str]:
@@ -759,6 +829,16 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
             _query = _query if len(_query) > 3 else message
             response = await self._web_search(_query)
             self.memory.add_conversation(response, role="assistant")
+            return response
+
+        # Pre-router: trivial conversation — skip both classify + route
+        # Saves 2 LLM calls (~2s) for greetings, thanks, reactions, etc.
+        if _is_trivial_conversation(message):
+            logger.info("Conversational fast path — skipping classify + route")
+            response = await self._respond_conversationally(message)
+            response = self._strip_sir(response)
+            self.memory.add_conversation(response, role="assistant")
+            asyncio.create_task(self._extract_memory(message, response))
             return response
 
         # Analyze what the user wants

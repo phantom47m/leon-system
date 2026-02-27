@@ -4678,6 +4678,197 @@ class TestResponseMixin(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# CONVERSATIONAL FAST PATH
+# ══════════════════════════════════════════════════════════
+
+class TestTrivialConversation(unittest.TestCase):
+    """Tests for _is_trivial_conversation — the pre-router that skips
+    both _analyze_request and the LLM router for obvious chat messages."""
+
+    @classmethod
+    def setUpClass(cls):
+        from core.leon import _is_trivial_conversation
+        cls.check = staticmethod(_is_trivial_conversation)
+
+    # ── Exact matches ──
+
+    def test_greeting_hi(self):
+        self.assertTrue(self.check("hi"))
+
+    def test_greeting_hello(self):
+        self.assertTrue(self.check("hello"))
+
+    def test_greeting_hey(self):
+        self.assertTrue(self.check("hey"))
+
+    def test_greeting_yo(self):
+        self.assertTrue(self.check("yo"))
+
+    def test_greeting_sup(self):
+        self.assertTrue(self.check("sup"))
+
+    def test_ack_ok(self):
+        self.assertTrue(self.check("ok"))
+
+    def test_ack_cool(self):
+        self.assertTrue(self.check("cool"))
+
+    def test_ack_gotcha(self):
+        self.assertTrue(self.check("gotcha"))
+
+    def test_thanks(self):
+        self.assertTrue(self.check("thanks"))
+
+    def test_thank_you(self):
+        self.assertTrue(self.check("thank you"))
+
+    def test_reaction_lol(self):
+        self.assertTrue(self.check("lol"))
+
+    def test_farewell_bye(self):
+        self.assertTrue(self.check("bye"))
+
+    def test_farewell_gn(self):
+        self.assertTrue(self.check("gn"))
+
+    def test_good_morning(self):
+        self.assertTrue(self.check("good morning"))
+
+    def test_never_mind(self):
+        self.assertTrue(self.check("never mind"))
+
+    def test_nvm(self):
+        self.assertTrue(self.check("nvm"))
+
+    # ── Case insensitivity ──
+
+    def test_case_insensitive(self):
+        self.assertTrue(self.check("Hello"))
+        self.assertTrue(self.check("THANKS"))
+        self.assertTrue(self.check("Good Morning"))
+
+    # ── Trailing punctuation stripped ──
+
+    def test_punctuation_stripped(self):
+        self.assertTrue(self.check("hello!"))
+        self.assertTrue(self.check("thanks."))
+        self.assertTrue(self.check("hey?"))
+        self.assertTrue(self.check("cool!!"))
+
+    # ── Trailing name stripped ──
+
+    def test_name_suffix_leon(self):
+        self.assertTrue(self.check("hi leon"))
+        self.assertTrue(self.check("thanks leon"))
+        self.assertTrue(self.check("hey leon!"))
+
+    def test_name_suffix_bro(self):
+        self.assertTrue(self.check("thanks bro"))
+
+    def test_name_suffix_dude(self):
+        self.assertTrue(self.check("hey dude"))
+
+    # ── Regex multi-word patterns ──
+
+    def test_how_are_you(self):
+        self.assertTrue(self.check("how are you"))
+        self.assertTrue(self.check("how are you?"))
+
+    def test_whats_up(self):
+        self.assertTrue(self.check("what's up"))
+        self.assertTrue(self.check("whats up"))
+
+    def test_whats_good(self):
+        self.assertTrue(self.check("what's good"))
+
+    def test_hows_it_going(self):
+        self.assertTrue(self.check("how's it going"))
+
+    def test_tell_me_a_joke(self):
+        self.assertTrue(self.check("tell me a joke"))
+
+    def test_tell_me_something_funny(self):
+        self.assertTrue(self.check("tell me something funny"))
+
+    def test_who_are_you(self):
+        self.assertTrue(self.check("who are you"))
+
+    def test_whats_your_name(self):
+        self.assertTrue(self.check("what's your name"))
+
+    def test_are_you_there(self):
+        self.assertTrue(self.check("are you there"))
+
+    def test_thank_you_so_much(self):
+        self.assertTrue(self.check("thank you so much"))
+
+    def test_appreciate_it(self):
+        self.assertTrue(self.check("appreciate it"))
+
+    def test_see_ya(self):
+        self.assertTrue(self.check("see ya"))
+
+    # ── Negative cases: should NOT match ──
+
+    def test_command_not_trivial(self):
+        """Real commands must NOT be classified as trivial."""
+        self.assertFalse(self.check("open youtube"))
+        self.assertFalse(self.check("check cpu usage"))
+        self.assertFalse(self.check("turn the lights on"))
+        self.assertFalse(self.check("build me a web app"))
+
+    def test_greeting_plus_command(self):
+        """Greeting followed by a command is NOT trivial."""
+        self.assertFalse(self.check("hey can you check my email"))
+        self.assertFalse(self.check("hi build the frontend"))
+        self.assertFalse(self.check("ok now deploy it"))
+        self.assertFalse(self.check("thanks now fix the tests"))
+
+    def test_question_not_trivial(self):
+        """Real questions should go through the full pipeline."""
+        self.assertFalse(self.check("what's the weather"))
+        self.assertFalse(self.check("how do I install docker"))
+        self.assertFalse(self.check("what did you do last night"))
+
+    def test_long_messages_not_trivial(self):
+        """Any substantial message should not be trivial."""
+        self.assertFalse(self.check("hey I need you to work on the leon system"))
+        self.assertFalse(self.check("cool can you also update the readme"))
+
+    def test_system_commands_not_trivial(self):
+        """System skill commands must fall through."""
+        self.assertFalse(self.check("screenshot"))
+        self.assertFalse(self.check("volume up"))
+        self.assertFalse(self.check("lock screen"))
+
+    def test_empty_string(self):
+        """Empty/whitespace messages should not match."""
+        self.assertFalse(self.check(""))
+        self.assertFalse(self.check("   "))
+
+    def test_night_mode_not_trivial(self):
+        """Night mode commands must not be caught."""
+        self.assertFalse(self.check("keep working"))
+        self.assertFalse(self.check("night mode on"))
+
+    # ── Pattern table structure ──
+
+    def test_trivial_exact_is_frozenset(self):
+        from core.leon import _TRIVIAL_EXACT
+        self.assertIsInstance(_TRIVIAL_EXACT, frozenset)
+
+    def test_trivial_exact_all_lowercase(self):
+        from core.leon import _TRIVIAL_EXACT
+        for item in _TRIVIAL_EXACT:
+            self.assertEqual(item, item.lower(), f"Non-lowercase in _TRIVIAL_EXACT: {item!r}")
+
+    def test_trivial_chat_re_compiled(self):
+        from core.leon import _TRIVIAL_CHAT_RE
+        import re
+        self.assertIsInstance(_TRIVIAL_CHAT_RE, re.Pattern)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
