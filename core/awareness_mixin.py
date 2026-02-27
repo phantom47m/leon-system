@@ -12,6 +12,7 @@ import subprocess
 
 from .neural_bridge import BridgeMessage, MSG_STATUS_REQUEST
 from .safe_tasks import create_safe_task
+from .structured_logger import get_logger as get_structured_logger
 
 logger = logging.getLogger("leon")
 
@@ -155,6 +156,13 @@ class AwarenessMixin:
                             results.get("files_modified", []),
                             status.get("duration_seconds", 0),
                         )
+                        get_structured_logger().task_complete(
+                            agent_id,
+                            task_obj.get("description", results.get("summary", "")),
+                            task_obj.get("project", "unknown"),
+                            status.get("duration_seconds", 0),
+                            results.get("files_modified", []),
+                        )
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
 
@@ -204,6 +212,8 @@ class AwarenessMixin:
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
                         raw_error = results.get("errors", "unknown error")
+                        # Capture task info before fail_task() removes it
+                        _fail_task_obj = self.task_queue.active_tasks.get(agent_id) or {}
                         self.memory.complete_task(agent_id, {
                             "summary": f"FAILED: {raw_error[:200]}",
                             "files_modified": [],
@@ -213,6 +223,12 @@ class AwarenessMixin:
                             agent_id,
                             raw_error,
                             status.get("duration_seconds", 0),
+                        )
+                        get_structured_logger().task_fail(
+                            agent_id,
+                            _fail_task_obj.get("description", "unknown"),
+                            _fail_task_obj.get("project", "unknown"),
+                            raw_error[:300] if isinstance(raw_error, str) else str(raw_error)[:300],
                         )
                         self.agent_manager.cleanup_agent(agent_id)
                         logger.warning(f"Agent {agent_id} failed")

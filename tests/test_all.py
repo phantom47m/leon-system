@@ -5774,6 +5774,267 @@ class TestHealthCheckSystemMetrics(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# STRUCTURED LOGGER — TASK LIFECYCLE INTEGRATION
+# ══════════════════════════════════════════════════════════
+
+class TestStructuredLogger(unittest.TestCase):
+    """Tests for core.structured_logger.StructuredLogger — JSONL rotating logs."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        from core.structured_logger import StructuredLogger
+        self.slog = StructuredLogger(log_dir=Path(self.tmp_dir))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _read_jsonl(self, channel: str) -> list[dict]:
+        """Read all entries from a JSONL log file."""
+        path = Path(self.tmp_dir) / f"{channel}.jsonl"
+        if not path.exists():
+            return []
+        entries = []
+        for line in path.read_text().strip().split("\n"):
+            if line:
+                entries.append(json.loads(line))
+        return entries
+
+    def test_task_start_writes_to_tasks_jsonl(self):
+        """task_start() should write an entry to tasks.jsonl."""
+        self.slog.task_start("agent_abc", "Fix login bug", "MyApp")
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["event"], "task_start")
+        self.assertEqual(entries[0]["agent_id"], "agent_abc")
+        self.assertEqual(entries[0]["description"], "Fix login bug")
+        self.assertEqual(entries[0]["project"], "MyApp")
+
+    def test_task_complete_writes_to_tasks_jsonl(self):
+        """task_complete() should write an entry to tasks.jsonl with duration and files."""
+        self.slog.task_complete("agent_xyz", "Add tests", "LeonSystem",
+                               duration_s=42.5, files_modified=["core/foo.py"])
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["event"], "task_complete")
+        self.assertEqual(entries[0]["agent_id"], "agent_xyz")
+        self.assertEqual(entries[0]["duration_s"], 42.5)
+        self.assertEqual(entries[0]["files_modified"], ["core/foo.py"])
+
+    def test_task_fail_writes_to_both_tasks_and_failures(self):
+        """task_fail() should mirror entries to both tasks.jsonl and failures.jsonl."""
+        self.slog.task_fail("agent_err", "Deploy prod", "MyApp", "timeout after 60s")
+        tasks = self._read_jsonl("tasks")
+        failures = self._read_jsonl("failures")
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(tasks[0]["event"], "task_fail")
+        self.assertEqual(failures[0]["event"], "task_fail")
+        self.assertEqual(tasks[0]["error"], "timeout after 60s")
+
+    def test_task_start_truncates_long_descriptions(self):
+        """task_start should truncate descriptions longer than 120 chars."""
+        long_desc = "A" * 200
+        self.slog.task_start("agent_long", long_desc, "Proj")
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries[0]["description"]), 120)
+
+    def test_task_fail_truncates_long_errors(self):
+        """task_fail should truncate errors longer than 300 chars."""
+        long_error = "E" * 500
+        self.slog.task_fail("agent_err", "task", "proj", long_error)
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries[0]["error"]), 300)
+
+    def test_task_complete_truncates_files_list(self):
+        """task_complete should only keep first 10 files."""
+        many_files = [f"file_{i}.py" for i in range(20)]
+        self.slog.task_complete("agent_x", "task", "proj", 10.0, many_files)
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries[0]["files_modified"]), 10)
+
+    def test_entries_have_timestamp(self):
+        """All entries should include an ISO timestamp."""
+        self.slog.task_start("agent_ts", "test", "proj")
+        entries = self._read_jsonl("tasks")
+        self.assertIn("ts", entries[0])
+        # Should be parseable as ISO datetime
+        datetime.fromisoformat(entries[0]["ts"])
+
+    def test_get_task_stats_aggregates_correctly(self):
+        """get_task_stats() should count starts, completions, and failures."""
+        self.slog.task_start("a1", "task1", "proj")
+        self.slog.task_start("a2", "task2", "proj")
+        self.slog.task_complete("a1", "task1", "proj", 30.0, [])
+        self.slog.task_fail("a2", "task2", "proj", "crashed")
+        stats = self.slog.get_task_stats()
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["completed"], 1)
+        self.assertEqual(stats["failed"], 1)
+        self.assertAlmostEqual(stats["avg_duration_s"], 30.0, places=1)
+
+    def test_get_recent_failures_returns_failures(self):
+        """get_recent_failures() should return task failure entries."""
+        self.slog.task_fail("a1", "broken task", "proj", "segfault")
+        self.slog.task_fail("a2", "another broken", "proj", "OOM")
+        failures = self.slog.get_recent_failures(limit=10)
+        self.assertEqual(len(failures), 2)
+        # Most recent first
+        self.assertEqual(failures[0]["error"], "OOM")
+
+    def test_health_check_writes_to_health_jsonl(self):
+        """health_check() should write metrics to health.jsonl."""
+        self.slog.health_check({"cpu_percent": 45, "memory_percent": 60})
+        entries = self._read_jsonl("health")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["event"], "health_check")
+        self.assertEqual(entries[0]["checks"]["cpu_percent"], "45")
+
+    def test_multiple_entries_append(self):
+        """Multiple writes to the same channel should append, not overwrite."""
+        self.slog.task_start("a1", "task1", "proj")
+        self.slog.task_start("a2", "task2", "proj")
+        self.slog.task_start("a3", "task3", "proj")
+        entries = self._read_jsonl("tasks")
+        self.assertEqual(len(entries), 3)
+
+    def test_get_task_stats_empty_file(self):
+        """get_task_stats() should return zeros when no log file exists."""
+        stats = self.slog.get_task_stats()
+        self.assertEqual(stats["total"], 0)
+        self.assertEqual(stats["completed"], 0)
+        self.assertEqual(stats["failed"], 0)
+        self.assertAlmostEqual(stats["avg_duration_s"], 0.0)
+
+    def test_get_recent_failures_empty(self):
+        """get_recent_failures() should return empty list when no failures."""
+        self.assertEqual(self.slog.get_recent_failures(), [])
+
+
+class TestStructuredLoggerSingleton(unittest.TestCase):
+    """Tests for the module-level get_logger() singleton."""
+
+    def test_get_logger_returns_same_instance(self):
+        """get_logger() should return the same singleton."""
+        from core.structured_logger import get_logger
+        a = get_logger()
+        b = get_logger()
+        self.assertIs(a, b)
+
+    def test_get_logger_returns_structured_logger(self):
+        """get_logger() should return a StructuredLogger instance."""
+        from core.structured_logger import get_logger, StructuredLogger
+        self.assertIsInstance(get_logger(), StructuredLogger)
+
+
+class TestStructuredLoggerTaskMixinIntegration(unittest.TestCase):
+    """Verify task_mixin.py calls structured logger on agent spawn."""
+
+    def test_task_mixin_imports_structured_logger(self):
+        """task_mixin.py should import get_structured_logger."""
+        source = Path(ROOT / "core" / "task_mixin.py").read_text()
+        self.assertIn("from .structured_logger import get_logger as get_structured_logger", source)
+
+    def test_task_mixin_calls_task_start(self):
+        """task_mixin.py should call get_structured_logger().task_start() on spawn."""
+        source = Path(ROOT / "core" / "task_mixin.py").read_text()
+        self.assertIn("get_structured_logger().task_start(", source)
+        # Should have at least 4 call sites (single_task, orchestrate×2, bridge fallback, self-repair)
+        count = source.count("get_structured_logger().task_start(")
+        self.assertGreaterEqual(count, 4, f"Expected ≥4 task_start calls, found {count}")
+
+
+class TestStructuredLoggerAwarenessMixinIntegration(unittest.TestCase):
+    """Verify awareness_mixin.py calls structured logger on completion/failure."""
+
+    def test_awareness_mixin_imports_structured_logger(self):
+        """awareness_mixin.py should import get_structured_logger."""
+        source = Path(ROOT / "core" / "awareness_mixin.py").read_text()
+        self.assertIn("from .structured_logger import get_logger as get_structured_logger", source)
+
+    def test_awareness_mixin_calls_task_complete(self):
+        """awareness_mixin.py should call get_structured_logger().task_complete() on agent completion."""
+        source = Path(ROOT / "core" / "awareness_mixin.py").read_text()
+        self.assertIn("get_structured_logger().task_complete(", source)
+
+    def test_awareness_mixin_calls_task_fail(self):
+        """awareness_mixin.py should call get_structured_logger().task_fail() on agent failure."""
+        source = Path(ROOT / "core" / "awareness_mixin.py").read_text()
+        self.assertIn("get_structured_logger().task_fail(", source)
+
+    def test_task_info_captured_before_removal(self):
+        """Task info should be read BEFORE task_queue.complete_task/fail_task removes it."""
+        source = Path(ROOT / "core" / "awareness_mixin.py").read_text()
+        # For completion: task_obj is already captured at line ~119 for self-check
+        # For failure: _fail_task_obj should be captured before fail_task()
+        fail_capture_pos = source.find("_fail_task_obj = self.task_queue.active_tasks.get(")
+        fail_task_pos = source.find("self.task_queue.fail_task(")
+        self.assertGreater(fail_capture_pos, 0, "_fail_task_obj capture not found")
+        self.assertLess(fail_capture_pos, fail_task_pos,
+                       "_fail_task_obj must be captured BEFORE task_queue.fail_task()")
+
+
+class TestStructuredLoggerEndToEnd(unittest.TestCase):
+    """End-to-end test: verify the full lifecycle produces correct JSONL."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        from core.structured_logger import StructuredLogger
+        self.slog = StructuredLogger(log_dir=Path(self.tmp_dir))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _read_jsonl(self, channel: str) -> list[dict]:
+        path = Path(self.tmp_dir) / f"{channel}.jsonl"
+        if not path.exists():
+            return []
+        entries = []
+        for line in path.read_text().strip().split("\n"):
+            if line:
+                entries.append(json.loads(line))
+        return entries
+
+    def test_full_lifecycle_start_complete(self):
+        """Simulate start → complete lifecycle and verify stats."""
+        self.slog.task_start("a1", "Fix auth", "WebApp")
+        self.slog.task_complete("a1", "Fix auth", "WebApp", 120.5, ["auth.py", "tests.py"])
+        stats = self.slog.get_task_stats()
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["completed"], 1)
+        self.assertEqual(stats["failed"], 0)
+        self.assertAlmostEqual(stats["avg_duration_s"], 120.5, places=1)
+
+    def test_full_lifecycle_start_fail(self):
+        """Simulate start → fail lifecycle and verify stats + failures."""
+        self.slog.task_start("a2", "Deploy prod", "WebApp")
+        self.slog.task_fail("a2", "Deploy prod", "WebApp", "timeout")
+        stats = self.slog.get_task_stats()
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["completed"], 0)
+        self.assertEqual(stats["failed"], 1)
+        failures = self.slog.get_recent_failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("timeout", failures[0]["error"])
+
+    def test_mixed_lifecycle(self):
+        """Multiple agents with mixed outcomes."""
+        for i in range(5):
+            self.slog.task_start(f"a{i}", f"task{i}", "proj")
+        self.slog.task_complete("a0", "task0", "proj", 10.0, [])
+        self.slog.task_complete("a1", "task1", "proj", 20.0, [])
+        self.slog.task_complete("a2", "task2", "proj", 30.0, [])
+        self.slog.task_fail("a3", "task3", "proj", "crashed")
+        self.slog.task_fail("a4", "task4", "proj", "OOM")
+        stats = self.slog.get_task_stats()
+        self.assertEqual(stats["total"], 5)
+        self.assertEqual(stats["completed"], 3)
+        self.assertEqual(stats["failed"], 2)
+        self.assertAlmostEqual(stats["avg_duration_s"], 20.0, places=1)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

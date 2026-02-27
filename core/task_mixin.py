@@ -16,6 +16,7 @@ from typing import Optional
 
 from .neural_bridge import BridgeMessage, MSG_TASK_DISPATCH
 from .safe_tasks import create_safe_task
+from .structured_logger import get_logger as get_structured_logger
 
 logger = logging.getLogger("leon")
 
@@ -97,6 +98,7 @@ class TaskMixin:
             agent_id, task_desc, project["name"], brief_path,
             str(self.agent_manager.output_dir / f"{agent_id}.log"),
         )
+        get_structured_logger().task_start(agent_id, task_desc, project["name"])
 
         # Notify Discord #dev that an agent just started
         create_safe_task(self._send_discord_message(
@@ -185,6 +187,7 @@ class TaskMixin:
                                 "project_name": project["name"], "brief_path": brief_path}
                     self.task_queue.add_task(agent_id, task_obj)
                     self.memory.add_active_task(agent_id, task_obj)
+                    get_structured_logger().task_start(agent_id, task_desc, project["name"])
                     spawned.append((agent_id, task_desc, project["name"], "local fallback"))
             else:
                 agent_id = await self.agent_manager.spawn_agent(
@@ -199,6 +202,7 @@ class TaskMixin:
                 }
                 self.task_queue.add_task(agent_id, task_obj)
                 self.memory.add_active_task(agent_id, task_obj)
+                get_structured_logger().task_start(agent_id, task_desc, project["name"])
                 spawned.append((agent_id, task_desc, project["name"], "local"))
 
         # Build response — conversational, not robotic
@@ -321,6 +325,7 @@ spawned_by: {self.ai_name} v1.0
         }
         self.task_queue.add_task(agent_id, task_obj)
         self.memory.add_active_task(agent_id, task_obj)
+        get_structured_logger().task_start(agent_id, task_desc, project["name"])
         return (
             f"Homelab's not responding — running it locally instead. "
             f"Working on **{task_desc}** in {project['name']}.\n\n"
@@ -443,6 +448,7 @@ spawned_by: {self.ai_name} v1.0
         }
         self.task_queue.add_task(agent_id, task_obj)
         self.memory.add_active_task(agent_id, task_obj)
+        get_structured_logger().task_start(agent_id, f"Self-repair: {component}", "Leon System")
         return (
             f"Got it — my {component} is broken. "
             f"Spawning an agent to read `{file_hint}` and fix it.\n"
