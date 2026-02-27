@@ -706,14 +706,22 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
                 return denied
 
         # Pre-router: lights — fast path, no LLM needed
-        try:
-            from tools.lights import parse_and_execute as _lights_parse
-            _light_resp = _lights_parse(message)
-            if _light_resp is not None:
-                self.memory.add_conversation(_light_resp, role="assistant")
-                return _light_resp
-        except Exception as _le:
-            logger.warning("Lights pre-router error: %s", _le)
+        # Skip if message is clearly an auto/night mode or task command — "lab" in those
+        # messages would otherwise fuzzy-match "lab ceiling" and trigger the light.
+        _is_mode_cmd = any(p in message.lower() for p in [
+            "auto mode", "night mode", "work on this", "work on this:", "queue task",
+            "add task", "keep working", "keep going", "keep coding", "start auto",
+            "enable auto", "coding mode", "go autonomous",
+        ])
+        if not _is_mode_cmd:
+            try:
+                from tools.lights import parse_and_execute as _lights_parse
+                _light_resp = _lights_parse(message)
+                if _light_resp is not None:
+                    self.memory.add_conversation(_light_resp, role="assistant")
+                    return _light_resp
+            except Exception as _le:
+                logger.warning("Lights pre-router error: %s", _le)
 
         # Pre-router: explicit web search intent — bypass LLM router entirely
         import re as _re
