@@ -67,9 +67,12 @@ class RoutingMixin:
                         _inline_task = candidate
                         break
             if _inline_task:
-                nm.add_task(_inline_task, "Leon System")
+                # Detect project from the full message — use the combined message + task text
+                _proj = self._resolve_project("", message + " " + _inline_task)
+                project_name = _proj["name"] if _proj else "Leon System"
+                nm.add_task(_inline_task, project_name)
                 asyncio.create_task(nm.try_dispatch())
-                return "Auto mode on. Task queued for Leon System — spawning agent now. I'll keep you updated."
+                return f"Auto mode on. Task queued for {project_name} — spawning agent now. I'll keep you updated."
 
             # No colon-based trigger, but the message itself may describe the work.
             # If it mentions a known project and has substance, treat the whole message as the task.
