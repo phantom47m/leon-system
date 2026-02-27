@@ -59,6 +59,10 @@ class AgentManager:
             # Pipe brief via stdin to avoid argument length limits and shell injection
             # Unset CLAUDECODE to allow spawning from within a Claude Code session
             spawn_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            # Add OpenClaw to PATH so agents can run `openclaw agent` directly
+            openclaw_bin = Path.home() / ".openclaw" / "bin"
+            if openclaw_bin.exists():
+                spawn_env["PATH"] = str(openclaw_bin) + ":" + spawn_env.get("PATH", "")
             leon_auth_dir = Path(__file__).parent.parent / "config" / "claude-auth"
             leon_creds = leon_auth_dir / ".claude" / ".credentials.json"
             user_creds = Path.home() / ".claude" / ".credentials.json"
