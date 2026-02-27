@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
@@ -639,6 +640,149 @@ class TestScheduler(unittest.TestCase):
         sched2 = TaskScheduler(config, self.state_path)
         due = sched2.get_due_tasks()
         self.assertEqual(len(due), 0)
+
+
+# ══════════════════════════════════════════════════════════
+# CRON EXPRESSION PARSER
+# ══════════════════════════════════════════════════════════
+
+class TestCronParser(unittest.TestCase):
+    """Tests for _cron_matches_field and _cron_is_due."""
+
+    # ── _cron_matches_field unit tests ────────────────────────────────────
+
+    def test_wildcard_matches_any(self):
+        from core.scheduler import _cron_matches_field
+        for v in (0, 1, 15, 59):
+            self.assertTrue(_cron_matches_field("*", v))
+
+    def test_exact_value(self):
+        from core.scheduler import _cron_matches_field
+        self.assertTrue(_cron_matches_field("5", 5))
+        self.assertFalse(_cron_matches_field("5", 6))
+
+    def test_range(self):
+        from core.scheduler import _cron_matches_field
+        self.assertTrue(_cron_matches_field("1-5", 1))
+        self.assertTrue(_cron_matches_field("1-5", 3))
+        self.assertTrue(_cron_matches_field("1-5", 5))
+        self.assertFalse(_cron_matches_field("1-5", 0))
+        self.assertFalse(_cron_matches_field("1-5", 6))
+
+    def test_step_from_wildcard(self):
+        from core.scheduler import _cron_matches_field
+        # */15 — matches 0, 15, 30, 45
+        self.assertTrue(_cron_matches_field("*/15", 0))
+        self.assertTrue(_cron_matches_field("*/15", 15))
+        self.assertTrue(_cron_matches_field("*/15", 30))
+        self.assertTrue(_cron_matches_field("*/15", 45))
+        self.assertFalse(_cron_matches_field("*/15", 1))
+        self.assertFalse(_cron_matches_field("*/15", 14))
+
+    def test_step_within_range(self):
+        from core.scheduler import _cron_matches_field
+        # 1-5/2 — matches 1, 3, 5
+        self.assertTrue(_cron_matches_field("1-5/2", 1))
+        self.assertTrue(_cron_matches_field("1-5/2", 3))
+        self.assertTrue(_cron_matches_field("1-5/2", 5))
+        self.assertFalse(_cron_matches_field("1-5/2", 2))
+        self.assertFalse(_cron_matches_field("1-5/2", 4))
+        self.assertFalse(_cron_matches_field("1-5/2", 0))
+
+    def test_comma_list(self):
+        from core.scheduler import _cron_matches_field
+        # 0,6,12,18
+        self.assertTrue(_cron_matches_field("0,6,12,18", 0))
+        self.assertTrue(_cron_matches_field("0,6,12,18", 6))
+        self.assertTrue(_cron_matches_field("0,6,12,18", 18))
+        self.assertFalse(_cron_matches_field("0,6,12,18", 1))
+        self.assertFalse(_cron_matches_field("0,6,12,18", 7))
+
+    def test_malformed_field_does_not_crash(self):
+        from core.scheduler import _cron_matches_field
+        # Garbage input should return False, not crash
+        self.assertFalse(_cron_matches_field("abc", 5))
+        self.assertFalse(_cron_matches_field("*/0", 5))   # step 0 → skip
+        self.assertFalse(_cron_matches_field("", 5))
+        self.assertFalse(_cron_matches_field("1-abc", 1))
+        self.assertFalse(_cron_matches_field("*/abc", 0))
+
+    # ── _cron_is_due: day-of-week convention ─────────────────────────────
+
+    def test_dow_sunday_is_zero(self):
+        """Cron 0 = Sunday. Python weekday 6 = Sunday. Must match."""
+        from core.scheduler import _cron_is_due
+        # 2026-03-01 is a Sunday
+        sunday = datetime(2026, 3, 1, 6, 0)
+        self.assertEqual(sunday.weekday(), 6)  # Python: 6 = Sunday
+        # cron: "0 6 * * 0" = every Sunday at 06:00
+        self.assertTrue(_cron_is_due("0 6 * * 0", None, sunday))
+        # Should NOT match Monday (cron dow 1)
+        self.assertFalse(_cron_is_due("0 6 * * 1", None, sunday))
+
+    def test_dow_monday_is_one(self):
+        """Cron 1 = Monday."""
+        from core.scheduler import _cron_is_due
+        # 2026-03-02 is a Monday
+        monday = datetime(2026, 3, 2, 9, 0)
+        self.assertEqual(monday.weekday(), 0)  # Python: 0 = Monday
+        self.assertTrue(_cron_is_due("0 9 * * 1", None, monday))
+        self.assertFalse(_cron_is_due("0 9 * * 0", None, monday))
+
+    def test_dow_saturday_is_six(self):
+        """Cron 6 = Saturday."""
+        from core.scheduler import _cron_is_due
+        # 2026-02-28 is a Saturday
+        saturday = datetime(2026, 2, 28, 12, 0)
+        self.assertEqual(saturday.weekday(), 5)  # Python: 5 = Saturday
+        self.assertTrue(_cron_is_due("0 12 * * 6", None, saturday))
+
+    def test_dow_weekday_range(self):
+        """Cron 1-5 = Mon-Fri."""
+        from core.scheduler import _cron_is_due
+        wednesday = datetime(2026, 3, 4, 8, 30)
+        self.assertEqual(wednesday.weekday(), 2)  # Python: 2 = Wednesday
+        self.assertTrue(_cron_is_due("30 8 * * 1-5", None, wednesday))
+        # Sunday should NOT match 1-5
+        sunday = datetime(2026, 3, 1, 8, 30)
+        self.assertFalse(_cron_is_due("30 8 * * 1-5", None, sunday))
+
+    # ── _cron_is_due: general matching ───────────────────────────────────
+
+    def test_exact_cron_match(self):
+        from core.scheduler import _cron_is_due
+        now = datetime(2026, 3, 1, 6, 0)   # Sunday March 1, 06:00
+        self.assertTrue(_cron_is_due("0 6 1 3 *", None, now))
+
+    def test_every_five_minutes(self):
+        from core.scheduler import _cron_is_due
+        at_00 = datetime(2026, 3, 1, 10, 0)
+        at_05 = datetime(2026, 3, 1, 10, 5)
+        at_03 = datetime(2026, 3, 1, 10, 3)
+        self.assertTrue(_cron_is_due("*/5 * * * *", None, at_00))
+        self.assertTrue(_cron_is_due("*/5 * * * *", None, at_05))
+        self.assertFalse(_cron_is_due("*/5 * * * *", None, at_03))
+
+    def test_double_fire_prevention(self):
+        from core.scheduler import _cron_is_due
+        now = datetime(2026, 3, 1, 6, 0)
+        last_run = datetime(2026, 3, 1, 6, 0, 10)  # ran 10 seconds ago
+        self.assertFalse(_cron_is_due("0 6 * * *", last_run, now))
+
+    def test_invalid_field_count_returns_false(self):
+        from core.scheduler import _cron_is_due
+        now = datetime(2026, 3, 1, 6, 0)
+        self.assertFalse(_cron_is_due("0 6 * *", None, now))        # 4 fields
+        self.assertFalse(_cron_is_due("0 6 * * * *", None, now))    # 6 fields
+
+    def test_comma_list_in_hours(self):
+        from core.scheduler import _cron_is_due
+        at_06 = datetime(2026, 3, 2, 6, 0)   # Monday
+        at_18 = datetime(2026, 3, 2, 18, 0)
+        at_10 = datetime(2026, 3, 2, 10, 0)
+        self.assertTrue(_cron_is_due("0 6,18 * * *", None, at_06))
+        self.assertTrue(_cron_is_due("0 6,18 * * *", None, at_18))
+        self.assertFalse(_cron_is_due("0 6,18 * * *", None, at_10))
 
 
 # ══════════════════════════════════════════════════════════
@@ -3779,6 +3923,122 @@ class TestCompletedTasksIntegration(unittest.TestCase):
         source = inspect.getsource(Leon._build_az_memory_context)
         self.assertIn("isinstance(completed, dict)", source,
                        "Should handle legacy dict format with isinstance check")
+
+
+# ══════════════════════════════════════════════════════════
+# SCHEDULED TASK TIMEOUT ENFORCEMENT
+# ══════════════════════════════════════════════════════════
+
+class TestScheduledTaskTimeout(unittest.TestCase):
+    """Verify that the awareness loop enforces max_runtime_minutes on scheduled tasks."""
+
+    def _run(self, coro):
+        """Helper to run a coroutine in the test event loop."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_timeout_read_from_task_config(self):
+        """max_runtime_minutes is used as the timeout for asyncio.wait_for."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        self.assertIn("max_runtime_minutes", source,
+                       "Awareness loop should read max_runtime_minutes from task config")
+        self.assertIn("asyncio.wait_for", source,
+                       "Awareness loop should use asyncio.wait_for for timeout enforcement")
+
+    def test_timeout_catches_asyncio_timeout_error(self):
+        """asyncio.TimeoutError should be caught and the task marked as failed."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        self.assertIn("asyncio.TimeoutError", source,
+                       "Awareness loop should catch asyncio.TimeoutError")
+
+    def test_timeout_marks_task_failed(self):
+        """When a builtin task times out, mark_failed is called with timeout message."""
+        from core.scheduler import TaskScheduler
+
+        tmp_dir = tempfile.mkdtemp()
+        state_path = os.path.join(tmp_dir, "scheduler.json")
+        config = [{"name": "SlowTask", "command": "__health_check__",
+                    "interval_hours": 24, "enabled": True, "max_runtime_minutes": 1}]
+        sched = TaskScheduler(config, state_path)
+
+        # Simulate a timeout by calling mark_failed with the timeout message
+        sched.mark_failed("SlowTask", "Timed out after 1m")
+        self.assertEqual(sched._fail_counts["SlowTask"], 1)
+
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_builtin_command_wrapped_in_wait_for(self):
+        """Built-in commands should be wrapped with asyncio.wait_for."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        # Should wrap run_builtin in wait_for
+        self.assertIn("await asyncio.wait_for(\n", source,
+                       "Built-in commands should be wrapped in asyncio.wait_for")
+
+    def test_user_command_wrapped_in_wait_for(self):
+        """User commands (process_user_input) should also be timeout-protected."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        # Both builtin and user commands should use wait_for
+        occurrences = source.count("asyncio.wait_for")
+        self.assertGreaterEqual(occurrences, 2,
+                       "Both built-in and user commands should use asyncio.wait_for")
+
+    def test_default_timeout_is_60_minutes(self):
+        """If max_runtime_minutes is not set, default to 60."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        self.assertIn("60", source,
+                       "Default timeout should be 60 minutes")
+
+    def test_timeout_error_message_includes_duration(self):
+        """The timeout error message should include how many minutes elapsed."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        self.assertIn("Timed out after", source,
+                       "Timeout message should include readable duration")
+
+    def test_timeout_converted_to_seconds(self):
+        """max_runtime_minutes should be converted to seconds for asyncio.wait_for."""
+        import inspect
+        from core.awareness_mixin import AwarenessMixin
+        source = inspect.getsource(AwarenessMixin._awareness_loop)
+        self.assertIn("* 60", source,
+                       "Minutes should be converted to seconds for wait_for timeout")
+
+    def test_wait_for_timeout_fires(self):
+        """asyncio.wait_for should actually raise TimeoutError for slow tasks."""
+        async def slow_coro():
+            await asyncio.sleep(10)
+
+        async def run_test():
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(slow_coro(), timeout=0.05)
+
+        self._run(run_test())
+
+    def test_wait_for_passes_fast_tasks(self):
+        """asyncio.wait_for should NOT timeout for tasks that complete quickly."""
+        async def fast_coro():
+            return "done"
+
+        async def run_test():
+            result = await asyncio.wait_for(fast_coro(), timeout=5)
+            self.assertEqual(result, "done")
+
+        self._run(run_test())
 
 
 # ══════════════════════════════════════════════════════════

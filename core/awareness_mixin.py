@@ -230,18 +230,33 @@ class AwarenessMixin:
                         cmd = sched_task.get("command", "")
                         if cmd:
                             logger.info(f"Running scheduled task: {sched_task['name']} -> {cmd}")
+                            timeout_s = sched_task.get("max_runtime_minutes", 60) * 60
                             try:
                                 if cmd.startswith("__") and cmd.endswith("__"):
                                     # Built-in scheduler commands — dispatch directly
                                     from .scheduler import run_builtin
-                                    success, msg = await run_builtin(cmd, leon=self)
+                                    success, msg = await asyncio.wait_for(
+                                        run_builtin(cmd, leon=self),
+                                        timeout=timeout_s,
+                                    )
                                     if success:
                                         self.scheduler.mark_completed(sched_task["name"])
                                     else:
                                         self.scheduler.mark_failed(sched_task["name"], msg)
                                 else:
-                                    await self.process_user_input(cmd)
+                                    await asyncio.wait_for(
+                                        self.process_user_input(cmd),
+                                        timeout=timeout_s,
+                                    )
                                     self.scheduler.mark_completed(sched_task["name"])
+                            except asyncio.TimeoutError:
+                                _timeout_msg = (
+                                    f"Timed out after {sched_task.get('max_runtime_minutes', 60)}m"
+                                )
+                                logger.error(
+                                    f"Scheduled task timed out: {sched_task['name']} ({_timeout_msg})"
+                                )
+                                self.scheduler.mark_failed(sched_task["name"], _timeout_msg)
                             except Exception as e:
                                 logger.error(f"Scheduled task failed: {sched_task['name']}: {e}")
                                 self.scheduler.mark_failed(sched_task["name"], str(e))
