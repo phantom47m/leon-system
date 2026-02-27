@@ -120,6 +120,7 @@
 | #21 Security tests | **Fixed (Phase 11)** |
 | #20 Keyword pre-router | **Fixed (Phase 12)** |
 | #23 sentByBridge unbounded | **Fixed (Phase 11)** |
+| #22 Stale stt_provider config | **Fixed** |
 
 ## Phase 12: Pre-Ride Safety Checklist Reset
 
@@ -150,7 +151,7 @@
 - [x] Fix SSL cert verification for bridge (Issue #12 — auto-gen certs + enforce verification)
 - [x] Add keyword pre-router for system skills (Issue #20)
 - [ ] Refactor `leon.py` into smaller modules (Issue #19)
-- [ ] Update stale stt_provider config (Issue #22)
+- [x] Update stale stt_provider config (Issue #22)
 
 **2026-02-27 — Phase 14: 4 critical/high bug fixes:** (1) `_self_update` was `@staticmethod` with `self` — always crashed on "update yourself"; removed decorator, (2) duplicate `_delayed_restart` definitions — second shadowed first causing `TypeError` on update restart; renamed first to `_restart_after_update`, (3) `completed_tasks` type conflict (list in memory.py, dict in Agent Zero dispatch) caused `TypeError` in `_flush()`; standardized on list with legacy dict migration, (4) `stop()` called `.cancel()` on background tasks without awaiting — could cause `RuntimeError: Event loop is closed`; now uses `asyncio.gather(..., return_exceptions=True)`. 14 new tests, 387 total passing.
 
@@ -181,3 +182,5 @@
 **2026-02-27 — Fire-and-forget task exception logging:** Added `create_safe_task()` wrapper (`core/safe_tasks.py`) that replaces bare `asyncio.create_task()` calls with automatic exception logging via `add_done_callback`; previously 30 fire-and-forget tasks across 7 files (leon.py, awareness_mixin.py, task_mixin.py, routing_mixin.py, voice.py, dashboard/server.py, discord/bot.py) silently swallowed all exceptions — failed memory extractions, Discord messages, night mode dispatches, voice TTS, and self-repair jobs all vanished without any log trace; now every background failure is logged with task name, exception type, message, and full traceback; 11 new tests, 523 total passing (3 pre-existing failures).
 
 **2026-02-27 — Subprocess zombie leak fix — kill timed-out subprocesses:** Fixed subprocess resource leak in 3 files where `asyncio.wait_for(proc.communicate/wait(), timeout=N)` caught `TimeoutError` but never killed the child process, leaving zombies running indefinitely; `api_client.py` (`_claude_cli_request` — 45s timeout), `voice.py` (espeak-ng TTS — 30s timeout), and `screen_awareness.py` (grim/scrot/gnome-screenshot/xdotool — added 15s/10s timeouts where none existed) now all call `proc.kill()` + `await proc.wait()` on timeout; 8 new tests, 534 total passing (3 pre-existing failures).
+
+**2026-02-27 — Issue #22 fixed: Wire `stt_provider` config into voice system:** The `voice.stt_provider` setting in `config/settings.yaml` was completely ignored — the voice system hardcoded STT backend selection based solely on which env var (`DEEPGRAM_API_KEY` or `GROQ_API_KEY`) was present, making the config value a lie. Now `VoiceSystem.__init__` reads `stt_provider` from config (default `"groq"`), and `_resolve_stt_provider()` selects the backend accordingly with automatic fallback to the other provider if the configured one's API key is missing; `listening_state` now includes the active `stt_provider` for dashboard display; dashboard `/voice` command shows the actual STT provider instead of hardcoded "Deepgram"; fixed `settings.yaml` default from `"deepgram"` to `"groq"` to match actual default behavior; 16 new tests, 550 total passing (3 pre-existing failures).

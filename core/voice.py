@@ -1,12 +1,13 @@
 """
-Leon Voice System — Groq Whisper STT + ElevenLabs TTS
+Leon Voice System — configurable STT + ElevenLabs TTS
 
 Wake word detection + voice commands + natural voice responses.
 
 Flow:
-  Microphone -> Energy VAD -> Groq Whisper (whisper-large-v3-turbo) -> Leon Brain -> ElevenLabs -> Speaker
+  Microphone -> Energy VAD -> STT (Groq Whisper or Deepgram) -> Leon Brain -> ElevenLabs -> Speaker
 
-Falls back to Deepgram if DEEPGRAM_API_KEY is set (legacy).
+STT provider is set via `voice.stt_provider` in config/settings.yaml ("groq" or "deepgram").
+Falls back to the other provider if the configured one's API key is missing.
 """
 
 import asyncio
@@ -239,7 +240,7 @@ class VoiceSystem:
     Full voice I/O for Leon.
 
     - Wake word: "Hey Leon" (detected via regex patterns with confidence scoring)
-    - STT: Deepgram Nova-2 streaming (real-time)
+    - STT: Groq Whisper (default) or Deepgram streaming — set via voice.stt_provider config
     - TTS: ElevenLabs (natural voice) with pyttsx3 fallback
     """
 
@@ -265,6 +266,9 @@ class VoiceSystem:
         self._sleep_timer: Optional[asyncio.Task] = None
 
         voice_cfg = config or {}
+
+        # STT provider selection — from config/settings.yaml voice.stt_provider
+        self.stt_provider = voice_cfg.get("stt_provider", "groq").lower()
 
         # Deepgram config
         self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY", "")
@@ -318,8 +322,8 @@ class VoiceSystem:
         self._load_tts_cache()
 
         logger.info(
-            "Voice system initialized — voice_id=%s, sleep_timeout=%.0fs",
-            self.voice_id, self.sleep_timeout,
+            "Voice system initialized — stt=%s, voice_id=%s, sleep_timeout=%.0fs",
+            self.stt_provider, self.voice_id, self.sleep_timeout,
         )
 
     # ================================================================
@@ -346,6 +350,7 @@ class VoiceSystem:
             "is_listening": self.is_listening,
             "is_awake": self.is_awake,
             "is_muted": self.is_muted,
+            "stt_provider": getattr(self, "_effective_stt_provider", self.stt_provider),
             "deepgram_healthy": self._deepgram_healthy,
             "elevenlabs_degraded": self._elevenlabs_degraded,
         }
@@ -386,27 +391,71 @@ class VoiceSystem:
     # ================================================================
 
     async def start(self):
-        """Start the full voice pipeline. Uses Groq Whisper if no Deepgram key."""
+        """Start the full voice pipeline. Provider set by voice.stt_provider config."""
         self.groq_api_key = os.getenv("GROQ_API_KEY", "")
 
-        if not self.deepgram_api_key and not self.groq_api_key:
-            logger.warning(
-                "No STT key found — set GROQ_API_KEY (free) or DEEPGRAM_API_KEY in .env"
-            )
+        # Resolve effective STT provider from config, with automatic fallback
+        provider = self._resolve_stt_provider()
+        if provider is None:
             return
 
-        logger.info("Voice system starting — say 'Hey Leon' to activate")
+        self._effective_stt_provider = provider
+        logger.info(
+            "Voice system starting (STT: %s) — say 'Hey Leon' to activate",
+            provider,
+        )
         self.is_listening = True
         self._set_state(VoiceState.MUTED if self.is_muted else VoiceState.LISTENING)
 
-        if self.deepgram_api_key:
-            # Legacy Deepgram streaming path
+        if provider == "deepgram":
             mic_thread = threading.Thread(target=self._capture_microphone, daemon=True)
             mic_thread.start()
             await self._stream_to_deepgram_with_reconnect()
         else:
-            # Groq Whisper path — energy VAD + batch transcription
             await self._run_groq_whisper_loop()
+
+    def _resolve_stt_provider(self) -> Optional[str]:
+        """Pick the STT backend based on config + available API keys.
+
+        Returns "groq" or "deepgram", or None if no usable provider found.
+        """
+        configured = self.stt_provider
+        has_groq = bool(self.groq_api_key)
+        has_deepgram = bool(self.deepgram_api_key)
+
+        if configured == "deepgram":
+            if has_deepgram:
+                return "deepgram"
+            if has_groq:
+                logger.warning(
+                    "stt_provider is 'deepgram' but DEEPGRAM_API_KEY not set "
+                    "— falling back to Groq Whisper"
+                )
+                return "groq"
+        elif configured == "groq":
+            if has_groq:
+                return "groq"
+            if has_deepgram:
+                logger.warning(
+                    "stt_provider is 'groq' but GROQ_API_KEY not set "
+                    "— falling back to Deepgram"
+                )
+                return "deepgram"
+        else:
+            logger.warning(
+                "Unknown stt_provider '%s' in config — expected 'groq' or 'deepgram'",
+                configured,
+            )
+            # Try whatever key is available
+            if has_groq:
+                return "groq"
+            if has_deepgram:
+                return "deepgram"
+
+        logger.warning(
+            "No STT key found — set GROQ_API_KEY (free) or DEEPGRAM_API_KEY in .env"
+        )
+        return None
 
     async def stop(self):
         """Stop the voice system."""

@@ -104,7 +104,7 @@ scheduler:
       priority: 4
 
 voice:
-  stt_provider: "deepgram"
+  stt_provider: "groq"      # "groq" (Whisper, free tier) or "deepgram" (streaming)
   tts_provider: "elevenlabs"
   voice_id: ""  # set via setup wizard — leave blank, user picks their own ElevenLabs voice
   stability: 0.6

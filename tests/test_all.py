@@ -5268,6 +5268,140 @@ class TestSubprocessTimeoutKill(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# Issue #22: STT Provider Config Tests
+# ══════════════════════════════════════════════════════════
+
+class TestSTTProviderConfig(unittest.TestCase):
+    """Verify that voice.stt_provider config drives STT backend selection."""
+
+    def _make_voice(self, config=None):
+        from core.voice import VoiceSystem
+        return VoiceSystem(on_command=None, config=config or {})
+
+    # ---- Config reading ----
+
+    def test_default_stt_provider_is_groq(self):
+        """Default stt_provider should be 'groq' when not specified in config."""
+        v = self._make_voice()
+        self.assertEqual(v.stt_provider, "groq")
+
+    def test_config_sets_stt_provider_groq(self):
+        v = self._make_voice({"stt_provider": "groq"})
+        self.assertEqual(v.stt_provider, "groq")
+
+    def test_config_sets_stt_provider_deepgram(self):
+        v = self._make_voice({"stt_provider": "deepgram"})
+        self.assertEqual(v.stt_provider, "deepgram")
+
+    def test_config_stt_provider_case_insensitive(self):
+        v = self._make_voice({"stt_provider": "GROQ"})
+        self.assertEqual(v.stt_provider, "groq")
+
+    # ---- Provider resolution logic ----
+
+    def test_resolve_groq_with_groq_key(self):
+        """Configured 'groq' + GROQ_API_KEY present → returns 'groq'."""
+        v = self._make_voice({"stt_provider": "groq"})
+        v.groq_api_key = "test-key"
+        v.deepgram_api_key = ""
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "groq")
+
+    def test_resolve_deepgram_with_deepgram_key(self):
+        """Configured 'deepgram' + DEEPGRAM_API_KEY present → returns 'deepgram'."""
+        v = self._make_voice({"stt_provider": "deepgram"})
+        v.groq_api_key = ""
+        v.deepgram_api_key = "test-key"
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "deepgram")
+
+    def test_resolve_groq_fallback_to_deepgram(self):
+        """Configured 'groq' but no GROQ_API_KEY → falls back to Deepgram."""
+        v = self._make_voice({"stt_provider": "groq"})
+        v.groq_api_key = ""
+        v.deepgram_api_key = "test-key"
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "deepgram")
+
+    def test_resolve_deepgram_fallback_to_groq(self):
+        """Configured 'deepgram' but no DEEPGRAM_API_KEY → falls back to Groq."""
+        v = self._make_voice({"stt_provider": "deepgram"})
+        v.groq_api_key = "test-key"
+        v.deepgram_api_key = ""
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "groq")
+
+    def test_resolve_no_keys_returns_none(self):
+        """No API keys at all → returns None (voice system won't start)."""
+        v = self._make_voice({"stt_provider": "groq"})
+        v.groq_api_key = ""
+        v.deepgram_api_key = ""
+        result = v._resolve_stt_provider()
+        self.assertIsNone(result)
+
+    def test_resolve_unknown_provider_with_groq_key(self):
+        """Unknown provider name but GROQ_API_KEY available → returns 'groq'."""
+        v = self._make_voice({"stt_provider": "whisper_local"})
+        v.groq_api_key = "test-key"
+        v.deepgram_api_key = ""
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "groq")
+
+    def test_resolve_unknown_provider_with_deepgram_key(self):
+        """Unknown provider name, only DEEPGRAM_API_KEY → returns 'deepgram'."""
+        v = self._make_voice({"stt_provider": "whisper_local"})
+        v.groq_api_key = ""
+        v.deepgram_api_key = "test-key"
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "deepgram")
+
+    def test_resolve_unknown_provider_no_keys(self):
+        """Unknown provider name and no keys → returns None."""
+        v = self._make_voice({"stt_provider": "whisper_local"})
+        v.groq_api_key = ""
+        v.deepgram_api_key = ""
+        result = v._resolve_stt_provider()
+        self.assertIsNone(result)
+
+    # ---- listening_state includes provider ----
+
+    def test_listening_state_includes_stt_provider(self):
+        """listening_state dict must include the stt_provider key."""
+        v = self._make_voice({"stt_provider": "groq"})
+        state = v.listening_state
+        self.assertIn("stt_provider", state)
+        self.assertEqual(state["stt_provider"], "groq")
+
+    def test_listening_state_shows_effective_provider(self):
+        """After resolution, listening_state shows the effective (not configured) provider."""
+        v = self._make_voice({"stt_provider": "deepgram"})
+        v.groq_api_key = "test-key"
+        v.deepgram_api_key = ""
+        # Simulate what start() does
+        v._effective_stt_provider = v._resolve_stt_provider()
+        state = v.listening_state
+        self.assertEqual(state["stt_provider"], "groq")  # fell back from deepgram
+
+    # ---- Both keys available — config wins ----
+
+    def test_both_keys_config_groq_uses_groq(self):
+        """Both keys set, config says 'groq' → uses Groq (config wins)."""
+        v = self._make_voice({"stt_provider": "groq"})
+        v.groq_api_key = "groq-key"
+        v.deepgram_api_key = "deepgram-key"
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "groq")
+
+    def test_both_keys_config_deepgram_uses_deepgram(self):
+        """Both keys set, config says 'deepgram' → uses Deepgram (config wins)."""
+        v = self._make_voice({"stt_provider": "deepgram"})
+        v.groq_api_key = "groq-key"
+        v.deepgram_api_key = "deepgram-key"
+        result = v._resolve_stt_provider()
+        self.assertEqual(result, "deepgram")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
