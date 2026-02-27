@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 
@@ -492,24 +493,29 @@ class TestTaskQueuePersistence(unittest.TestCase):
         # Reload from disk
         q2 = TaskQueue(max_concurrent=2, persist_path=self.persist_path)
         summary = q2.get_status_summary()
-        # t2 was active — re-queued on restart (process lost)
-        # t1 was already completed
+        # On restart: active tasks are discarded (processes are dead),
+        # queued tasks are discarded (night mode manages its own backlog).
+        # Only completed tasks survive.
         self.assertEqual(summary["active"], 0)
+        self.assertEqual(summary["queued"], 0)
         self.assertGreaterEqual(summary["completed"], 1)
-        self.assertGreaterEqual(summary["queued"], 1)  # t2 re-queued
 
-    def test_queued_tasks_survive_restart(self):
+    def test_stale_tasks_discarded_on_restart(self):
         from core.task_queue import TaskQueue
         q = TaskQueue(max_concurrent=1, persist_path=self.persist_path)
         q.add_task("t1", {"description": "Active task"})
         q.add_task("t2", {"description": "Queued task"})
         summary = q.get_status_summary()
         self.assertEqual(summary["queued"], 1)
+        self.assertEqual(summary["active"], 1)
 
-        # Reload — t1 was active, gets re-queued; t2 stays queued
+        # Reload — both active and queued tasks are discarded on restart
+        # to prevent pile-up across repeated restarts. Night mode
+        # manages its own backlog and will re-dispatch if needed.
         q2 = TaskQueue(max_concurrent=1, persist_path=self.persist_path)
         summary2 = q2.get_status_summary()
-        self.assertGreaterEqual(summary2["queued"], 1)  # t1 + t2 re-queued
+        self.assertEqual(summary2["active"], 0)
+        self.assertEqual(summary2["queued"], 0)
 
     def test_atomic_write_survives_corruption(self):
         from core.task_queue import TaskQueue
@@ -1357,9 +1363,14 @@ class TestVoiceSystem(unittest.TestCase):
         result = self.voice._strip_wake_word("hey leon")
         self.assertEqual(result, "")
 
+    @patch.dict(os.environ, {}, clear=False)
     def test_default_voice_id(self):
-        # Should default to Daniel (British)
-        self.assertEqual(self.voice.voice_id, "onwK4e9ZLuTAKqWW03F9")
+        # With no LEON_VOICE_ID env var and no config, voice_id defaults to ""
+        # (user sets it via setup wizard or LEON_VOICE_ID env var)
+        os.environ.pop("LEON_VOICE_ID", None)
+        from core.voice import VoiceSystem
+        v = VoiceSystem(on_command=None, config={})
+        self.assertEqual(v.voice_id, "")
 
     def test_tts_stability(self):
         self.assertEqual(self.voice.tts_stability, 0.55)
