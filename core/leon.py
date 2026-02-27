@@ -27,7 +27,7 @@ from .scheduler import TaskScheduler
 from .openclaw_interface import OpenClawInterface
 from .api_client import AnthropicAPI
 from .neural_bridge import (
-    BridgeServer, BridgeMessage,
+    BridgeServer, BridgeMessage, ensure_bridge_certs,
     MSG_TASK_DISPATCH, MSG_TASK_STATUS, MSG_TASK_RESULT,
     MSG_STATUS_REQUEST, MSG_STATUS_RESPONSE, MSG_MEMORY_SYNC,
 )
@@ -369,6 +369,14 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
                     logger.info("Generated new bridge token and stored in vault")
             if bridge_token:
                 bridge_config["token"] = bridge_token
+            # Auto-generate TLS certificates if not present
+            cert_path = bridge_config.get("cert_path", "")
+            key_path = bridge_config.get("key_path", "")
+            if cert_path and key_path:
+                try:
+                    ensure_bridge_certs(cert_path, key_path)
+                except RuntimeError as e:
+                    logger.warning(f"Bridge cert generation failed: {e}")
             self.bridge = BridgeServer(bridge_config)
             self.bridge.on(MSG_TASK_STATUS, self._handle_remote_task_status)
             self.bridge.on(MSG_TASK_RESULT, self._handle_remote_task_result)

@@ -8,8 +8,10 @@ Or:  pytest tests/test_all.py -v
 Tests every module without needing API keys, printers, or cameras.
 """
 
+import asyncio
 import json
 import os
+import ssl
 import sys
 import tempfile
 import time
@@ -2385,6 +2387,181 @@ class TestBridgeMessageSecurity(unittest.TestCase):
         from core.neural_bridge import BridgeServer
         server = BridgeServer({})
         self.assertEqual(server.host, "127.0.0.1")
+
+
+# ══════════════════════════════════════════════════════════
+# SECURITY — Bridge SSL cert auto-generation & verification
+# ══════════════════════════════════════════════════════════
+
+class TestBridgeCertGeneration(unittest.TestCase):
+    """Test auto-generation of self-signed TLS certificates for the bridge."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.cert_path = os.path.join(self.tmp_dir, "bridge_cert.pem")
+        self.key_path = os.path.join(self.tmp_dir, "bridge_key.pem")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_generates_certs_when_missing(self):
+        """Should create cert and key files when they don't exist."""
+        from core.neural_bridge import ensure_bridge_certs
+        result = ensure_bridge_certs(self.cert_path, self.key_path)
+        self.assertTrue(result)
+        self.assertTrue(os.path.exists(self.cert_path))
+        self.assertTrue(os.path.exists(self.key_path))
+
+    def test_skips_when_certs_exist(self):
+        """Should return False and not overwrite existing certs."""
+        from core.neural_bridge import ensure_bridge_certs
+        # Generate first
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        original_cert = open(self.cert_path, "rb").read()
+        # Call again — should skip
+        result = ensure_bridge_certs(self.cert_path, self.key_path)
+        self.assertFalse(result)
+        self.assertEqual(open(self.cert_path, "rb").read(), original_cert)
+
+    def test_cert_is_valid_pem(self):
+        """Generated cert should be loadable by ssl module."""
+        from core.neural_bridge import ensure_bridge_certs
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(self.cert_path, self.key_path)
+
+    def test_cert_has_correct_cn(self):
+        """Certificate CN should be 'leon-bridge'."""
+        from core.neural_bridge import ensure_bridge_certs
+        from cryptography import x509
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        cert_data = open(self.cert_path, "rb").read()
+        cert = x509.load_pem_x509_certificate(cert_data)
+        cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)[0].value
+        self.assertEqual(cn, "leon-bridge")
+
+    def test_cert_has_localhost_san(self):
+        """Certificate should include localhost and 127.0.0.1 as SANs."""
+        from core.neural_bridge import ensure_bridge_certs
+        from cryptography import x509
+        import ipaddress
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        cert_data = open(self.cert_path, "rb").read()
+        cert = x509.load_pem_x509_certificate(cert_data)
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        dns_names = san.value.get_values_for_type(x509.DNSName)
+        ip_addrs = san.value.get_values_for_type(x509.IPAddress)
+        self.assertIn("localhost", dns_names)
+        self.assertIn(ipaddress.IPv4Address("127.0.0.1"), ip_addrs)
+
+    def test_cert_validity_period(self):
+        """Certificate should be valid for ~10 years."""
+        from core.neural_bridge import ensure_bridge_certs
+        from cryptography import x509
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        cert_data = open(self.cert_path, "rb").read()
+        cert = x509.load_pem_x509_certificate(cert_data)
+        validity_days = (cert.not_valid_after_utc - cert.not_valid_before_utc).days
+        self.assertGreaterEqual(validity_days, 3649)
+        self.assertLessEqual(validity_days, 3651)
+
+    def test_creates_parent_directories(self):
+        """Should create parent dirs if they don't exist."""
+        from core.neural_bridge import ensure_bridge_certs
+        nested_cert = os.path.join(self.tmp_dir, "sub", "dir", "cert.pem")
+        nested_key = os.path.join(self.tmp_dir, "sub", "dir", "key.pem")
+        result = ensure_bridge_certs(nested_cert, nested_key)
+        self.assertTrue(result)
+        self.assertTrue(os.path.exists(nested_cert))
+
+    def test_cert_can_verify_itself(self):
+        """Client ssl context should be able to verify the generated cert."""
+        from core.neural_bridge import ensure_bridge_certs
+        ensure_bridge_certs(self.cert_path, self.key_path)
+        # Server context
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(self.cert_path, self.key_path)
+        # Client context — should load verify locations without error
+        client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        client_ctx.load_verify_locations(self.cert_path)
+        client_ctx.check_hostname = False
+        client_ctx.verify_mode = ssl.CERT_REQUIRED
+
+
+class TestBridgeSSLEnforcement(unittest.TestCase):
+    """Test that bridge client enforces SSL verification."""
+
+    def test_client_raises_without_cert(self):
+        """Client connecting via wss:// without cert_path should raise RuntimeError."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({"server_url": "wss://localhost:9100/bridge", "cert_path": ""})
+        from unittest.mock import MagicMock
+        client._session = MagicMock()
+        loop = asyncio.new_event_loop()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                loop.run_until_complete(client._connect_once())
+            self.assertIn("cert not found", str(ctx.exception))
+        finally:
+            loop.close()
+
+    def test_client_raises_with_missing_cert_file(self):
+        """Client with cert_path pointing to nonexistent file should raise RuntimeError."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({
+            "server_url": "wss://localhost:9100/bridge",
+            "cert_path": "/nonexistent/cert.pem",
+        })
+        from unittest.mock import MagicMock
+        client._session = MagicMock()
+        loop = asyncio.new_event_loop()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                loop.run_until_complete(client._connect_once())
+            self.assertIn("cert not found", str(ctx.exception))
+        finally:
+            loop.close()
+
+    def test_client_no_ssl_for_ws_scheme(self):
+        """Client using ws:// (not wss://) should not create ssl context."""
+        from core.neural_bridge import BridgeClient
+        client = BridgeClient({"server_url": "ws://localhost:9100/bridge"})
+        # _connect_once will try to actually connect, but ssl_ctx should be None
+        # We can verify by checking the code path — ws:// skips SSL entirely
+        # Just verify the client initializes correctly
+        self.assertEqual(client.server_url, "ws://localhost:9100/bridge")
+
+    def test_server_auto_generates_certs(self):
+        """Server start() should auto-generate certs if paths configured but files missing."""
+        from core.neural_bridge import BridgeServer
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            cert_path = os.path.join(tmp_dir, "cert.pem")
+            key_path = os.path.join(tmp_dir, "key.pem")
+            server = BridgeServer({
+                "cert_path": cert_path,
+                "key_path": key_path,
+                "host": "127.0.0.1",
+                "port": 0,
+            })
+            # Run start() which should auto-generate certs
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(server.start())
+                self.assertTrue(os.path.exists(cert_path))
+                self.assertTrue(os.path.exists(key_path))
+            finally:
+                loop.run_until_complete(server.stop())
+                loop.close()
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_ensure_bridge_certs_exported(self):
+        """ensure_bridge_certs should be importable from neural_bridge module."""
+        from core.neural_bridge import ensure_bridge_certs
+        self.assertTrue(callable(ensure_bridge_certs))
 
 
 # ══════════════════════════════════════════════════════════

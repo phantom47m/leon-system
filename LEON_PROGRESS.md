@@ -111,7 +111,7 @@
 | #9 Graceful shutdown | **Fixed (Phase 11)** |
 | #10 Uncapped completed list | Fixed (Phase 10) |
 | #11 Bridge default binding | Fixed (Phase 10) |
-| #12 SSL verification warning | **Fixed (Phase 11)** |
+| #12 SSL cert auto-gen + enforced verification | **Fixed (Phase 15)** |
 | #13 NightMode dispatch race | **Fixed (Phase 11)** |
 | #14 Duplicate dashboard code | **Fixed (Phase 11)** |
 | #15 Memory completed_tasks trim | Fixed (Phase 10) |
@@ -147,7 +147,7 @@
 - [x] Sandbox/confirmation for `python_exec` (Issue #4 from audit)
 - [ ] Evaluate `--dangerously-skip-permissions` alternatives (Issue #5)
 - [x] Fix event loop threading model (Issue #7)
-- [ ] Fix SSL cert verification for bridge (Issue #12 — generate self-signed cert)
+- [x] Fix SSL cert verification for bridge (Issue #12 — auto-gen certs + enforce verification)
 - [x] Add keyword pre-router for system skills (Issue #20)
 - [ ] Refactor `leon.py` into smaller modules (Issue #19)
 - [ ] Update stale stt_provider config (Issue #22)
@@ -165,3 +165,5 @@
 **2026-02-27 — Robust JSON extraction for `analyze_json`:** Replaced fragile `json.loads` with 4-strategy `_extract_json` method — (1) direct parse, (2) markdown code fence extraction via regex, (3) bracket-matching substring finder for JSON embedded in explanatory text, (4) trailing comma auto-fix. Used by 7+ critical subsystems (request routing, system skill dispatch, plan generation, browser agent, vision, screen awareness, self-memory). 28 new tests added.
 
 **2026-02-27 — Enforce `max_runtime_minutes` timeout on scheduled tasks:** Wrapped both built-in and user-command scheduled task execution in `asyncio.wait_for()` using each task's `max_runtime_minutes` config (default 60m); a hung scheduled command previously blocked the entire awareness loop indefinitely (agent monitoring, memory saves, Discord updates, all other tasks); now properly catches `asyncio.TimeoutError` and calls `mark_failed()` with a clear timeout message; 10 new tests, 413 total passing.
+
+**2026-02-27 — Issue #12 fixed: Bridge SSL cert auto-generation and enforced verification:** Added `ensure_bridge_certs()` that auto-generates self-signed TLS certificates (2048-bit RSA, 10-year validity, localhost/127.0.0.1 SANs) using the `cryptography` library when certs are missing; server `start()` now calls cert generation before enabling TLS; client `_connect_once()` now enforces `CERT_REQUIRED` instead of silently falling back to `CERT_NONE` (MITM vulnerability), raising `RuntimeError` if no cert is available; 13 new tests, 426 total passing.

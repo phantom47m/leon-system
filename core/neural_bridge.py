@@ -7,6 +7,8 @@ Both use JSON envelopes with token auth, heartbeat, and request-response.
 """
 
 import asyncio
+import datetime
+import ipaddress
 import json
 import logging
 import os
@@ -20,6 +22,83 @@ from typing import Any, Callable, Coroutine, Optional
 from aiohttp import web, WSMsgType, ClientSession, WSServerHandshakeError
 
 logger = logging.getLogger("leon.bridge")
+
+
+# ── Certificate Auto-Generation ──────────────────────────
+
+def ensure_bridge_certs(cert_path: str, key_path: str) -> bool:
+    """
+    Generate self-signed TLS certificates for the bridge if they don't exist.
+
+    Uses the ``cryptography`` library (already a project dependency) to create
+    a 2048-bit RSA key + X.509 certificate valid for 10 years, with SANs for
+    localhost and 127.0.0.1.
+
+    Returns True if certs were generated, False if they already exist.
+    Raises RuntimeError if generation fails.
+    """
+    cert_p = Path(cert_path)
+    key_p = Path(key_path)
+
+    if cert_p.exists() and key_p.exists():
+        return False
+
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+    except ImportError:
+        raise RuntimeError(
+            "Cannot generate bridge certs — 'cryptography' package not installed. "
+            "Install it with: pip install cryptography"
+        )
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+    )
+
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "leon-bridge"),
+    ])
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            ]),
+            critical=False,
+        )
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=0),
+            critical=True,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+
+    cert_p.parent.mkdir(parents=True, exist_ok=True)
+    key_p.parent.mkdir(parents=True, exist_ok=True)
+
+    key_p.write_bytes(private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ))
+    cert_p.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+    logger.info(f"Generated self-signed bridge certificates: {cert_p}, {key_p}")
+    return True
+
 
 # ── Message Types ────────────────────────────────────────
 MSG_AUTH = "auth"
@@ -88,15 +167,34 @@ class BridgeServer:
         self._handlers[msg_type] = handler
 
     async def start(self):
-        """Start the WebSocket server."""
+        """Start the WebSocket server with TLS."""
         self._app = web.Application()
         self._app.router.add_get("/bridge", self._ws_handler)
 
         ssl_ctx = None
-        if self.cert_path and self.key_path and Path(self.cert_path).exists():
-            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_ctx.load_cert_chain(self.cert_path, self.key_path)
-            logger.info("Bridge TLS enabled")
+        if self.cert_path and self.key_path:
+            # Auto-generate self-signed certs if they don't exist
+            try:
+                generated = ensure_bridge_certs(self.cert_path, self.key_path)
+                if generated:
+                    logger.info("Auto-generated bridge TLS certificates")
+            except RuntimeError as e:
+                logger.warning(f"Could not auto-generate bridge certs: {e}")
+
+            if Path(self.cert_path).exists() and Path(self.key_path).exists():
+                ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ssl_ctx.load_cert_chain(self.cert_path, self.key_path)
+                logger.info("Bridge TLS enabled")
+            else:
+                logger.warning(
+                    "Bridge TLS DISABLED — cert/key files not found. "
+                    "Connection is unencrypted."
+                )
+        else:
+            logger.warning(
+                "Bridge TLS DISABLED — no cert_path/key_path configured. "
+                "Set bridge.cert_path and bridge.key_path in settings.yaml."
+            )
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -343,13 +441,15 @@ class BridgeClient:
             ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             if self.cert_path and Path(self.cert_path).exists():
                 ssl_ctx.load_verify_locations(self.cert_path)
-            else:
+                # Self-signed certs don't have a hostname that matches,
+                # but we still verify the certificate itself
                 ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-                logger.warning(
-                    "Bridge SSL verification DISABLED — no cert_path configured. "
-                    "Connection is vulnerable to MITM. Generate a self-signed cert "
-                    "and set bridge.cert_path in settings.yaml to fix this."
+                ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+            else:
+                raise RuntimeError(
+                    f"Bridge SSL verification failed — cert not found at "
+                    f"'{self.cert_path}'. Cannot connect securely. Ensure the "
+                    f"server has generated certs and cert_path is set in config."
                 )
 
         logger.info(f"Connecting to Left Brain at {self.server_url}")
