@@ -711,6 +711,11 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
         # Terminate active agents and close their file handles
         if self.agent_manager:
             await self.agent_manager.shutdown()
+        # Close persistent HTTP clients (API provider + model router)
+        if self.api:
+            await self.api.close()
+        from router.model_router import close_client as _close_router_client
+        await _close_router_client()
         # Force-flush memory (bypasses debounce) to ensure no data is lost
         self.memory.save(force=True)
         logger.info("Leon stopped")

@@ -73,6 +73,11 @@ class AnthropicAPI:
         self._groq_key: str = ""
         self._ollama_model: str = ""
 
+        # Persistent HTTP clients — reuse TCP connections across requests
+        # Lazy-initialized on first async use (can't create in sync __init__)
+        self._groq_http: Optional[httpx.AsyncClient] = None
+        self._ollama_http: Optional[httpx.AsyncClient] = None
+
         # --- 1. Anthropic API key ---
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key and vault and vault._unlocked:
@@ -301,6 +306,40 @@ class AnthropicAPI:
         return [p for p in candidates if p != self._auth_method]
 
     # ------------------------------------------------------------------
+    # Persistent HTTP client management
+    # ------------------------------------------------------------------
+
+    def _get_groq_http(self) -> httpx.AsyncClient:
+        """Return (or create) a persistent HTTP client for Groq API calls."""
+        if self._groq_http is None or self._groq_http.is_closed:
+            self._groq_http = httpx.AsyncClient(
+                base_url=GROQ_API_BASE,
+                headers={"Content-Type": "application/json"},
+                timeout=60.0,
+            )
+        return self._groq_http
+
+    def _get_ollama_http(self) -> httpx.AsyncClient:
+        """Return (or create) a persistent HTTP client for Ollama API calls."""
+        if self._ollama_http is None or self._ollama_http.is_closed:
+            self._ollama_http = httpx.AsyncClient(
+                base_url=OLLAMA_API_BASE,
+                timeout=120.0,
+            )
+        return self._ollama_http
+
+    async def close(self):
+        """Close persistent HTTP clients. Call during shutdown."""
+        for client in (self._groq_http, self._ollama_http):
+            if client and not client.is_closed:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+        self._groq_http = None
+        self._ollama_http = None
+
+    # ------------------------------------------------------------------
     # Provider backends
     # ------------------------------------------------------------------
 
@@ -328,29 +367,26 @@ class AnthropicAPI:
                 logger.info(f"Groq rate limit — retrying in {delay}s (attempt {attempt+1}/{len(retry_delays)+1})")
                 await _asyncio.sleep(delay)
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    r = await client.post(
-                        f"{GROQ_API_BASE}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self._groq_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=payload,
-                    )
-                    if r.status_code == 200:
-                        return r.json()["choices"][0]["message"]["content"]
-                    elif r.status_code == 401:
-                        logger.error("Groq: invalid API key")
-                        return "Groq API key is invalid. Run `/setkey groq <key>` to update it."
-                    elif r.status_code == 429:
-                        logger.warning(f"Groq: rate limited (attempt {attempt+1})")
-                        if attempt < len(retry_delays):
-                            continue  # retry after delay
-                        return "One sec — Groq's rate limit is busy, try again shortly."
-                    else:
-                        err = r.text[:200]
-                        logger.error(f"Groq error {r.status_code}: {err}")
-                        return f"Groq error: {r.status_code}"
+                client = self._get_groq_http()
+                r = await client.post(
+                    "/chat/completions",
+                    headers={"Authorization": f"Bearer {self._groq_key}"},
+                    json=payload,
+                )
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"]
+                elif r.status_code == 401:
+                    logger.error("Groq: invalid API key")
+                    return "Groq API key is invalid. Run `/setkey groq <key>` to update it."
+                elif r.status_code == 429:
+                    logger.warning(f"Groq: rate limited (attempt {attempt+1})")
+                    if attempt < len(retry_delays):
+                        continue  # retry after delay
+                    return "One sec — Groq's rate limit is busy, try again shortly."
+                else:
+                    err = r.text[:200]
+                    logger.error(f"Groq error {r.status_code}: {err}")
+                    return f"Groq error: {r.status_code}"
             except httpx.TimeoutException:
                 logger.error("Groq request timed out")
                 if attempt < len(retry_delays):
@@ -374,16 +410,16 @@ class AnthropicAPI:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(
-                    f"{OLLAMA_API_BASE}/api/chat",
-                    json=payload,
-                )
-                if r.status_code == 200:
-                    return r.json()["message"]["content"]
-                else:
-                    logger.error(f"Ollama error {r.status_code}: {r.text[:200]}")
-                    return f"Ollama error: {r.status_code}"
+            client = self._get_ollama_http()
+            r = await client.post(
+                "/api/chat",
+                json=payload,
+            )
+            if r.status_code == 200:
+                return r.json()["message"]["content"]
+            else:
+                logger.error(f"Ollama error {r.status_code}: {r.text[:200]}")
+                return f"Ollama error: {r.status_code}"
         except httpx.ConnectError:
             logger.error("Ollama not reachable — is it running?")
             self._auth_method = "none"  # Mark as unavailable

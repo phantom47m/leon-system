@@ -93,18 +93,47 @@ def _log_decision(tier: TaskTier, model: str, reason: str, latency_ms: float,
         pass
 
 
+# ── Persistent HTTP client for Ollama ─────────────────────────────────────────
+# Reuses TCP connections across requests instead of creating a new connection
+# per call (~100ms overhead avoided per request).
+
+_ollama_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_ollama_client() -> httpx.AsyncClient:
+    """Return (or create) a persistent HTTP client for Ollama."""
+    global _ollama_client
+    if _ollama_client is None or _ollama_client.is_closed:
+        _ollama_client = httpx.AsyncClient(
+            base_url=OLLAMA_BASE,
+            timeout=30.0,
+        )
+    return _ollama_client
+
+
+async def close_client():
+    """Close the persistent Ollama HTTP client. Call during shutdown."""
+    global _ollama_client
+    if _ollama_client and not _ollama_client.is_closed:
+        try:
+            await _ollama_client.aclose()
+        except Exception:
+            pass
+    _ollama_client = None
+
+
 # ── Ollama helpers ────────────────────────────────────────────────────────────
 
 async def is_ollama_available(model: str = OLLAMA_MODEL) -> bool:
     """Non-blocking check: is Ollama running with the target model?"""
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            r = await client.get(f"{OLLAMA_BASE}/api/tags")
-            if r.status_code != 200:
-                return False
-            models = [m["name"] for m in r.json().get("models", [])]
-            # Accept "llama3.2:3b" or "llama3.2" (without tag)
-            return any(model.split(":")[0] in m for m in models)
+        client = _get_ollama_client()
+        r = await client.get("/api/tags", timeout=2.0)
+        if r.status_code != 200:
+            return False
+        models = [m["name"] for m in r.json().get("models", [])]
+        # Accept "llama3.2:3b" or "llama3.2" (without tag)
+        return any(model.split(":")[0] in m for m in models)
     except Exception:
         return False
 
@@ -116,15 +145,16 @@ async def ollama_call(prompt: str, model: str = OLLAMA_MODEL,
     Never raises — safe to call in background loops.
     """
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(
-                f"{OLLAMA_BASE}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False},
-            )
-            if r.status_code == 200:
-                return r.json().get("response", "").strip()
-            logger.debug(f"Ollama {r.status_code}: {r.text[:100]}")
-            return None
+        client = _get_ollama_client()
+        r = await client.post(
+            "/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=timeout,
+        )
+        if r.status_code == 200:
+            return r.json().get("response", "").strip()
+        logger.debug(f"Ollama {r.status_code}: {r.text[:100]}")
+        return None
     except httpx.ConnectError:
         logger.debug("Ollama not reachable")
         return None

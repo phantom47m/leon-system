@@ -6874,6 +6874,209 @@ class TestMemoryBackupRotation(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# API CLIENT — PERSISTENT HTTP CONNECTION POOLS
+# ══════════════════════════════════════════════════════════
+
+class TestPersistentHTTPClients(unittest.TestCase):
+    """Tests for persistent HTTP connection pool lifecycle in AnthropicAPI."""
+
+    def _make_api(self):
+        """Create an AnthropicAPI instance with no real provider configured."""
+        orig_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+        orig_groq = os.environ.pop("GROQ_API_KEY", None)
+        try:
+            from core.api_client import AnthropicAPI
+            api = AnthropicAPI({"model": "test", "max_tokens": 100})
+        finally:
+            if orig_anthropic:
+                os.environ["ANTHROPIC_API_KEY"] = orig_anthropic
+            if orig_groq:
+                os.environ["GROQ_API_KEY"] = orig_groq
+        return api
+
+    # ── Lazy initialization ──
+
+    def test_groq_http_starts_none(self):
+        """Groq HTTP client should be None before first use."""
+        api = self._make_api()
+        self.assertIsNone(api._groq_http)
+
+    def test_ollama_http_starts_none(self):
+        """Ollama HTTP client should be None before first use."""
+        api = self._make_api()
+        self.assertIsNone(api._ollama_http)
+
+    def test_get_groq_http_creates_client(self):
+        """_get_groq_http() should create a persistent client on first call."""
+        api = self._make_api()
+        client = api._get_groq_http()
+        import httpx
+        self.assertIsInstance(client, httpx.AsyncClient)
+        self.assertFalse(client.is_closed)
+
+    def test_get_ollama_http_creates_client(self):
+        """_get_ollama_http() should create a persistent client on first call."""
+        api = self._make_api()
+        client = api._get_ollama_http()
+        import httpx
+        self.assertIsInstance(client, httpx.AsyncClient)
+        self.assertFalse(client.is_closed)
+
+    def test_groq_http_reuses_client(self):
+        """Repeated calls to _get_groq_http() should return the same client instance."""
+        api = self._make_api()
+        c1 = api._get_groq_http()
+        c2 = api._get_groq_http()
+        self.assertIs(c1, c2)
+
+    def test_ollama_http_reuses_client(self):
+        """Repeated calls to _get_ollama_http() should return the same client instance."""
+        api = self._make_api()
+        c1 = api._get_ollama_http()
+        c2 = api._get_ollama_http()
+        self.assertIs(c1, c2)
+
+    # ── Close lifecycle ──
+
+    def test_close_cleans_up_clients(self):
+        """close() should close and nullify both HTTP clients."""
+        api = self._make_api()
+        # Force client creation
+        groq_c = api._get_groq_http()
+        ollama_c = api._get_ollama_http()
+        self.assertFalse(groq_c.is_closed)
+        self.assertFalse(ollama_c.is_closed)
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(api.close())
+        finally:
+            loop.close()
+
+        self.assertTrue(groq_c.is_closed)
+        self.assertTrue(ollama_c.is_closed)
+        self.assertIsNone(api._groq_http)
+        self.assertIsNone(api._ollama_http)
+
+    def test_close_idempotent_when_no_clients(self):
+        """close() should be safe to call even if no clients were created."""
+        api = self._make_api()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(api.close())
+        finally:
+            loop.close()
+        self.assertIsNone(api._groq_http)
+        self.assertIsNone(api._ollama_http)
+
+    def test_close_idempotent_double_close(self):
+        """close() should be safe to call twice."""
+        api = self._make_api()
+        api._get_groq_http()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(api.close())
+            loop.run_until_complete(api.close())  # Second call should not raise
+        finally:
+            loop.close()
+        self.assertIsNone(api._groq_http)
+
+    def test_recreate_after_close(self):
+        """After close(), _get_groq_http() should create a fresh client."""
+        api = self._make_api()
+        c1 = api._get_groq_http()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(api.close())
+        finally:
+            loop.close()
+        c2 = api._get_groq_http()
+        self.assertIsNot(c1, c2)
+        self.assertFalse(c2.is_closed)
+
+    # ── Base URL configuration ──
+
+    def test_groq_client_has_correct_base_url(self):
+        """Groq client should have the Groq API base URL configured."""
+        api = self._make_api()
+        client = api._get_groq_http()
+        from core.api_client import GROQ_API_BASE
+        self.assertEqual(str(client.base_url).rstrip("/"), GROQ_API_BASE)
+
+    def test_ollama_client_has_correct_base_url(self):
+        """Ollama client should have the Ollama API base URL configured."""
+        api = self._make_api()
+        client = api._get_ollama_http()
+        from core.api_client import OLLAMA_API_BASE
+        self.assertEqual(str(client.base_url).rstrip("/"), OLLAMA_API_BASE)
+
+
+class TestModelRouterPersistentClient(unittest.TestCase):
+    """Tests for persistent HTTP client in model_router.py."""
+
+    def setUp(self):
+        import router.model_router as mr
+        self._mr = mr
+        # Ensure clean state before each test
+        if mr._ollama_client and not mr._ollama_client.is_closed:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(mr.close_client())
+            finally:
+                loop.close()
+
+    def tearDown(self):
+        if self._mr._ollama_client and not self._mr._ollama_client.is_closed:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self._mr.close_client())
+            finally:
+                loop.close()
+
+    def test_client_starts_none(self):
+        """Module-level Ollama client should be None before first use."""
+        self.assertIsNone(self._mr._ollama_client)
+
+    def test_get_creates_client(self):
+        """_get_ollama_client() should create a client on first call."""
+        import httpx
+        client = self._mr._get_ollama_client()
+        self.assertIsInstance(client, httpx.AsyncClient)
+        self.assertFalse(client.is_closed)
+
+    def test_get_reuses_client(self):
+        """Repeated calls should return the same client instance."""
+        c1 = self._mr._get_ollama_client()
+        c2 = self._mr._get_ollama_client()
+        self.assertIs(c1, c2)
+
+    def test_close_cleans_up(self):
+        """close_client() should close and nullify the client."""
+        client = self._mr._get_ollama_client()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self._mr.close_client())
+        finally:
+            loop.close()
+        self.assertTrue(client.is_closed)
+        self.assertIsNone(self._mr._ollama_client)
+
+    def test_close_idempotent(self):
+        """close_client() should be safe to call when no client exists."""
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(self._mr.close_client())
+        finally:
+            loop.close()
+        self.assertIsNone(self._mr._ollama_client)
+
+    def test_client_has_correct_base_url(self):
+        """Client should target OLLAMA_BASE."""
+        client = self._mr._get_ollama_client()
+        self.assertEqual(str(client.base_url).rstrip("/"), self._mr.OLLAMA_BASE)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
