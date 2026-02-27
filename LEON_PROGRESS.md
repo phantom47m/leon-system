@@ -129,6 +129,13 @@
 
 - **Fixed scheduler always marking tasks as completed** — `mark_completed()` was called outside the try/except, so failed tasks were never tracked; the scheduler's consecutive-failure alert system was completely bypassed. Now properly calls `mark_failed()` on exception. Built-in commands (`__health_check__` etc.) are routed directly to `run_builtin()` instead of through `process_user_input()`, avoiding conversation pollution and wasted LLM calls. Night mode backlog now trims completed/failed tasks to last 200 entries to prevent unbounded growth. (12 new tests, 215 total)
 
+## Phase 14: Fix Event Loop Threading Model — Continuous Loop + Cross-Thread Dispatch (Issue #7)
+
+- **Fixed CLI event loop starvation** (`main.py`) — previously, `input()` blocked the main thread between commands, preventing `call_later` callbacks (reminders), `create_task` fire-and-forget work (memory extraction, night mode dispatch), and awareness loop heartbeats from executing. Now `input()` runs in a daemon thread and dispatches commands to the main loop via `run_coroutine_threadsafe()`, while `loop.run_forever()` keeps async tasks alive continuously.
+- **Fixed voice thread cross-loop dispatch** (`main.py`) — voice commands were previously awaited directly on the voice thread's own event loop, causing Leon's `asyncio.create_task()` calls to spawn tasks on the wrong loop. Now dispatches to `leon.main_loop` via `run_coroutine_threadsafe()` + `wrap_future()`, ensuring all Leon operations serialize on a single loop.
+- **Added `main_loop` attribute to Leon** (`core/leon.py`) — set during `start()` to `asyncio.get_running_loop()`, providing a stable reference for cross-thread dispatch from voice, dashboard, and input threads.
+- **5 new tests** — main_loop set on start, call_later fires on continuous loop, cross-thread dispatch, create_task executes on continuous loop, voice dispatch targets main loop. (377 total, 4 pre-existing failures)
+
 ## Next Actions
 
 ### Motorev App
@@ -146,6 +153,8 @@
 - [ ] Update stale stt_provider config (Issue #22)
 
 **2026-02-27 — Issue #4 fixed:** `python_exec` now blocks 10 dangerous module imports (subprocess, shutil, ctypes, socket, etc.) and 15 dangerous patterns (os.system, os.remove, __import__, open, eval, exec, compile) before execution; 33 new security tests added.
+
+**2026-02-27 — API provider failover:** `create_message`, `quick_request`, and `analyze_json` now automatically try fallback providers (Groq/Ollama/Claude CLI) when the primary fails, instead of returning raw error strings to the user; also fixed a bug where Claude CLI's inline Groq fallback sent an empty message list; 24 new tests added.
 
 **2026-02-27 — Issue #7 hardened:** `python_exec` sandbox hardened — subprocess env stripped to {PATH, HOME, LANG} (no API keys/tokens exposed), cwd set to /tmp (no project file access), denylist expanded to 34 patterns (adds os.environ, os.path, os.listdir, os.walk, builtins, getattr, globals, locals, breakpoint) and 13 blocked imports (adds pathlib, tempfile, webbrowser); 23 new sandbox tests added.
 

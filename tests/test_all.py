@@ -3205,6 +3205,7 @@ class TestAPIClientFailover(unittest.TestCase):
 
         api._groq_request = AsyncMock(return_value="Groq error: 500")
         api._ollama_request = AsyncMock(return_value="Ollama error: 503")
+        api._claude_cli_request = AsyncMock(return_value="Error: not available")
 
         result = asyncio.run(
             api.create_message("system", [{"role": "user", "content": "test"}])
@@ -3215,50 +3216,28 @@ class TestAPIClientFailover(unittest.TestCase):
 
     def test_quick_request_failover(self):
         """quick_request should also failover when primary fails."""
-        import asyncio as _asyncio
         from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="groq", _groq_key="gsk_test", _ollama_model="llama3.2")
 
-        async def mock_groq(*args, **kwargs):
-            return "Groq timed out — try again."
+        api._groq_request = AsyncMock(return_value="Groq timed out — try again.")
+        api._ollama_request = AsyncMock(return_value="Ollama saved the day.")
 
-        async def mock_ollama(*args, **kwargs):
-            return "Ollama saved the day."
-
-        api._groq_request = AsyncMock(side_effect=mock_groq)
-        api._ollama_request = AsyncMock(side_effect=mock_ollama)
-
-        result = _asyncio.get_event_loop().run_until_complete(
-            api.quick_request("what time is it?")
-        )
+        result = asyncio.run(api.quick_request("what time is it?"))
         self.assertEqual(result, "Ollama saved the day.")
 
     # ── analyze_json failover ──
 
     def test_analyze_json_groq_fails_falls_through(self):
         """analyze_json should fall through to quick_request if Groq errors."""
-        import asyncio as _asyncio
         from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="ollama", _groq_key="gsk_test", _ollama_model="llama3.2")
 
-        call_count = {"groq": 0}
+        api._groq_request = AsyncMock(return_value="Groq error: 503")
+        api._ollama_request = AsyncMock(return_value='{"type": "simple", "tasks": []}')
 
-        async def mock_groq(messages, system="", model=None):
-            call_count["groq"] += 1
-            return "Groq error: 503"
-
-        async def mock_ollama(messages, system=""):
-            return '{"type": "simple", "tasks": []}'
-
-        api._groq_request = AsyncMock(side_effect=mock_groq)
-        api._ollama_request = AsyncMock(side_effect=mock_ollama)
-
-        result = _asyncio.get_event_loop().run_until_complete(
-            api.analyze_json("classify this request")
-        )
-        # Groq failed, should have fallen through to quick_request (which uses ollama)
+        result = asyncio.run(api.analyze_json("classify this request"))
         self.assertIsNotNone(result)
         self.assertEqual(result.get("type"), "simple")
 
@@ -3266,27 +3245,18 @@ class TestAPIClientFailover(unittest.TestCase):
 
     def test_claude_cli_no_inline_groq_fallback(self):
         """Claude CLI errors should return error strings, not try inline Groq with empty messages."""
-        import asyncio as _asyncio
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="claude_cli", _groq_key="gsk_test")
 
-        # Simulate CLI failure
-        async def mock_cli(prompt, model="claude-sonnet-4-6"):
-            return "Error: exit code 1"
-
-        api._claude_cli_request = AsyncMock(side_effect=mock_cli)
+        api._claude_cli_request = AsyncMock(return_value="Error: exit code 1")
         api._groq_request = AsyncMock(return_value="Groq fallback response")
 
-        # quick_request should get CLI error, then failover via the proper chain
-        result = _asyncio.get_event_loop().run_until_complete(
-            api.quick_request("test prompt")
-        )
-        # Groq should be called via the failover chain, not with empty messages
+        result = asyncio.run(api.quick_request("test prompt"))
+        # Groq should be called via the failover chain with proper user messages
         if api._groq_request.called:
             args = api._groq_request.call_args
             messages = args[0][0] if args[0] else args[1].get("messages", [])
-            # Messages should contain the user prompt, not be empty
             self.assertTrue(len(messages) > 0, "Groq should receive user messages, not empty list")
 
 
