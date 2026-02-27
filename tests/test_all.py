@@ -4869,6 +4869,208 @@ class TestTrivialConversation(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# SAFE TASK WRAPPER (create_safe_task)
+# ══════════════════════════════════════════════════════════
+
+class TestSafeTaskWrapper(unittest.TestCase):
+    """Tests for core.safe_tasks.create_safe_task — fire-and-forget error logging."""
+
+    def _run(self, coro):
+        """Run a coroutine synchronously."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_successful_task_completes(self):
+        """A normal coroutine should run to completion and return its result."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            result = []
+            async def _ok():
+                result.append("done")
+            task = create_safe_task(_ok(), name="test-ok")
+            await task
+            self.assertEqual(result, ["done"])
+
+        self._run(_main())
+
+    def test_exception_is_logged_not_swallowed(self):
+        """An exception in a fire-and-forget task should be logged, not silently lost."""
+        from core.safe_tasks import create_safe_task
+        import logging
+
+        async def _main():
+            async def _boom():
+                raise ValueError("test explosion")
+
+            with self.assertLogs("leon", level="ERROR") as cm:
+                task = create_safe_task(_boom(), name="test-boom")
+                # Wait for the task to finish so the done callback fires
+                try:
+                    await task
+                except ValueError:
+                    pass
+
+            # Verify the error was logged with task name and exception details
+            log_output = "\n".join(cm.output)
+            self.assertIn("test-boom", log_output)
+            self.assertIn("ValueError", log_output)
+            self.assertIn("test explosion", log_output)
+
+        self._run(_main())
+
+    def test_cancelled_task_does_not_log_error(self):
+        """A cancelled task should not produce an error log."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            async def _slow():
+                await asyncio.sleep(999)
+
+            task = create_safe_task(_slow(), name="test-cancel")
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+            # If this raises, it means the callback incorrectly called
+            # task.exception() on a cancelled task (which raises CancelledError)
+            self.assertTrue(task.cancelled())
+
+        self._run(_main())
+
+    def test_task_name_is_set(self):
+        """The task should have the name we provide."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            async def _noop():
+                pass
+            task = create_safe_task(_noop(), name="my-custom-name")
+            await task
+            self.assertEqual(task.get_name(), "my-custom-name")
+
+        self._run(_main())
+
+    def test_task_without_name(self):
+        """create_safe_task should work without a name argument."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            result = []
+            async def _ok():
+                result.append(42)
+            task = create_safe_task(_ok())
+            await task
+            self.assertEqual(result, [42])
+
+        self._run(_main())
+
+    def test_callback_is_attached(self):
+        """The done callback should be registered on the task."""
+        from core.safe_tasks import create_safe_task, _task_done_callback
+
+        async def _main():
+            async def _noop():
+                pass
+            task = create_safe_task(_noop(), name="test-cb")
+            # asyncio.Task doesn't expose callbacks directly, but we can
+            # verify indirectly by checking the task completes without error
+            await task
+            self.assertTrue(task.done())
+            self.assertIsNone(task.exception())
+
+        self._run(_main())
+
+    def test_return_value_preserved(self):
+        """The task should preserve the coroutine's return value."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            async def _compute():
+                return 42
+            task = create_safe_task(_compute(), name="test-return")
+            result = await task
+            self.assertEqual(result, 42)
+
+        self._run(_main())
+
+    def test_multiple_failures_all_logged(self):
+        """Multiple failing tasks should each produce their own log entry."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            async def _fail_a():
+                raise RuntimeError("error-alpha")
+            async def _fail_b():
+                raise TypeError("error-beta")
+
+            with self.assertLogs("leon", level="ERROR") as cm:
+                t1 = create_safe_task(_fail_a(), name="task-alpha")
+                t2 = create_safe_task(_fail_b(), name="task-beta")
+                for t in [t1, t2]:
+                    try:
+                        await t
+                    except Exception:
+                        pass
+                # Yield to event loop so all done-callbacks fire
+                await asyncio.sleep(0)
+
+            log_output = "\n".join(cm.output)
+            self.assertIn("task-alpha", log_output)
+            self.assertIn("error-alpha", log_output)
+            self.assertIn("task-beta", log_output)
+            self.assertIn("error-beta", log_output)
+
+        self._run(_main())
+
+    def test_done_callback_function_exists(self):
+        """_task_done_callback should be importable."""
+        from core.safe_tasks import _task_done_callback
+        self.assertTrue(callable(_task_done_callback))
+
+    def test_fire_and_forget_pattern(self):
+        """Simulates the real fire-and-forget pattern: create task and never await it."""
+        from core.safe_tasks import create_safe_task
+
+        async def _main():
+            async def _background():
+                raise RuntimeError("background crash")
+
+            with self.assertLogs("leon", level="ERROR") as cm:
+                create_safe_task(_background(), name="fire-forget")
+                # Give the event loop time to run and complete the task
+                await asyncio.sleep(0.05)
+
+            log_output = "\n".join(cm.output)
+            self.assertIn("fire-forget", log_output)
+            self.assertIn("background crash", log_output)
+
+        self._run(_main())
+
+    def test_create_safe_task_used_in_core_modules(self):
+        """Verify core modules import create_safe_task (no bare asyncio.create_task fire-and-forget)."""
+        import re
+        modules_to_check = [
+            "core/leon.py",
+            "core/awareness_mixin.py",
+            "core/task_mixin.py",
+            "core/routing_mixin.py",
+        ]
+        for mod_path in modules_to_check:
+            full_path = ROOT / mod_path
+            if not full_path.exists():
+                continue
+            content = full_path.read_text()
+            self.assertIn("from .safe_tasks import create_safe_task", content,
+                          f"{mod_path} should import create_safe_task")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

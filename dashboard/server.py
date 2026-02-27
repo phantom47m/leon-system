@@ -623,8 +623,8 @@ async def api_message(request):
         response_mode = request.app.get("response_mode", "both")  # voice, text, both
         should_speak = response_mode in ("voice", "both")
         if vs and should_speak and response and not response.startswith("["):
-            import asyncio as _asyncio
-            _asyncio.create_task(vs.speak(response))
+            from core.safe_tasks import create_safe_task as _cst
+            _cst(vs.speak(response), name="dashboard-tts")
     except Exception as e:
         logger.debug(f"TTS speak error: {e}")
 
@@ -926,7 +926,8 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                     break
             if not match:
                 return f"Agent not found: `{arg}`"
-            asyncio.create_task(leon.agent_manager.terminate_agent(match))
+            from core.safe_tasks import create_safe_task
+            create_safe_task(leon.agent_manager.terminate_agent(match), name="dashboard-terminate-agent")
             return f"Terminating agent `{match}`..."
 
         elif cmd == "/queue":
@@ -950,7 +951,8 @@ def _handle_slash_command(command: str, leon, app=None) -> str:
                     match = aid
                     break
             if match:
-                asyncio.create_task(leon.agent_manager._retry_agent(match))
+                from core.safe_tasks import create_safe_task
+                create_safe_task(leon.agent_manager._retry_agent(match), name="dashboard-retry-agent")
                 return f"Retrying agent `{match}`..."
             return f"Agent not found: `{arg}`. Use `/agents` to see active agents."
 

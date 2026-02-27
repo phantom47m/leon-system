@@ -39,6 +39,8 @@ if _PROJECT_ROOT not in sys.path:
 import aiohttp
 import discord
 
+from core.safe_tasks import create_safe_task
+
 CHANNEL_FILE = "/tmp/leon_discord_channel.json"
 TOKEN_FILE   = "/tmp/leon_discord_bot_token.txt"
 
@@ -259,7 +261,7 @@ class AIDiscordBot(discord.Client):
                     f"so it works on this Wayland/COSMIC system. "
                     f"After fixing, apply the patch and restart the discord bridge."
                 )
-                asyncio.create_task(self._ask_leon(repair_msg, str(message.author)))
+                create_safe_task(self._ask_leon(repair_msg, str(message.author)), name="discord-screenshot-repair")
             return
 
         # Show typing indicator while waiting for Leon
@@ -292,7 +294,7 @@ class AIDiscordBot(discord.Client):
                 from integrations.discord.voice_handler import get_voice_manager
                 vm = get_voice_manager()
                 if vm:
-                    asyncio.create_task(vm._play_tts(clean_response))
+                    create_safe_task(vm._play_tts(clean_response), name="discord-tts")
             except Exception:
                 pass
 
@@ -318,7 +320,7 @@ class AIDiscordBot(discord.Client):
             f"Check logs/discord_bridge.log for the error, fix the function so it works on "
             f"this Wayland/COSMIC desktop, then apply the patch and restart the Discord bridge."
         )
-        asyncio.create_task(self._ask_leon(repair_msg, author))
+        create_safe_task(self._ask_leon(repair_msg, author), name="discord-screenshot-repair")
         logger.warning("Screenshot failed — self-repair dispatched to Leon/Agent Zero")
 
     async def _ask_leon(self, text: str, author: str) -> str:

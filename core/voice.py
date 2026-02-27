@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from .safe_tasks import create_safe_task
+
 logger = logging.getLogger("leon.voice")
 
 # ================================================================
@@ -439,7 +441,7 @@ class VoiceSystem:
         vad_thread.start()
 
         # Startup greeting — wait for VAD to calibrate (1.5s) then speak
-        asyncio.create_task(self._startup_greeting())
+        create_safe_task(self._startup_greeting(), name="voice-startup-greeting")
 
         # Main async loop processes transcriptions
         while self.is_listening:
@@ -448,7 +450,7 @@ class VoiceSystem:
                     self._transcription_queue.get(), timeout=1.0
                 )
                 # Transcribe in background so VAD keeps running
-                asyncio.create_task(self._transcribe_and_handle(audio_bytes))
+                create_safe_task(self._transcribe_and_handle(audio_bytes), name="voice-transcribe")
             except asyncio.TimeoutError:
                 continue
             except Exception as e:

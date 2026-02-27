@@ -11,6 +11,7 @@ import logging
 import subprocess
 
 from .neural_bridge import BridgeMessage, MSG_STATUS_REQUEST
+from .safe_tasks import create_safe_task
 
 logger = logging.getLogger("leon")
 
@@ -70,10 +71,10 @@ class AwarenessMixin:
                         # Notify via voice if available
                         vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
                         if vs and vs.is_listening:
-                            asyncio.create_task(vs.speak(
+                            create_safe_task(vs.speak(
                                 f"Heads up — RAM hit {used_pct:.0f}%. "
                                 "Cleaned up some browser processes to free memory."
-                            ))
+                            ), name="ram-watchdog-speak")
             except subprocess.TimeoutExpired as e:
                 logger.warning("RAM watchdog: subprocess timed out: %s", e)
             except Exception as e:
@@ -175,12 +176,12 @@ class AwarenessMixin:
                         _files = results.get("files_modified", [])
                         _dur = status.get("duration_seconds", 0)
                         _files_str = (", ".join(_files[:5]) + (" ..." if len(_files) > 5 else "")) if _files else "no files"
-                        asyncio.create_task(self._send_discord_message(
+                        create_safe_task(self._send_discord_message(
                             f"✅ **Agent done** ({int(_dur)}s)\n"
                             f"**Summary:** {_summary[:300]}\n"
                             f"**Files:** {_files_str}",
                             channel="dev",
-                        ))
+                        ), name="discord-agent-done")
 
                         # Auto mode: mark done + refill queue if empty so it never stops.
                         # Always works on Leon System only — self-improvement loop.
@@ -198,7 +199,7 @@ class AwarenessMixin:
                             )
                             self.night_mode.add_task(continuation, "Leon System")
                             logger.info("Auto mode: queued self-improvement continuation for Leon System")
-                        asyncio.create_task(self.night_mode.try_dispatch())
+                        create_safe_task(self.night_mode.try_dispatch(), name="night-dispatch-after-complete")
 
                     elif status.get("failed"):
                         results = await self.agent_manager.get_agent_results(agent_id)
@@ -228,14 +229,14 @@ class AwarenessMixin:
                         )
 
                         # Post to Discord #dev so owner can see failures
-                        asyncio.create_task(self._send_discord_message(
+                        create_safe_task(self._send_discord_message(
                             f"❌ **Agent failed**\n{raw_error[:300]}",
                             channel="dev",
-                        ))
+                        ), name="discord-agent-failed")
 
                         # Night mode: mark failed + try to dispatch next task
                         self.night_mode.mark_agent_failed(agent_id, raw_error)
-                        asyncio.create_task(self.night_mode.try_dispatch())
+                        create_safe_task(self.night_mode.try_dispatch(), name="night-dispatch-after-fail")
 
                 # --- Per-cycle operations (outside per-agent loop) ---
 

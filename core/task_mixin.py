@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from .neural_bridge import BridgeMessage, MSG_TASK_DISPATCH
+from .safe_tasks import create_safe_task
 
 logger = logging.getLogger("leon")
 
@@ -40,7 +41,7 @@ class TaskMixin:
         if not project:
             return "No projects configured — add one in config/projects.yaml first."
 
-        asyncio.create_task(self.plan_mode.run(goal, project))
+        create_safe_task(self.plan_mode.run(goal, project), name="plan-mode-run")
         return (
             f"On it. Analyzing {project['name']} and building a plan now — "
             f"I'll execute everything automatically. Check the dashboard for live progress."
@@ -98,13 +99,12 @@ class TaskMixin:
         )
 
         # Notify Discord #dev that an agent just started
-        import asyncio as _asyncio
-        _asyncio.create_task(self._send_discord_message(
+        create_safe_task(self._send_discord_message(
             f"🤖 **Agent spawned** — `{agent_id}`\n"
             f"**Project:** {project['name']}\n"
             f"**Task:** {task_desc[:200]}",
             channel="dev",
-        ))
+        ), name="discord-agent-spawned")
 
         return (
             f"On it. Spinning up an agent for **{task_desc}** "
@@ -420,7 +420,7 @@ spawned_by: {self.ai_name} v1.0
                     except Exception as exc:
                         logger.exception("Self-repair job failed: %s", exc)
 
-                asyncio.create_task(_repair_and_notify())
+                create_safe_task(_repair_and_notify(), name="self-repair")
                 return (
                     f"Got it — I know my {component} failed. "
                     f"Dispatching Agent Zero to diagnose and fix it now.\n\n"

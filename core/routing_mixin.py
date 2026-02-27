@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+from .safe_tasks import create_safe_task
+
 logger = logging.getLogger("leon")
 
 # ── Keyword pre-routing table (Issue #20) ──────────────────────────────────
@@ -157,7 +159,7 @@ class RoutingMixin:
                 _proj = self._resolve_project("", message + " " + _inline_task)
                 project_name = _proj["name"] if _proj else "Leon System"
                 nm.add_task(_inline_task, project_name)
-                asyncio.create_task(nm.try_dispatch())
+                create_safe_task(nm.try_dispatch(), name="night-dispatch")
                 return f"Auto mode on. Task queued for {project_name} — spawning agent now. I'll keep you updated."
 
             # No colon-based trigger, but the message itself may describe the work.
@@ -167,12 +169,12 @@ class RoutingMixin:
                 # Only use if a real match (not just the default fallback with no name in message)
                 if _matched_proj and _matched_proj["name"].lower() in msg:
                     nm.add_task(message, _matched_proj["name"])
-                    asyncio.create_task(nm.try_dispatch())
+                    create_safe_task(nm.try_dispatch(), name="night-dispatch")
                     return f"Auto mode on. On it — queuing that for {_matched_proj['name']} and spawning an agent now."
 
             pending = nm.get_pending()
             if pending:
-                asyncio.create_task(nm.try_dispatch())
+                create_safe_task(nm.try_dispatch(), name="night-dispatch")
                 return f"Auto mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
             return "Auto mode on. Queue is empty — send me the task and I'll get started."
 
@@ -214,7 +216,7 @@ class RoutingMixin:
                     status += " Auto mode is off — say 'auto mode on' or 'keep working' when ready."
                 else:
                     # Immediately try to dispatch if slot available
-                    asyncio.create_task(nm.try_dispatch())
+                    create_safe_task(nm.try_dispatch(), name="night-dispatch")
                     status += " Dispatching now if a slot's free."
                 return status
 
@@ -256,7 +258,7 @@ class RoutingMixin:
                 return f"Patch check failed: {result.stderr[:200]}\nApply manually: `git apply {patch}`"
             subprocess.run(["git", "apply", patch], cwd=leon_path, check=True)
             await self._send_discord_message("✅ Patch applied. Restarting Leon in 3 seconds...", channel="chat")
-            asyncio.create_task(self._delayed_restart(3))
+            create_safe_task(self._delayed_restart(3), name="delayed-restart")
             return "Patch applied. Restarting now."
 
         # ── Agent Zero — kill switch ────────────────────────────────────────────
@@ -748,7 +750,7 @@ System skill examples:
             if job.get("ok") is False:
                 err = job.get("error", "")
                 logger.warning("OpenClaw cron failed: %s — dispatching AZ to fix", err[:80])
-                asyncio.create_task(self._repair_openclaw_cron(err))
+                create_safe_task(self._repair_openclaw_cron(err), name="repair-openclaw-cron")
                 return f"Couldn't schedule the recurring task right now (OpenClaw issue). I've dispatched Agent Zero to fix it. Try again in a minute."
             job_id = job.get("id", "?")
             sched = every or cron_expr or at or "?"

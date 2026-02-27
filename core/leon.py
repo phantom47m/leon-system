@@ -44,6 +44,7 @@ from .task_mixin import TaskMixin
 from .awareness_mixin import AwarenessMixin
 from .reminder_mixin import ReminderMixin
 from .response_mixin import ResponseMixin
+from .safe_tasks import create_safe_task
 
 logger = logging.getLogger("leon")
 
@@ -563,7 +564,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
             logger.warning(f"Screen awareness failed to start: {e}")
 
         # Auto-trigger daily briefing on startup
-        asyncio.create_task(self._auto_daily_briefing())
+        create_safe_task(self._auto_daily_briefing(), name="daily-briefing")
 
         # Resume night mode — always enable if there are pending tasks (including recovered ones)
         pending = self.night_mode.get_pending()
@@ -572,7 +573,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
                 await asyncio.sleep(15)  # wait for bridge to connect first
                 await self.night_mode.enable()
                 logger.info(f"Night mode auto-resumed: {len(pending)} pending task(s) dispatching")
-            asyncio.create_task(_resume_night())
+            create_safe_task(_resume_night(), name="resume-night-mode")
 
         # Clear stale active_tasks — any tasks from previous Leon process are dead
         self.memory.memory["active_tasks"] = {}
@@ -608,7 +609,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
                     self.plan_mode._active = False
             self.plan_mode._active = True
             self.plan_mode.current_plan = saved_plan
-            asyncio.create_task(_resume_plan())
+            create_safe_task(_resume_plan(), name="resume-plan-mode")
 
         logger.info("Leon is now running — all systems active")
 
@@ -758,14 +759,14 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
         if routed:
             response = self._strip_sir(routed)
             self.memory.add_conversation(response, role="assistant")
-            asyncio.create_task(self._extract_memory(message, response))
+            create_safe_task(self._extract_memory(message, response), name="memory-extract")
             return response
 
         # Everything else: single LLM call (no classify→respond double-tap)
         response = await self._respond_conversationally(message)
         response = self._strip_sir(response)
         self.memory.add_conversation(response, role="assistant")
-        asyncio.create_task(self._extract_memory(message, response))
+        create_safe_task(self._extract_memory(message, response), name="memory-extract")
         return response
 
     async def process_user_input(self, message: str) -> str:
@@ -838,7 +839,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
             response = await self._respond_conversationally(message)
             response = self._strip_sir(response)
             self.memory.add_conversation(response, role="assistant")
-            asyncio.create_task(self._extract_memory(message, response))
+            create_safe_task(self._extract_memory(message, response), name="memory-extract")
             return response
 
         # Analyze what the user wants
@@ -886,7 +887,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin,
         self.memory.add_conversation(response, role="assistant")
 
         # Self-memory: passively extract facts worth remembering
-        asyncio.create_task(self._extract_memory(message, response))
+        create_safe_task(self._extract_memory(message, response), name="memory-extract")
 
         return response
 
@@ -1098,7 +1099,7 @@ Vision: {vision_desc}
             if "Already up to date" in output:
                 return "Already on the latest version. Nothing to update."
             # Restart the process
-            asyncio.create_task(self._restart_after_update(output))
+            create_safe_task(self._restart_after_update(output), name="restart-after-update")
             return f"Update pulled. Restarting now...\n{output}"
         except Exception as e:
             return f"Update failed: {e}"
@@ -1353,7 +1354,7 @@ Vision: {vision_desc}
             except Exception as exc:
                 logger.exception("Agent Zero background job failed: %s", exc)
 
-        asyncio.create_task(_run_and_cleanup())
+        create_safe_task(_run_and_cleanup(), name="agent-zero-job")
 
         return (
             f"Dispatched to **Agent Zero** (Docker execution engine) 🐳\n\n"
