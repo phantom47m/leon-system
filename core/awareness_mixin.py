@@ -231,10 +231,20 @@ class AwarenessMixin:
                         if cmd:
                             logger.info(f"Running scheduled task: {sched_task['name']} -> {cmd}")
                             try:
-                                await self.process_user_input(cmd)
+                                if cmd.startswith("__") and cmd.endswith("__"):
+                                    # Built-in scheduler commands — dispatch directly
+                                    from .scheduler import run_builtin
+                                    success, msg = await run_builtin(cmd, leon=self)
+                                    if success:
+                                        self.scheduler.mark_completed(sched_task["name"])
+                                    else:
+                                        self.scheduler.mark_failed(sched_task["name"], msg)
+                                else:
+                                    await self.process_user_input(cmd)
+                                    self.scheduler.mark_completed(sched_task["name"])
                             except Exception as e:
                                 logger.error(f"Scheduled task failed: {sched_task['name']}: {e}")
-                            self.scheduler.mark_completed(sched_task["name"])
+                                self.scheduler.mark_failed(sched_task["name"], str(e))
 
                 # Watchdog: check agent resource usage
                 await self._watchdog_check()

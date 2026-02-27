@@ -36,6 +36,7 @@ class NightMode:
 
     BACKLOG_PATH = Path("data/night_tasks.json")
     LOG_PATH = Path("data/night_log.json")
+    FINISHED_TASK_LIMIT = 200  # Max completed/failed tasks to keep in backlog
 
     def __init__(self, leon: "Leon"):
         self.leon = leon
@@ -66,6 +67,14 @@ class NightMode:
             return []
 
     def _save_backlog(self):
+        # Trim old completed/failed tasks to prevent unbounded growth
+        active = [t for t in self._backlog if t.get("status") in ("pending", "running")]
+        finished = [t for t in self._backlog if t.get("status") in ("completed", "failed")]
+        if len(finished) > self.FINISHED_TASK_LIMIT:
+            trimmed = len(finished) - self.FINISHED_TASK_LIMIT
+            finished = finished[-self.FINISHED_TASK_LIMIT:]
+            logger.debug(f"Night mode: trimmed {trimmed} old finished task(s) from backlog")
+        self._backlog = active + finished
         tmp = self.BACKLOG_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._backlog, indent=2, default=str))
         shutil.move(str(tmp), str(self.BACKLOG_PATH))

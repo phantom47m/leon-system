@@ -113,6 +113,14 @@
 | #21 Security tests | **Fixed (Phase 11)** |
 | #23 sentByBridge unbounded | **Fixed (Phase 11)** |
 
+## Phase 12: Pre-Ride Safety Checklist Reset
+
+- Added `resetSafetyChecks()` store action and "Reset for New Ride" button to the Safety tab — riders can now clear all checks before each ride, making the pre-ride checklist reusable as designed (6 new tests, 51 suites / 339 total)
+
+## Phase 13: Scheduler Failure Tracking & Night Mode Backlog Trimming
+
+- **Fixed scheduler always marking tasks as completed** — `mark_completed()` was called outside the try/except, so failed tasks were never tracked; the scheduler's consecutive-failure alert system was completely bypassed. Now properly calls `mark_failed()` on exception. Built-in commands (`__health_check__` etc.) are routed directly to `run_builtin()` instead of through `process_user_input()`, avoiding conversation pollution and wasted LLM calls. Night mode backlog now trims completed/failed tasks to last 200 entries to prevent unbounded growth. (12 new tests, 215 total)
+
 ## Next Actions
 
 ### Motorev App

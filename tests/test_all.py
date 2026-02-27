@@ -897,6 +897,241 @@ class TestSystemSkills(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# KEYWORD PRE-ROUTER (Issue #20)
+# ══════════════════════════════════════════════════════════
+
+class TestKeywordPreRouter(unittest.TestCase):
+    """Test the keyword pre-routing table that skips LLM for unambiguous commands."""
+
+    def setUp(self):
+        from core.routing_mixin import _KEYWORD_ROUTES, _DESKTOP_APPS
+        self.routes = _KEYWORD_ROUTES
+        self.desktop_apps = _DESKTOP_APPS
+
+    def _match(self, text: str) -> tuple:
+        """Return (skill, args) for the first matching route, or None."""
+        text = text.lower()
+        for pattern, skill, args in self.routes:
+            if pattern.search(text):
+                return (skill, args)
+        return None
+
+    # ── Table structure tests ──
+
+    def test_all_routes_have_valid_structure(self):
+        """Every route must be (compiled_regex, str, dict)."""
+        import re
+        for entry in self.routes:
+            self.assertEqual(len(entry), 3)
+            self.assertIsInstance(entry[0], re.Pattern)
+            self.assertIsInstance(entry[1], str)
+            self.assertIsInstance(entry[2], dict)
+
+    def test_all_skills_exist_on_system_skills(self):
+        """Every skill referenced in the routing table must exist as a method."""
+        from core.system_skills import SystemSkills
+        skills = SystemSkills()
+        seen = set()
+        for _, skill_name, _ in self.routes:
+            if skill_name in seen:
+                continue
+            seen.add(skill_name)
+            self.assertTrue(
+                hasattr(skills, skill_name) and callable(getattr(skills, skill_name)),
+                f"Skill '{skill_name}' not found on SystemSkills"
+            )
+
+    def test_route_count(self):
+        """Sanity check: we have a meaningful number of pre-routes."""
+        self.assertGreaterEqual(len(self.routes), 30)
+
+    # ── System info matches ──
+
+    def test_cpu_usage(self):
+        self.assertEqual(self._match("cpu usage"), ('cpu_usage', {}))
+        self.assertEqual(self._match("check cpu load"), ('cpu_usage', {}))
+
+    def test_ram_usage(self):
+        self.assertEqual(self._match("ram usage"), ('ram_usage', {}))
+        self.assertEqual(self._match("memory usage"), ('ram_usage', {}))
+
+    def test_disk_usage(self):
+        self.assertEqual(self._match("disk usage"), ('disk_usage', {}))
+        self.assertEqual(self._match("storage usage"), ('disk_usage', {}))
+
+    def test_uptime(self):
+        self.assertEqual(self._match("uptime"), ('uptime', {}))
+        self.assertEqual(self._match("show uptime"), ('uptime', {}))
+
+    def test_battery(self):
+        self.assertEqual(self._match("battery"), ('battery', {}))
+        self.assertEqual(self._match("battery level"), ('battery', {}))
+        self.assertEqual(self._match("battery status"), ('battery', {}))
+
+    def test_ip_address(self):
+        self.assertEqual(self._match("ip address"), ('ip_address', {}))
+        self.assertEqual(self._match("my ip"), ('ip_address', {}))
+
+    def test_gpu_temp_before_temperature(self):
+        """gpu temp should match gpu_temp, not temperature."""
+        self.assertEqual(self._match("gpu temp")[0], 'gpu_temp')
+        self.assertEqual(self._match("gpu temperature")[0], 'gpu_temp')
+
+    def test_cpu_temp_matches_temperature(self):
+        self.assertEqual(self._match("cpu temp")[0], 'temperature')
+        self.assertEqual(self._match("temperature")[0], 'temperature')
+
+    def test_date_time(self):
+        self.assertEqual(self._match("what time is it"), ('date_time', {}))
+        self.assertEqual(self._match("what's the time"), ('date_time', {}))
+        self.assertEqual(self._match("current time"), ('date_time', {}))
+
+    def test_hostname(self):
+        self.assertEqual(self._match("hostname"), ('hostname', {}))
+
+    def test_who_am_i(self):
+        self.assertEqual(self._match("who am i"), ('who_am_i', {}))
+        self.assertEqual(self._match("whoami"), ('who_am_i', {}))
+
+    def test_system_info(self):
+        self.assertEqual(self._match("system info"), ('system_info', {}))
+        self.assertEqual(self._match("system summary"), ('system_info', {}))
+
+    # ── Media matches ──
+
+    def test_next_track(self):
+        self.assertEqual(self._match("next track"), ('next_track', {}))
+        self.assertEqual(self._match("skip song"), ('next_track', {}))
+
+    def test_prev_track(self):
+        self.assertEqual(self._match("previous track"), ('prev_track', {}))
+        self.assertEqual(self._match("prev song"), ('prev_track', {}))
+
+    def test_now_playing(self):
+        self.assertEqual(self._match("now playing"), ('now_playing', {}))
+        self.assertEqual(self._match("what's playing"), ('now_playing', {}))
+
+    # ── Desktop matches ──
+
+    def test_screenshot(self):
+        self.assertEqual(self._match("screenshot"), ('screenshot', {}))
+        self.assertEqual(self._match("take a screenshot"), ('screenshot', {}))
+        self.assertEqual(self._match("screencapture"), ('screenshot', {}))
+
+    def test_lock_screen(self):
+        self.assertEqual(self._match("lock screen"), ('lock_screen', {}))
+        self.assertEqual(self._match("lock my computer"), ('lock_screen', {}))
+        self.assertEqual(self._match("lock the desktop"), ('lock_screen', {}))
+
+    def test_brightness(self):
+        self.assertEqual(self._match("brightness up"), ('brightness_up', {}))
+        self.assertEqual(self._match("brighter"), ('brightness_up', {}))
+        self.assertEqual(self._match("brightness down"), ('brightness_down', {}))
+        self.assertEqual(self._match("dimmer"), ('brightness_down', {}))
+
+    # ── Clipboard matches ──
+
+    def test_clipboard_history_before_get(self):
+        """clipboard history should match clipboard_history, not clipboard_get."""
+        self.assertEqual(self._match("clipboard history")[0], 'clipboard_history')
+
+    def test_clipboard_get(self):
+        self.assertEqual(self._match("show clipboard"), ('clipboard_get', {}))
+        self.assertEqual(self._match("what's on my clipboard"), ('clipboard_get', {}))
+
+    # ── Network matches ──
+
+    def test_wifi(self):
+        self.assertEqual(self._match("wifi status"), ('wifi_status', {}))
+        self.assertEqual(self._match("wifi list"), ('wifi_list', {}))
+        self.assertEqual(self._match("scan wifi"), ('wifi_list', {}))
+
+    def test_speedtest(self):
+        self.assertEqual(self._match("speedtest"), ('speedtest', {}))
+        self.assertEqual(self._match("speed test"), ('speedtest', {}))
+        self.assertEqual(self._match("internet speed"), ('speedtest', {}))
+
+    # ── Window management matches ──
+
+    def test_window_management(self):
+        self.assertEqual(self._match("minimize"), ('minimize_window', {}))
+        self.assertEqual(self._match("maximize window"), ('maximize_window', {}))
+        self.assertEqual(self._match("tile left"), ('tile_left', {}))
+        self.assertEqual(self._match("snap right"), ('tile_right', {}))
+        self.assertEqual(self._match("close window"), ('close_window', {}))
+
+    def test_list_running(self):
+        self.assertEqual(self._match("running apps"), ('list_running', {}))
+        self.assertEqual(self._match("what's running"), ('list_running', {}))
+
+    # ── OCR, notes, downloads, timers ──
+
+    def test_ocr(self):
+        self.assertEqual(self._match("ocr"), ('ocr_screen', {}))
+        self.assertEqual(self._match("read the screen"), ('ocr_screen', {}))
+        self.assertEqual(self._match("what's on my screen"), ('ocr_screen', {}))
+
+    def test_notes(self):
+        self.assertEqual(self._match("show my notes"), ('note_list', {}))
+        self.assertEqual(self._match("list notes"), ('note_list', {}))
+        self.assertEqual(self._match("my notes"), ('note_list', {}))
+
+    def test_downloads(self):
+        self.assertEqual(self._match("list downloads"), ('list_downloads', {}))
+        self.assertEqual(self._match("recent downloads"), ('list_downloads', {}))
+
+    def test_timers(self):
+        self.assertEqual(self._match("list timers"), ('list_timers', {}))
+        self.assertEqual(self._match("show timers"), ('list_timers', {}))
+
+    def test_volume_get(self):
+        self.assertEqual(self._match("volume level"), ('volume_get', {}))
+        self.assertEqual(self._match("what's the volume"), ('volume_get', {}))
+
+    # ── Fixed-arg matches ──
+
+    def test_top_processes(self):
+        self.assertEqual(self._match("top processes"), ('top_processes', {'n': 10}))
+        self.assertEqual(self._match("what's eating my ram"), ('top_processes', {'n': 10}))
+        self.assertEqual(self._match("what's hogging cpu"), ('top_processes', {'n': 10}))
+
+    # ── Weather with negative lookahead ──
+
+    def test_weather_no_location(self):
+        self.assertEqual(self._match("weather"), ('weather', {}))
+        self.assertEqual(self._match("what's the weather"), ('weather', {}))
+
+    def test_weather_with_location_falls_through(self):
+        """'weather in London' should NOT match — needs LLM to extract location."""
+        self.assertIsNone(self._match("weather in london"))
+        self.assertIsNone(self._match("weather for tomorrow"))
+        self.assertIsNone(self._match("forecast at my location"))
+
+    # ── Non-matches (should fall through to LLM) ──
+
+    def test_no_match_for_conversational(self):
+        self.assertIsNone(self._match("tell me a joke"))
+        self.assertIsNone(self._match("how are you doing"))
+
+    def test_no_match_for_commands_needing_args(self):
+        """Commands that need LLM arg extraction should not match."""
+        self.assertIsNone(self._match("find file settings.yaml"))
+        self.assertIsNone(self._match("ping google.com"))
+        self.assertIsNone(self._match("run python print(2+2)"))
+
+    # ── Desktop apps table ──
+
+    def test_desktop_apps_contains_common_apps(self):
+        self.assertIn("terminal", self.desktop_apps)
+        self.assertIn("code", self.desktop_apps)
+        self.assertIn("spotify", self.desktop_apps)
+
+    def test_desktop_apps_excludes_websites(self):
+        self.assertNotIn("youtube", self.desktop_apps)
+        self.assertNotIn("google", self.desktop_apps)
+
+
+# ══════════════════════════════════════════════════════════
 # HOTKEY LISTENER
 # ══════════════════════════════════════════════════════════
 
@@ -2142,6 +2377,208 @@ class TestShellExecAdvancedInjection(unittest.TestCase):
     def test_whitespace_only_handled(self):
         result = self.skills.shell_exec("   ")
         self.assertIsInstance(result, str)
+
+
+# ══════════════════════════════════════════════════════════
+# SCHEDULER — FAILURE TRACKING
+# ══════════════════════════════════════════════════════════
+
+class TestSchedulerFailureTracking(unittest.TestCase):
+    """Verify that mark_failed properly tracks consecutive failures."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.state_path = os.path.join(self.tmp_dir, "scheduler.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_mark_failed_increments_counter(self):
+        from core.scheduler import TaskScheduler
+        config = [{"name": "T1", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+        sched.mark_failed("T1", "connection refused")
+        self.assertEqual(sched._fail_counts.get("T1"), 1)
+
+    def test_mark_failed_prevents_immediate_rerun(self):
+        """mark_failed should update last_run so the task doesn't re-fire immediately."""
+        from core.scheduler import TaskScheduler
+        config = [{"name": "T1", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+        # Task is due initially (never run)
+        self.assertEqual(len(sched.get_due_tasks()), 1)
+        sched.mark_failed("T1", "error")
+        # Should not be due again immediately
+        self.assertEqual(len(sched.get_due_tasks()), 0)
+
+    def test_mark_completed_resets_fail_counter(self):
+        from core.scheduler import TaskScheduler
+        config = [{"name": "T1", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+        sched.mark_failed("T1", "error 1")
+        sched.mark_failed("T1", "error 2")
+        self.assertEqual(sched._fail_counts["T1"], 2)
+        sched.mark_completed("T1")
+        self.assertNotIn("T1", sched._fail_counts)
+
+    def test_alert_written_after_threshold(self):
+        from core.scheduler import TaskScheduler, ALERT_THRESHOLD, ALERT_DIR
+        config = [{"name": "AlertTask", "command": "x", "interval_hours": 24, "enabled": True}]
+        sched = TaskScheduler(config, self.state_path)
+        # Should not write alert before threshold
+        for i in range(ALERT_THRESHOLD - 1):
+            sched.mark_failed("AlertTask", f"error {i}")
+        alerts_before = list(ALERT_DIR.glob("alert_*AlertTask*")) if ALERT_DIR.exists() else []
+        # One more failure should trigger alert
+        sched.mark_failed("AlertTask", "final error")
+        alerts_after = list(ALERT_DIR.glob("alert_*AlertTask*"))
+        self.assertGreater(len(alerts_after), len(alerts_before))
+        # Cleanup
+        for f in alerts_after:
+            if f not in alerts_before:
+                f.unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════
+# NIGHT MODE — BACKLOG TRIMMING
+# ══════════════════════════════════════════════════════════
+
+class TestNightModeBacklogTrimming(unittest.TestCase):
+    """Verify that completed/failed tasks are trimmed from the backlog."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        import core.night_mode as nm_module
+        self._orig_backlog = nm_module.NightMode.BACKLOG_PATH
+        self._orig_log = nm_module.NightMode.LOG_PATH
+        self._orig_limit = nm_module.NightMode.FINISHED_TASK_LIMIT
+        nm_module.NightMode.BACKLOG_PATH = Path(os.path.join(self.tmp_dir, "night_tasks.json"))
+        nm_module.NightMode.LOG_PATH = Path(os.path.join(self.tmp_dir, "night_log.json"))
+        nm_module.NightMode.FINISHED_TASK_LIMIT = 5  # Low limit for testing
+
+        class MockLeon:
+            class agent_manager:
+                active_agents = {}
+            class task_queue:
+                max_concurrent = 5
+        self.night = nm_module.NightMode(MockLeon())
+
+    def tearDown(self):
+        import shutil
+        import core.night_mode as nm_module
+        nm_module.NightMode.BACKLOG_PATH = self._orig_backlog
+        nm_module.NightMode.LOG_PATH = self._orig_log
+        nm_module.NightMode.FINISHED_TASK_LIMIT = self._orig_limit
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_completed_tasks_trimmed_on_save(self):
+        """Adding more completed tasks than FINISHED_TASK_LIMIT should trim oldest."""
+        # Manually insert 10 completed tasks
+        for i in range(10):
+            self.night._backlog.append({
+                "id": f"old-{i}", "description": f"old task {i}",
+                "project": "proj", "status": "completed",
+                "created_at": "2026-01-01", "completed_at": "2026-01-01",
+                "agent_id": None, "result": "done", "priority": 1,
+            })
+        self.night._save_backlog()
+        finished = [t for t in self.night._backlog if t["status"] == "completed"]
+        self.assertEqual(len(finished), 5)  # FINISHED_TASK_LIMIT
+        # Oldest tasks should be removed, newest kept
+        ids = [t["id"] for t in finished]
+        self.assertNotIn("old-0", ids)
+        self.assertIn("old-9", ids)
+
+    def test_pending_tasks_not_trimmed(self):
+        """Pending and running tasks should never be trimmed."""
+        for i in range(10):
+            self.night.add_task(f"pending task {i}", "proj")
+        self.assertEqual(len(self.night.get_pending()), 10)
+
+    def test_mixed_status_trimming(self):
+        """Only finished tasks are trimmed; active tasks preserved."""
+        # Add 3 pending tasks
+        for i in range(3):
+            self.night.add_task(f"pending {i}", "proj")
+        # Add 8 completed tasks (exceeds limit of 5)
+        for i in range(8):
+            self.night._backlog.append({
+                "id": f"done-{i}", "description": f"done task {i}",
+                "project": "proj", "status": "completed",
+                "created_at": "2026-01-01", "completed_at": "2026-01-01",
+                "agent_id": None, "result": "done", "priority": 1,
+            })
+        self.night._save_backlog()
+        pending = [t for t in self.night._backlog if t["status"] == "pending"]
+        finished = [t for t in self.night._backlog if t["status"] == "completed"]
+        self.assertEqual(len(pending), 3)  # All preserved
+        self.assertEqual(len(finished), 5)  # Trimmed to limit
+
+    def test_failed_tasks_included_in_trim(self):
+        """Failed tasks count toward FINISHED_TASK_LIMIT."""
+        for i in range(4):
+            self.night._backlog.append({
+                "id": f"fail-{i}", "description": f"failed {i}",
+                "project": "proj", "status": "failed",
+                "created_at": "2026-01-01", "completed_at": "2026-01-01",
+                "agent_id": None, "result": "error", "priority": 1,
+            })
+        for i in range(4):
+            self.night._backlog.append({
+                "id": f"done-{i}", "description": f"done {i}",
+                "project": "proj", "status": "completed",
+                "created_at": "2026-01-01", "completed_at": "2026-01-01",
+                "agent_id": None, "result": "done", "priority": 1,
+            })
+        self.night._save_backlog()
+        finished = [t for t in self.night._backlog
+                     if t["status"] in ("completed", "failed")]
+        self.assertEqual(len(finished), 5)  # Trimmed to limit
+
+
+# ══════════════════════════════════════════════════════════
+# AWARENESS LOOP — SCHEDULER DISPATCH
+# ══════════════════════════════════════════════════════════
+
+class TestSchedulerDispatchLogic(unittest.TestCase):
+    """Verify the awareness loop correctly routes built-in vs regular commands."""
+
+    def test_builtin_command_detection(self):
+        """Commands with __ prefix and suffix are recognized as built-in."""
+        for cmd in ("__health_check__", "__daily_summary__", "__index_all__", "__repo_hygiene__"):
+            self.assertTrue(
+                cmd.startswith("__") and cmd.endswith("__"),
+                f"{cmd} should be detected as built-in"
+            )
+
+    def test_regular_command_not_builtin(self):
+        """Regular commands should not match the built-in pattern."""
+        for cmd in ("do something", "fix bug", "health_check", "__partial"):
+            self.assertFalse(
+                cmd.startswith("__") and cmd.endswith("__"),
+                f"{cmd} should NOT be detected as built-in"
+            )
+
+    def test_run_builtin_health_check_returns_tuple(self):
+        """run_builtin should return (bool, str) tuple."""
+        from core.scheduler import run_builtin
+        result = asyncio.get_event_loop().run_until_complete(
+            run_builtin("__health_check__", leon=None)
+        )
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertIsInstance(result[0], bool)
+        self.assertIsInstance(result[1], str)
+
+    def test_run_builtin_unknown_command(self):
+        """Unknown built-in command should return (False, error message)."""
+        from core.scheduler import run_builtin
+        success, msg = asyncio.get_event_loop().run_until_complete(
+            run_builtin("__nonexistent__", leon=None)
+        )
+        self.assertFalse(success)
+        self.assertIn("Unknown", msg)
 
 
 # ══════════════════════════════════════════════════════════
