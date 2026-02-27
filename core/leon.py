@@ -176,6 +176,9 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
     def __init__(self, config_path: str = "config/settings.yaml"):
         logger.info("Initializing Leon...")
 
+        # Event loop reference — set by start(), used for thread-safe dispatch
+        self.main_loop: Optional[asyncio.AbstractEventLoop] = None
+
         try:
             with open(config_path, "r") as f:
                 self.config = yaml.safe_load(f)
@@ -415,6 +418,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
 
     async def start(self):
         self.running = True
+        self.main_loop = asyncio.get_running_loop()
 
         # Run health checks before anything else
         self._run_health_checks()
@@ -1438,9 +1442,9 @@ Vision: {vision_desc}
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
                 if resp.status not in (200, 201):
-                    logger.debug("Discord post to #%s status %s", channel, resp.status)
+                    logger.warning("Discord post to #%s status %s", channel, resp.status)
         except Exception as e:
-            logger.debug("Discord proactive message failed: %s", e)
+            logger.warning("Discord proactive message failed (#%s): %s", channel, e)
 
     async def _broadcast_to_dashboard(self, data: dict):
         """Push a notification to all connected dashboard WebSocket clients."""

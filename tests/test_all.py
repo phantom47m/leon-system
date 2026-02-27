@@ -3167,22 +3167,15 @@ class TestAPIClientFailover(unittest.TestCase):
 
     def test_create_message_failover_to_groq(self):
         """If primary returns an error, create_message should try Groq fallback."""
-        import asyncio as _asyncio
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="ollama", _groq_key="gsk_test", _ollama_model="llama3.2")
+        api.client = None
 
-        # Ollama fails, Groq succeeds
-        async def mock_ollama(*args, **kwargs):
-            return "Ollama error: 503"
+        api._ollama_request = AsyncMock(return_value="Ollama error: 503")
+        api._groq_request = AsyncMock(return_value="This is the fallback response from Groq.")
 
-        async def mock_groq(*args, **kwargs):
-            return "This is the fallback response from Groq."
-
-        api._ollama_request = AsyncMock(side_effect=mock_ollama)
-        api._groq_request = AsyncMock(side_effect=mock_groq)
-
-        result = _asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             api.create_message("system prompt", [{"role": "user", "content": "hello"}])
         )
         self.assertEqual(result, "This is the fallback response from Groq.")
@@ -3190,18 +3183,14 @@ class TestAPIClientFailover(unittest.TestCase):
 
     def test_create_message_no_failover_on_success(self):
         """If primary succeeds, create_message should NOT try fallbacks."""
-        import asyncio as _asyncio
         from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="groq", _groq_key="gsk_test", _ollama_model="llama3.2")
 
-        async def mock_groq(*args, **kwargs):
-            return "Primary response — all good."
-
-        api._groq_request = AsyncMock(side_effect=mock_groq)
+        api._groq_request = AsyncMock(return_value="Primary response — all good.")
         api._ollama_request = AsyncMock()
 
-        result = _asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             api.create_message("system", [{"role": "user", "content": "hi"}])
         )
         self.assertEqual(result, "Primary response — all good.")
@@ -3209,25 +3198,17 @@ class TestAPIClientFailover(unittest.TestCase):
 
     def test_create_message_all_fail(self):
         """If all providers fail, create_message should return the last error."""
-        import asyncio as _asyncio
         from unittest.mock import AsyncMock
 
         api = self._make_api(_auth_method="groq", _groq_key="gsk_test", _ollama_model="llama3.2")
-        api.client = None  # no Anthropic
+        api.client = None
 
-        async def mock_groq(*args, **kwargs):
-            return "Groq error: 500"
+        api._groq_request = AsyncMock(return_value="Groq error: 500")
+        api._ollama_request = AsyncMock(return_value="Ollama error: 503")
 
-        async def mock_ollama(*args, **kwargs):
-            return "Ollama error: 503"
-
-        api._groq_request = AsyncMock(side_effect=mock_groq)
-        api._ollama_request = AsyncMock(side_effect=mock_ollama)
-
-        result = _asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             api.create_message("system", [{"role": "user", "content": "test"}])
         )
-        # Should return an error string (last fallback's error)
         self.assertTrue(api._is_provider_error(result))
 
     # ── quick_request failover ──
@@ -3517,6 +3498,10 @@ class TestEventLoopThreading(unittest.TestCase):
     - Fire-and-forget tasks execute on the main loop
     """
 
+    def setUp(self):
+        import threading as _threading
+        self.threading = _threading
+
     def test_leon_main_loop_set_on_start(self):
         """Leon.main_loop should be set to the running loop after start()."""
         from core.leon import Leon
@@ -3539,7 +3524,7 @@ class TestEventLoopThreading(unittest.TestCase):
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        callback_ran = threading.Event()
+        callback_ran = self.threading.Event()
 
         # Schedule a callback 0.1s in the future
         loop.call_later(0.1, lambda: callback_ran.set())
@@ -3551,7 +3536,7 @@ class TestEventLoopThreading(unittest.TestCase):
             except Exception:
                 pass
 
-        t = threading.Thread(target=run_loop, daemon=True)
+        t = self.threading.Thread(target=run_loop, daemon=True)
         t.start()
 
         # Callback should fire within 0.5s (well before the old model
@@ -3577,7 +3562,7 @@ class TestEventLoopThreading(unittest.TestCase):
         def run_loop():
             loop.run_forever()
 
-        t = threading.Thread(target=run_loop, daemon=True)
+        t = self.threading.Thread(target=run_loop, daemon=True)
         t.start()
 
         # Dispatch from main thread
@@ -3601,7 +3586,7 @@ class TestEventLoopThreading(unittest.TestCase):
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        task_completed = threading.Event()
+        task_completed = self.threading.Event()
 
         async def background_task():
             await asyncio.sleep(0.05)
@@ -3614,7 +3599,7 @@ class TestEventLoopThreading(unittest.TestCase):
         def run_loop():
             loop.run_forever()
 
-        t = threading.Thread(target=run_loop, daemon=True)
+        t = self.threading.Thread(target=run_loop, daemon=True)
         t.start()
 
         # Dispatch the task spawner
@@ -3658,7 +3643,7 @@ class TestEventLoopThreading(unittest.TestCase):
         def run_main():
             main_loop.run_forever()
 
-        t = threading.Thread(target=run_main, daemon=True)
+        t = self.threading.Thread(target=run_main, daemon=True)
         t.start()
 
         # Run voice handler in its own thread

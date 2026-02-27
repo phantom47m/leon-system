@@ -281,12 +281,12 @@ class NightMode:
                 "timestamp": datetime.now().isoformat(),
             })
             logger.info(f"Night task dispatched: [{task['id']}] {task['description'][:60]} → agent {agent_id}")
-            asyncio.create_task(self.leon._send_discord_message(
+            await self.leon._send_discord_message(
                 f"🤖 **Agent started** — `{agent_id}`\n"
                 f"**Project:** {project['name']}\n"
                 f"**Task:** {task['description'][:200]}",
                 channel="dev",
-            ))
+            )
 
         except Exception as e:
             task["status"] = "failed"

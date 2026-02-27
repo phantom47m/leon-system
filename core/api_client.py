@@ -1,17 +1,22 @@
 """
-Leon API Client - Multi-provider AI backend
+Leon API Client - Multi-provider AI backend with automatic failover
 
 Provider priority (first available wins):
 1. ANTHROPIC_API_KEY env var / vault  → Anthropic SDK (paid)
 2. GROQ_API_KEY env var / vault       → Groq free tier (llama-3.1-8b-instant)
 3. Ollama running at localhost:11434  → Local free (llama3.2, mistral, etc.)
 4. Claude CLI (`claude --print`)      → Subscription auth fallback
+
+When the primary provider fails, requests automatically fall through to the
+next available provider. This prevents user-visible errors when a single
+provider has a transient outage, rate limit, or configuration issue.
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -156,6 +161,146 @@ class AnthropicAPI:
         return providers.get(self._auth_method, providers["none"])
 
     # ------------------------------------------------------------------
+    # JSON extraction (robust — handles messy LLM output)
+    # ------------------------------------------------------------------
+
+    # Regex to match ```json ... ``` or ``` ... ``` code blocks
+    _CODE_FENCE_RE = re.compile(
+        r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```",
+        re.DOTALL,
+    )
+
+    # Trailing commas before } or ] (common LLM mistake)
+    _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+    @staticmethod
+    def _find_json_substring(text: str) -> Optional[str]:
+        """Find the outermost JSON object or array in *text* using bracket matching.
+
+        Handles cases where the LLM wraps JSON in explanatory text, e.g.:
+          "Here is the result: {\"type\": \"reply\"}"
+        """
+        for open_ch, close_ch in (("{", "}"), ("[", "]")):
+            start = text.find(open_ch)
+            if start == -1:
+                continue
+            depth = 0
+            in_string = False
+            escape = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == open_ch:
+                    depth += 1
+                elif ch == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+        return None
+
+    def _extract_json(self, raw: str) -> Optional[dict]:
+        """Try multiple strategies to extract valid JSON from LLM output.
+
+        Strategy order (first success wins):
+          1. Direct json.loads on stripped text
+          2. Extract from markdown code fence (```json ... ```)
+          3. Find JSON object/array substring via bracket matching
+          4. Fix trailing commas and retry strategies 1-3
+        """
+        if not raw or self._is_provider_error(raw):
+            return None
+
+        text = raw.strip()
+
+        # --- Strategy 1: direct parse ---
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # --- Strategy 2: extract from code fence ---
+        fence_match = self._CODE_FENCE_RE.search(text)
+        if fence_match:
+            try:
+                return json.loads(fence_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # --- Strategy 3: find JSON substring via bracket matching ---
+        json_str = self._find_json_substring(text)
+        if json_str:
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+
+        # --- Strategy 4: fix trailing commas and retry ---
+        fixed = self._TRAILING_COMMA_RE.sub(r"\1", text)
+        if fixed != text:
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                pass
+            # Also try bracket matching on the fixed text
+            json_str = self._find_json_substring(fixed)
+            if json_str:
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+
+        # Also try fixing commas inside a code fence
+        if fence_match:
+            fixed_fence = self._TRAILING_COMMA_RE.sub(r"\1", fence_match.group(1).strip())
+            try:
+                return json.loads(fixed_fence)
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Could not parse JSON from API response: %s", text[:200])
+        return None
+
+    # ------------------------------------------------------------------
+    # Failover helpers
+    # ------------------------------------------------------------------
+
+    # Response prefixes that indicate a provider error (not a valid LLM reply)
+    _ERROR_PREFIXES = (
+        "API error:", "Groq error:", "Ollama error:", "Error:",
+        "Groq API key is invalid", "One sec —", "Groq timed out",
+        "Ollama isn't running", "Request timed out", "No AI provider",
+    )
+
+    def _is_provider_error(self, text: str) -> bool:
+        """Return True if *text* looks like a provider error, not a real LLM response."""
+        if not text:
+            return True
+        return any(text.startswith(p) for p in self._ERROR_PREFIXES)
+
+    def _available_fallbacks(self) -> list[str]:
+        """Return provider names available for fallback (excluding the current primary)."""
+        candidates = []
+        if self.client:
+            candidates.append("api_key")
+        if self._groq_key:
+            candidates.append("groq")
+        if self._ollama_model:
+            candidates.append("ollama")
+        if _has_claude_cli():
+            candidates.append("claude_cli")
+        return [p for p in candidates if p != self._auth_method]
+
+    # ------------------------------------------------------------------
     # Provider backends
     # ------------------------------------------------------------------
 
@@ -266,16 +411,9 @@ class AnthropicAPI:
                 return stdout.decode().strip()
             err = stderr.decode().strip() if stderr else f"exit code {proc.returncode}"
             logger.error(f"Claude CLI error: {err[:200]}")
-            # Nested session / conflict — fall back to Groq for this request
-            if any(k in err.lower() for k in ("nested", "cannot be launched", "already running")):
-                logger.warning("Claude CLI conflict — falling back to Groq for this request")
-                if self._groq_key:
-                    return await self._groq_request([], prompt)
             return f"Error: {err[:100]}"
         except asyncio.TimeoutError:
             logger.error("Claude CLI request timed out")
-            if self._groq_key:
-                return await self._groq_request([], prompt)
             return "Request timed out."
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
@@ -285,9 +423,9 @@ class AnthropicAPI:
     # Public API (provider-agnostic)
     # ------------------------------------------------------------------
 
-    async def create_message(self, system: str, messages: list) -> str:
-        """Full conversation-style request. Routes to current provider."""
-        if self._auth_method == "api_key" and self.client:
+    async def _create_message_with(self, provider: str, system: str, messages: list) -> str:
+        """Try a single provider for create_message. Returns the response or an error string."""
+        if provider == "api_key" and self.client:
             try:
                 response = await self.client.messages.create(
                     model=self.model,
@@ -300,25 +438,37 @@ class AnthropicAPI:
             except Exception as e:
                 logger.error(f"Anthropic API error: {e}")
                 return f"API error: {e}"
-
-        elif self._auth_method == "groq":
+        elif provider == "groq" and self._groq_key:
             return await self._groq_request(messages, system=system)
-
-        elif self._auth_method == "ollama":
+        elif provider == "ollama" and self._ollama_model:
             return await self._ollama_request(messages, system=system)
-
-        elif self._auth_method == "claude_cli":
+        elif provider == "claude_cli":
             parts = [f"System: {system}\n"]
             for m in messages[-10:]:
                 role = m.get("role", "user").capitalize()
                 parts.append(f"{role}: {m['content']}")
             return await self._claude_cli_request("\n\n".join(parts))
-
         return _no_provider_msg()
 
-    async def quick_request(self, prompt: str, image_b64: str = None) -> str:
-        """Single-turn quick request. Image only supported with Anthropic."""
-        if self._auth_method == "api_key" and self.client:
+    async def create_message(self, system: str, messages: list) -> str:
+        """Full conversation-style request. Routes to current provider with automatic failover."""
+        result = await self._create_message_with(self._auth_method, system, messages)
+        if not self._is_provider_error(result):
+            return result
+
+        # Primary failed — try fallback providers
+        for fallback in self._available_fallbacks():
+            logger.warning(f"Provider '{self._auth_method}' failed, trying fallback '{fallback}'")
+            result = await self._create_message_with(fallback, system, messages)
+            if not self._is_provider_error(result):
+                logger.info(f"Failover to '{fallback}' succeeded")
+                return result
+
+        return result
+
+    async def _quick_request_with(self, provider: str, prompt: str, image_b64: str = None) -> str:
+        """Try a single provider for quick_request. Returns the response or an error string."""
+        if provider == "api_key" and self.client:
             try:
                 if image_b64:
                     content = [
@@ -336,21 +486,33 @@ class AnthropicAPI:
             except Exception as e:
                 logger.error(f"Anthropic API error: {e}")
                 return f"Error: {e}"
-
-        elif self._auth_method == "groq":
+        elif provider == "groq" and self._groq_key:
             if image_b64:
                 logger.warning("Groq doesn't support image input — text only")
             return await self._groq_request([{"role": "user", "content": prompt}])
-
-        elif self._auth_method == "ollama":
+        elif provider == "ollama" and self._ollama_model:
             if image_b64:
                 logger.warning("Ollama text-only (vision model needed for images)")
             return await self._ollama_request([{"role": "user", "content": prompt}])
-
-        elif self._auth_method == "claude_cli":
+        elif provider == "claude_cli":
             return await self._claude_cli_request(prompt)
-
         return _no_provider_msg()
+
+    async def quick_request(self, prompt: str, image_b64: str = None) -> str:
+        """Single-turn quick request with automatic failover. Image only supported with Anthropic."""
+        result = await self._quick_request_with(self._auth_method, prompt, image_b64)
+        if not self._is_provider_error(result):
+            return result
+
+        # Primary failed — try fallback providers (image_b64 dropped for non-Anthropic, already logged)
+        for fallback in self._available_fallbacks():
+            logger.warning(f"Provider '{self._auth_method}' failed, trying fallback '{fallback}'")
+            result = await self._quick_request_with(fallback, prompt, image_b64)
+            if not self._is_provider_error(result):
+                logger.info(f"Failover to '{fallback}' succeeded")
+                return result
+
+        return result
 
     async def analyze_json(self, prompt: str, image_b64: str = None, smart: bool = False) -> Optional[dict]:
         """Request that expects JSON back — parses it automatically.
@@ -365,16 +527,11 @@ class AnthropicAPI:
                 [{"role": "user", "content": prompt}],
                 model=GROQ_AGENT_MODEL,  # 70b: reliable JSON output, still < 1s on Groq
             )
+            # If Groq failed, fall through to quick_request (which has its own failover)
+            if self._is_provider_error(raw):
+                logger.warning("Groq failed for analyze_json, falling back to quick_request")
+                raw = await self.quick_request(prompt, image_b64=image_b64)
         else:
             raw = await self.quick_request(prompt, image_b64=image_b64)
 
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines)
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning(f"Could not parse JSON from API response: {text[:200]}")
-            return None
+        return self._extract_json(raw)
