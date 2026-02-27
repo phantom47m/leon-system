@@ -107,6 +107,15 @@ _SELF_REPAIR_PATTERNS = [
 ]
 
 
+_POSITIVE_I_DID_IT = [
+    "i updated", "i improved", "i fixed", "i deployed", "i pushed",
+    "i modified", "i changed", "i wrote", "i added", "i refactored",
+    "i upgraded", "i merged", "i pulled", "i just updated", "i just pushed",
+    "i just deployed", "i just fixed", "we updated", "we pushed", "we fixed",
+    "updated your", "improved your", "just pushed",
+]
+
+
 def _detect_self_repair(msg: str) -> tuple[bool, str, str]:
     """
     Detect whether the user is asking Leon to fix something about itself.
@@ -118,8 +127,15 @@ def _detect_self_repair(msg: str) -> tuple[bool, str, str]:
       "that was wrong"                     → last action (from context)
       "you're stupid"                      → general behavior
       "code yourself better"               → general self-improve
+
+    Does NOT trigger when the user describes positive action they took:
+      "i updated your code" / "i pushed a fix" / "improved your voice" → ignore
     """
     m = msg.lower()
+
+    # Guard: user is describing positive action they took on Leon's code — not a bug report
+    if any(p in m for p in _POSITIVE_I_DID_IT):
+        return False, "", ""
 
     # Check direct patterns first
     if any(p in m for p in _SELF_REPAIR_PATTERNS):
