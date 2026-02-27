@@ -38,6 +38,11 @@ from .notifications import NotificationManager, Priority
 from .project_watcher import ProjectWatcher
 from .night_mode import NightMode
 from .plan_mode import PlanMode
+from .routing_mixin import RoutingMixin
+from .browser_mixin import BrowserMixin
+from .task_mixin import TaskMixin
+from .awareness_mixin import AwarenessMixin
+from .reminder_mixin import ReminderMixin
 
 logger = logging.getLogger("leon")
 
@@ -65,6 +70,10 @@ _COMPONENT_MAP = {
     "agent": ("agent system", "core/agent_manager.py"),
     "task": ("task system", "core/leon.py — task routing"),
     "schedule": ("scheduler", "core/scheduler.py"),
+    "reminder": ("reminder system", "core/leon.py — _fire_reminder / OpenClaw cron"),
+    "remind": ("reminder system", "core/leon.py — _fire_reminder / OpenClaw cron"),
+    "cron": ("cron/scheduler", "~/.openclaw/openclaw.json and OpenClaw gateway"),
+    "openclaw": ("OpenClaw", "~/.openclaw/openclaw.json"),
     "dashboard": ("dashboard", "dashboard/server.py"),
     "response": ("response quality", "core/leon.py — _analyze_request / _respond_conversationally"),
     "routing": ("task routing", "core/leon.py — _route_special_commands"),
@@ -141,8 +150,12 @@ def _extract_issue(msg: str) -> str:
     return msg[:200].strip()
 
 
-class Leon:
-    """Main orchestration system - the brain that coordinates everything."""
+class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin):
+    """Main orchestration system - the brain that coordinates everything.
+
+    Routing, browser automation, task orchestration, awareness loop, and reminders
+    are implemented in their respective mixin files (core/*_mixin.py).
+    """
 
     def __init__(self, config_path: str = "config/settings.yaml"):
         logger.info("Initializing Leon...")
@@ -375,6 +388,9 @@ class Leon:
         self._last_update_check: float = 0.0
         self._update_interval = _update_cfg.get("check_interval_hours", 12) * 3600
 
+        # Persistent reminders — keyed by id: {"task": str, "fire_at": float}
+        self._pending_reminders: dict = {}
+
         logger.info(f"Leon initialized — brain_role={self.brain_role}")
 
     # ------------------------------------------------------------------
@@ -464,6 +480,9 @@ class Leon:
         self.memory.memory["active_tasks"] = {}
         self.memory.save(force=True)
         logger.info("Cleared stale active_tasks from memory on startup")
+
+        # Restore pending reminders (reschedule any that survived a restart)
+        self._load_reminders()
 
         # Resume plan mode — if a plan was mid-execution when Leon last stopped, pick it up
         saved_plan = self.plan_mode.load_saved_plan()
@@ -611,6 +630,43 @@ class Leon:
     # Main input handler
     # ------------------------------------------------------------------
 
+    async def process_voice_input(self, message: str) -> str:
+        """
+        Fast path for voice messages — skips the classify→respond double-LLM round trip.
+
+        For voice, commands are almost always simple PC control or quick questions.
+        We go directly to _respond_conversationally (one LLM call instead of two),
+        cutting latency roughly in half vs. process_user_input.
+
+        Complex dev commands ("build the whole app", "spin up an agent") still work
+        because the system prompt tells Leon how to respond; the user can always type
+        those for the full agent-dispatch pipeline.
+        """
+        logger.info(f"Voice: {message[:80]}...")
+        self.memory.add_conversation(message, role="user")
+
+        # Hard permission check (same as full pipeline)
+        if self.permissions:
+            denied = self._check_sensitive_permissions(message)
+            if denied:
+                self.memory.add_conversation(denied, role="assistant")
+                return denied
+
+        # Special command routing first — PC control, night mode, etc. (zero LLM calls)
+        routed = await self._route_special_commands(message)
+        if routed:
+            response = self._strip_sir(routed)
+            self.memory.add_conversation(response, role="assistant")
+            asyncio.create_task(self._extract_memory(message, response))
+            return response
+
+        # Everything else: single LLM call (no classify→respond double-tap)
+        response = await self._respond_conversationally(message)
+        response = self._strip_sir(response)
+        self.memory.add_conversation(response, role="assistant")
+        asyncio.create_task(self._extract_memory(message, response))
+        return response
+
     async def process_user_input(self, message: str) -> str:
         """
         Main entry point for user messages.
@@ -633,6 +689,39 @@ class Leon:
                 self.memory.add_conversation(denied, role="assistant")
                 return denied
 
+        # Pre-router: lights — fast path, no LLM needed
+        try:
+            from tools.lights import parse_and_execute as _lights_parse
+            _light_resp = _lights_parse(message)
+            if _light_resp is not None:
+                self.memory.add_conversation(_light_resp, role="assistant")
+                return _light_resp
+        except Exception as _le:
+            logger.warning("Lights pre-router error: %s", _le)
+
+        # Pre-router: explicit web search intent — bypass LLM router entirely
+        import re as _re
+        # Catches "look it up", "google X", "search for X", "find out about X"
+        # Must have an explicit search verb so we don't intercept trivia questions
+        _SEARCH_PRE = _re.compile(
+            r'\b(look\s+it\s+up|look\s+up|google\s+(?:it|that|\w)|search\s+(?:for|the\s+web|online)|'
+            r'find\s+(?:out|info|information)\s+(?:on|about)|research\s+\w|browse\s+for|'
+            r'web\s+search|search\s+online)\b',
+            _re.IGNORECASE,
+        )
+        if _SEARCH_PRE.search(message):
+            # Strip the search verb to get the actual query
+            _query = _re.sub(
+                r'\b(look\s+it\s+up|look\s+up|google\s+(?:it|that)?|search\s+(?:for|the\s+web|online)?|'
+                r'find\s+(?:out|info|information)?\s*(?:on|about)?|research|browse\s+for|'
+                r'web\s+search|search\s+online|can\s+you|please|for\s+me)\b',
+                ' ', message, flags=_re.IGNORECASE,
+            ).strip().strip('.,?!')
+            _query = _query if len(_query) > 3 else message
+            response = await self._web_search(_query)
+            self.memory.add_conversation(response, role="assistant")
+            return response
+
         # Analyze what the user wants
         analysis = await self._analyze_request(message)
 
@@ -647,6 +736,17 @@ class Leon:
                 response = routed
             elif analysis is None or analysis.get("type") == "simple":
                 response = await self._respond_conversationally(message)
+            elif analysis.get("type") == "device_control":
+                # Retry lights pre-router — fuzzy matching catches transcription errors
+                try:
+                    from tools.lights import parse_and_execute as _lights_parse
+                    _light_resp = _lights_parse(message)
+                    if _light_resp:
+                        response = _light_resp
+                    else:
+                        response = "I heard a device control command but couldn't identify the device. Try saying it again — for example: 'turn lab ceiling on' or 'lights off'."
+                except Exception:
+                    response = "I heard a device control command but couldn't identify the device. Try saying it again — for example: 'turn lab ceiling on' or 'lights off'."
             elif analysis.get("type") == "single_task":
                 response = await self._handle_single_task(message, analysis)
             else:
@@ -693,717 +793,17 @@ class Leon:
                 logger.info(f"Self-memory: learned '{result['key']}' = '{result['value']}'")
 
     # ------------------------------------------------------------------
-    # Special command routing (hardware, business, vision, security)
+    # Special command routing — see core/routing_mixin.py
+    # Browser automation — see core/browser_mixin.py
     # ------------------------------------------------------------------
 
-    async def _route_special_commands(self, message: str) -> Optional[str]:
-        """Route messages to specialized modules when keywords match."""
-        msg = message.lower()
-
-        # Help command — list available modules
-        if msg.strip() in ("help", "what can you do", "commands", "modules"):
-            return self._build_help_text()
-
-        # ── Night Mode / Autonomous Coding ──────────────────────────────
-        nm = self.night_mode
-
-        # Enable night mode — flexible phrasing
-        _nm_on = any(p in msg for p in [
-            "night mode on", "turn on night mode", "auto mode on", "turn on auto mode",
-            "start auto mode", "enable auto mode", "switch to night mode", "start night mode",
-            "enable night mode", "activate night mode", "autonomous mode", "go autonomous",
-            "put it in night mode", "night mode:", "night mode,", "coding mode on",
-            "work all night", "work through the night", "work overnight",
-            "keep working", "keep going", "work continuously", "continuously work",
-            "work until done", "keep coding", "dont stop working",
-            "continue working", "continue improving", "continue doing", "keep improving",
-            "keep at it", "continue where", "carry on", "continue until",
-            "keep on working", "keep on improving", "keep going until",
-        ])
-        # Disable night mode — flexible phrasing
-        _nm_off = any(p in msg for p in [
-            "night mode off", "turn off night mode", "auto mode off", "turn off auto mode",
-            "stop auto mode", "stop night mode", "disable night mode",
-            "pause night mode", "end night mode", "cancel night mode", "stop the agents",
-        ])
-
-        if _nm_on:
-            await nm.enable()
-            # Check if task content included in the same message
-            _task_triggers = [
-                "your tasks are:", "here's the task:", "the task is:", "tasks are:",
-                "task for tonight:", "work on this:", "here is the task:", "the tasks:",
-            ]
-            _inline_task = None
-            for tc in _task_triggers:
-                if tc in msg:
-                    idx = msg.index(tc) + len(tc)
-                    candidate = message[idx:].strip()
-                    if len(candidate) > 30:
-                        _inline_task = candidate
-                        break
-            if _inline_task:
-                projects = self.projects_config.get("projects", [])
-                project_name = next(
-                    (p["name"] for p in projects if "motorev" in p["name"].lower()), None
-                ) or (projects[0]["name"] if projects else "Motorev")
-                nm.add_task(_inline_task, project_name)
-                asyncio.create_task(nm.try_dispatch())
-                return f"Auto mode on. Task queued for {project_name} — spawning agent now. I'll text you updates every 30 minutes."
-
-            # No colon-based trigger, but the message itself may describe the work.
-            # If it mentions a known project and has substance, treat the whole message as the task.
-            if not _inline_task and len(message) > 20:
-                _matched_proj = self._resolve_project("", message)
-                # Only use if a real match (not just the default fallback with no name in message)
-                if _matched_proj and _matched_proj["name"].lower() in msg:
-                    nm.add_task(message, _matched_proj["name"])
-                    asyncio.create_task(nm.try_dispatch())
-                    return f"Auto mode on. On it — queuing that for {_matched_proj['name']} and spawning an agent now."
-
-            pending = nm.get_pending()
-            if pending:
-                asyncio.create_task(nm.try_dispatch())
-                return f"Auto mode on. {len(pending)} task{'s' if len(pending) != 1 else ''} in the queue — dispatching now."
-            return "Auto mode on. Queue is empty — send me the task and I'll get started."
-
-        # Disable night mode
-        if _nm_off:
-            await nm.disable()
-            running = nm.get_running()
-            if running:
-                return f"Auto mode off. {len(running)} agent{'s' if len(running) != 1 else ''} still finishing up."
-            return "Auto mode off."
-
-        # Morning briefing / overnight report
-        if any(p in msg for p in ["what did you do", "overnight report", "morning briefing", "what happened last night", "night report", "what got done"]):
-            briefing = nm.generate_morning_briefing()
-            return briefing
-
-        # Add task to backlog
-        queue_triggers = ["queue task:", "add task:", "add to backlog:", "tonight do:", "tonight work on:", "work on tonight:", "add to queue:", "your task:", "the task:", "task is:", "go work on:", "start working on:", "go code:"]
-        for trigger in queue_triggers:
-            if trigger in msg:
-                remainder = message[message.lower().index(trigger) + len(trigger):].strip()
-                # Parse "description for project" or "description in project"
-                project_name = None
-                desc = remainder
-                for sep in [" for ", " in ", " on "]:
-                    if sep in remainder.lower():
-                        parts = remainder.split(sep, 1)
-                        if len(parts) == 2:
-                            desc = parts[0].strip()
-                            project_name = parts[1].strip()
-                            break
-                if not project_name:
-                    # No project specified — use first project as default
-                    projects = self.projects_config.get("projects", [])
-                    project_name = projects[0]["name"] if projects else "unknown"
-                task = nm.add_task(desc, project_name)
-                status = f"Queued [{task['id']}]: {desc[:60]} ({project_name})."
-                if not nm.active:
-                    status += " Auto mode is off — say 'auto mode on' or 'keep working' when ready."
-                else:
-                    # Immediately try to dispatch if slot available
-                    asyncio.create_task(nm.try_dispatch())
-                    status += " Dispatching now if a slot's free."
-                return status
-
-        # List backlog
-        if any(p in msg for p in ["backlog", "night queue", "task queue", "what's queued", "what's in the queue", "show queue", "list tasks"]):
-            backlog_text = nm.get_backlog_text()
-            status_line = nm.get_status_text()
-            return f"{status_line}\n\n{backlog_text}"
-
-        # Night mode status
-        if any(p in msg for p in ["night mode status", "night mode", "autonomous status"]) and "on" not in msg and "off" not in msg:
-            return nm.get_status_text()
-
-        # Clear backlog
-        if any(p in msg for p in ["clear backlog", "clear queue", "cancel all tasks", "empty the queue"]):
-            cleared = nm.clear_pending()
-            if cleared:
-                return f"Cleared {cleared} pending task{'s' if cleared != 1 else ''} from the backlog."
-            return "Nothing pending to clear."
-
-        # ── Apply self-repair patch + restart ──────────────────────────────────
-        if any(p in msg for p in ["apply self-repair", "apply the repair", "apply the fix and restart",
-                                   "apply repair and restart", "apply self repair"]):
-            import glob as _glob
-            leon_path = str(Path(__file__).parent.parent)
-            # Find most recent self-repair diff
-            patches = sorted(
-                _glob.glob(f"{leon_path}/data/agent_zero_jobs/AZ-SELFREPAIR-*/output/patch.diff"),
-                key=os.path.getmtime, reverse=True
-            )
-            if not patches:
-                return "No self-repair patch found. Run a self-repair first."
-            patch = patches[0]
-            result = subprocess.run(
-                ["git", "apply", "--check", patch],
-                cwd=leon_path, capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                return f"Patch check failed: {result.stderr[:200]}\nApply manually: `git apply {patch}`"
-            subprocess.run(["git", "apply", patch], cwd=leon_path, check=True)
-            await self._send_discord_message("✅ Patch applied. Restarting Leon in 3 seconds...")
-            asyncio.create_task(self._delayed_restart(3))
-            return "Patch applied. Restarting now."
-
-        # ── Agent Zero — kill switch ────────────────────────────────────────────
-        if any(p in msg for p in ["kill agent zero", "stop agent zero", "kill az job", "abort agent zero"]):
-            try:
-                from tools.agent_zero_runner import get_runner
-                az = get_runner()
-                jobs = az.list_jobs()
-                if not jobs:
-                    return "No Agent Zero jobs running."
-                # Find job_id in message or kill most recent
-                job_id = next(
-                    (w for w in msg.split() if w.startswith("AZ-")),
-                    jobs[-1]["job_id"]
-                )
-                ok = await az.kill_job(job_id)
-                return f"{'Killed' if ok else 'Kill attempted for'} Agent Zero job `{job_id}`."
-            except ImportError:
-                return "Agent Zero not installed — run scripts/setup-agent-zero.sh first."
-
-        # ── Agent Zero — job status ─────────────────────────────────────────
-        if any(p in msg for p in ["agent zero status", "az jobs", "agent zero jobs", "list az"]):
-            try:
-                from tools.agent_zero_runner import get_runner
-                az = get_runner()
-                jobs = az.list_jobs()
-                if not jobs:
-                    return f"No Agent Zero jobs running. (Enabled: {az.is_enabled()}, Available: {az.is_available()})"
-                lines = [f"**Agent Zero jobs ({len(jobs)}):**"]
-                for j in jobs:
-                    lines.append(f"• `{j['job_id']}` — {j['task'][:60]}... [{j['status']} {j['elapsed_min']}min]")
-                return "\n".join(lines)
-            except ImportError:
-                return "Agent Zero not installed."
-
-        # ── Plan Mode — cancel / status (triggering is handled by _analyze_request) ──
-        # Cancel plan
-        if any(p in msg for p in ["cancel plan", "stop plan", "abort plan", "stop the plan", "kill the plan"]):
-            if not self.plan_mode.active:
-                return "No plan is currently running."
-            await self.plan_mode.cancel()
-            return "Plan cancelled. Running agents will finish their current task."
-
-        # Plan status
-        if any(p in msg for p in ["plan status", "plan progress", "how's the plan", "what's the plan", "how's it going with the plan"]):
-            status = self.plan_mode.get_status()
-            if not status["active"] and not status["goal"]:
-                return "No plan running — just describe what you want built and I'll take it from there."
-            done = status["doneTasks"]
-            total = status["totalTasks"]
-            running = status["runningTasks"]
-            failed = status["failedTasks"]
-            active_str = "Running" if status["active"] else "Complete"
-            phases_text = []
-            for ph in status.get("phases", []):
-                task_summaries = []
-                for t in ph.get("tasks", []):
-                    icon = {"completed": "✓", "running": "⚡", "failed": "✗", "pending": "○"}.get(t["status"], "○")
-                    task_summaries.append(f"  {icon} {t['title']}")
-                phases_text.append(f"Phase {ph['phase']}: {ph['name']}\n" + "\n".join(task_summaries))
-            phases_block = "\n\n".join(phases_text) if phases_text else ""
-            return (
-                f"**Plan: {status['goal']}**\n"
-                f"Status: {active_str} — {done}/{total} tasks done"
-                + (f", {running} running" if running else "")
-                + (f", {failed} failed" if failed else "")
-                + ("\n\n" + phases_block if phases_block else "")
-            )
-
-        # ── Self-repair: detect when user says something Leon did was broken ─────
-        # Catches natural language like:
-        #   "your screenshot is broken fix it"
-        #   "you sent me a black box"
-        #   "that was wrong, fix yourself"
-        #   "your voice is bad"
-        #   "code yourself better"
-        _is_task_brief = len(message) > 200 and any(
-            w in msg for w in ["motorev", "phase 1", "phase 2", "app from railway"]
-        )
-        if not _is_task_brief:
-            _repair_hit, _component, _issue = _detect_self_repair(msg)
-            if _repair_hit:
-                return await self._handle_self_repair(message, _component, _issue)
-
-        # 3D Printing
-        if any(w in msg for w in ["print", "stl", "3d print", "printer", "filament", "spaghetti", "print job", "print queue"]):
-            if ("find" in msg or "search" in msg or "stl" in msg) and self.stl_searcher:
-                results = await self.stl_searcher.search(message)
-                if results:
-                    lines = ["Found a few options:\n"]
-                    for i, r in enumerate(results[:5], 1):
-                        lines.append(f"{i}. **{r.get('name', 'Untitled')}** — {r.get('url', 'N/A')}")
-                    return "\n".join(lines)
-                return "Nothing came up. Try different keywords?"
-            if "status" in msg and self.printer:
-                printers = self.printer.list_printers()
-                if not printers:
-                    return "No printers configured yet. Add them to config/printers.yaml."
-                lines = ["Here's what the printers are doing:\n"]
-                for p in printers:
-                    s = p.get_status()
-                    lines.append(f"**{p.name}**: {s.get('state', 'unknown')} — {s.get('progress', 0)}%")
-                return "\n".join(lines)
-
-        # Vision
-        if any(w in msg for w in ["what do you see", "look at", "who's here", "what's around", "describe the room", "camera"]):
-            if not self.vision:
-                return "Camera's not set up yet. Want me to configure it?"
-            return self.vision.describe_scene()
-
-        # Business — CRM
-        if any(w in msg for w in ["crm", "pipeline", "clients", "contacts", "deals", "customer list"]):
-            if not self.crm:
-                return "CRM isn't set up yet. Want me to get that configured?"
-            return json.dumps(self.crm.get_pipeline_summary(), indent=2, default=str)
-
-        # Business — leads
-        if any(w in msg for w in ["find clients", "find leads", "hunt leads", "prospect", "generate leads", "new leads", "lead search"]):
-            if self.audit_log:
-                self.audit_log.log("lead_hunt", message, "info")
-            return "On it — hunting for leads now. I'll score them and have something for you shortly."
-
-        # Business — finance
-        if any(w in msg for w in ["revenue", "invoice", "how much money", "financial", "earnings", "profit", "expenses", "income", "billing"]):
-            if not self.finance:
-                return "Finance tracking isn't set up yet. Want me to configure it?"
-            return self.finance.get_daily_summary()
-
-        # Business — communications
-        if any(w in msg for w in ["send email", "check email", "inbox", "messages", "unread", "compose"]):
-            if not self.comms:
-                return "Comms module isn't wired up yet. Want me to set it up?"
-            # Sending email requires permission
-            if "send" in msg and self.permissions:
-                if not self.permissions.check_permission("send_email"):
-                    return "I'll need your approval to send emails. Run `/approve send_email` to unlock that."
-            return "Comms hub's live. Check inbox, send something, or review messages?"
-
-        # Business — briefing
-        if any(w in msg for w in ["briefing", "brief me", "daily brief", "morning brief", "daily briefing", "what's happening", "catch me up", "daily summary"]):
-            if not self.assistant:
-                return "Assistant module isn't loaded. Might need to check the business config."
-            return await self.assistant.generate_daily_briefing()
-
-        # Business — schedule/calendar
-        if any(w in msg for w in ["schedule", "calendar", "appointments", "meetings today", "what's on my calendar"]):
-            if not self.assistant:
-                return "Assistant module isn't loaded. Can't check the calendar without it."
-            return await self.assistant.generate_daily_briefing()
-
-        # Security
-        if any(w in msg for w in ["audit log", "security log", "audit trail", "recent actions"]):
-            if not self.audit_log:
-                return "Audit system isn't loaded. Check the security module."
-            entries = self.audit_log.get_recent(10)
-            if not entries:
-                return "Audit log's clean — nothing to report."
-            lines = ["Recent activity:\n"]
-            for e in entries:
-                lines.append(f"[{e.get('timestamp', '?')}] **{e.get('action')}** — {e.get('details', '')} ({e.get('severity')})")
-            return "\n".join(lines)
-
-        # System skills — AI-classified routing for PC control commands
-        # Instead of 100 keyword checks, send to AI for smart classification
-        system_hints = [
-            "open ", "close ", "launch ", "start ", "kill ", "switch to",
-            "go to ", "navigate to ", "pull up ", "show me ",
-            "cpu", "ram", "memory", "disk", "storage", "processes", "uptime",
-            "ip address", "battery", "temperature", "temp",
-            "play", "pause", "next track", "previous track", "volume", "mute",
-            "now playing", "what's playing", "music",
-            "screenshot", "take a screenshot", "screen",
-            "clipboard", "notify", "notification", "lock screen",
-            "brightness", "find file", "recent files", "downloads", "trash",
-            "wifi", "network", "speed test", "ping",
-            "timer", "alarm", "set timer", "set alarm", "remind",
-            "search for", "google", "define", "weather",
-            "git status", "npm", "pip install", "port",
-            "what's eating", "what's hogging", "what's running",
-            "gpu", "graphics card", "vram", "cuda",
-            "workspace", "tile", "minimize", "maximize", "snap",
-            "tab", "browser", "discord", "youtube", "reddit", "twitter",
-            "github", "spotify", "netflix", "twitch", "website", "site",
-            "schedule", "cron", "scheduled", "remind me every", "every hour",
-            "every day", "every morning", "every night", "run every", "recurring",
-            # terminal & code
-            "run command", "run script", "execute", "shell", "bash ", "terminal command",
-            "python ", "run python", "python code", "run code",
-            # OCR
-            "read the screen", "what's on screen", "whats on screen", "ocr",
-            "read screen", "extract text from screen",
-            # search
-            "search for ", "look up ", "look up", "fast search", "quick search",
-            "what is ", "who is ", "define ",
-            # notes
-            "note ", "notes", "save a note", "write a note", "remember this",
-            "my notes", "search notes", "delete note",
-            # home assistant
-            "turn on ", "turn off ", "turn the ", "lights ", "thermostat",
-            "home assistant", "smart home", "switch on", "switch off",
-            # telegram
-            "send telegram", "telegram message", "message on telegram",
-        ]
-        if any(hint in msg for hint in system_hints):
-            skill_result = await self._route_to_system_skill(message)
-            if skill_result:
-                return skill_result
-
-        return None
-
-    async def _route_to_system_skill(self, message: str) -> Optional[str]:
-        """Route PC control commands — browser agent via OpenClaw, system info via skills."""
-        msg = message.lower()
-
-        # ── Voice volume (Leon's TTS gain) — handle before AI router ──────────
-        _voice_vol_phrases = [
-            "your voice volume", "your volume up", "your volume down",
-            "turn your voice", "set your voice", "voice louder", "voice quieter",
-            "speak louder", "speak quieter", "speak softer", "speak up",
-            "talk louder", "talk quieter", "talk softer",
-        ]
-        if any(p in msg for p in _voice_vol_phrases):
-            vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
-            if vs:
-                import re as _re
-                pct_match = _re.search(r'(\d+)\s*%', msg)
-                if pct_match:
-                    return vs.set_voice_volume(int(pct_match.group(1)))
-                elif any(w in msg for w in ("up", "louder", "higher", "more")):
-                    new = min(200, int(vs._voice_volume * 100) + 20)
-                    return vs.set_voice_volume(new)
-                elif any(w in msg for w in ("down", "quieter", "lower", "softer", "less")):
-                    new = max(10, int(vs._voice_volume * 100) - 20)
-                    return vs.set_voice_volume(new)
-
-        # Direct cron dispatches — don't burn an AI call for unambiguous cron requests
-        cron_list_hints = ["list cron", "cron jobs", "scheduled tasks", "my schedules",
-                           "what's scheduled", "whats scheduled", "show schedules",
-                           "show cron", "cron list"]
-        if any(h in msg for h in cron_list_hints):
-            jobs = self.openclaw.cron.list_jobs(include_disabled=True)
-            return self.openclaw.cron.format_jobs(jobs)
-
-        skill_list = self.system_skills.get_skill_list()
-
-        prompt = f"""You are a PC control router for {self.ai_name}. Classify the user's request.
-
-User message: "{message}"
-
-Respond with ONLY valid JSON (no markdown fences):
-{{
-  "action": "browser_open" | "browser_agent" | "browser_screenshot" | "cron_list" | "cron_add" | "cron_remove" | "cron_run" | "system_skill" | "none",
-  "url": "starting URL for browser actions (e.g. https://discord.com)",
-  "goal": "natural language goal for browser_agent tasks",
-  "skill": "skill_name if system_skill",
-  "args": {{}},
-  "confidence": 0.0-1.0
-}}
-
-Rules:
-- "browser_open" = ONLY open a site with no further interaction needed
-- "browser_agent" = anything that requires interacting with a page (clicking, typing, searching, filling forms, sending messages, etc.)
-- "browser_screenshot" = user wants to see/screenshot the current browser page
-- "cron_list" = list scheduled/recurring tasks
-- "cron_add" = schedule a new recurring task: args must include name, message, and ONE of: every (e.g. "1h", "30m"), cron (cron expr), at (e.g. "+10m" or ISO)
-- "cron_remove" = delete a scheduled task: args must include id
-- "cron_run" = run a scheduled task right now: args must include id
-- "system_skill" = system info, media control, file search, timers (NOT browser tasks)
-- "none" = not a PC control request
-
-Browser examples:
-- "open discord" -> {{"action": "browser_open", "url": "https://discord.com", "confidence": 0.99}}
-- "open youtube" -> {{"action": "browser_open", "url": "https://youtube.com", "confidence": 0.99}}
-- "play love sosa on youtube" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for Love Sosa, click the first video result to play it, then mark done immediately", "confidence": 0.99}}
-- "play [song] on youtube" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for [song], click the first video result to start playing it, mark done after clicking", "confidence": 0.99}}
-- "search youtube for lofi music" -> {{"action": "browser_agent", "url": "https://youtube.com", "goal": "search for lofi music and open the first result", "confidence": 0.99}}
-- "google how to make pasta" -> {{"action": "browser_agent", "url": "https://google.com", "goal": "search for how to make pasta", "confidence": 0.99}}
-- "send a message on discord" -> {{"action": "browser_agent", "url": "https://discord.com", "goal": "send a message on discord", "confidence": 0.95}}
-- "click the subscribe button" -> {{"action": "browser_agent", "url": null, "goal": "click the subscribe button on the current page", "confidence": 0.95}}
-- "log into github" -> {{"action": "browser_agent", "url": "https://github.com/login", "goal": "log into github", "confidence": 0.95}}
-- "show me the screen" -> {{"action": "browser_screenshot", "confidence": 0.9}}
-- "open a new terminal" -> {{"action": "system_skill", "skill": "open_app", "args": {{"name": "terminal"}}, "confidence": 0.95}}
-
-Cron examples:
-- "remind me every morning at 9am to check email" -> {{"action": "cron_add", "args": {{"name": "morning email reminder", "message": "remind me to check email", "cron": "0 9 * * *"}}, "confidence": 0.95}}
-- "check the weather every hour" -> {{"action": "cron_add", "args": {{"name": "hourly weather", "message": "what's the weather", "every": "1h"}}, "confidence": 0.95}}
-- "run a task in 30 minutes" -> {{"action": "cron_add", "args": {{"name": "30min task", "message": "do the task", "at": "+30m"}}, "confidence": 0.95}}
-- "show my scheduled tasks" -> {{"action": "cron_list", "confidence": 0.95}}
-- "delete cron job abc123" -> {{"action": "cron_remove", "args": {{"id": "abc123"}}, "confidence": 0.95}}
-
-System skill examples:
-{skill_list}
-- "what's eating my RAM" -> {{"action": "system_skill", "skill": "top_processes", "args": {{"n": 10}}, "confidence": 0.95}}
-- "pause the music" -> {{"action": "system_skill", "skill": "play_pause", "args": {{}}, "confidence": 0.95}}
-- "turn my volume up" -> {{"action": "system_skill", "skill": "volume_up", "args": {{"step": 10}}, "confidence": 0.99}}
-- "turn my volume down" -> {{"action": "system_skill", "skill": "volume_down", "args": {{"step": 10}}, "confidence": 0.99}}
-- "set my volume to 50%" -> {{"action": "system_skill", "skill": "volume_set", "args": {{"pct": 50}}, "confidence": 0.99}}
-- "mute my pc" -> {{"action": "system_skill", "skill": "mute", "args": {{}}, "confidence": 0.99}}
-- "set a timer for 5 minutes" -> {{"action": "system_skill", "skill": "set_timer", "args": {{"minutes": 5, "label": "Timer"}}, "confidence": 0.95}}
-- "run ls -la" -> {{"action": "system_skill", "skill": "shell_exec", "args": {{"command": "ls -la"}}, "confidence": 0.95}}
-- "run this python: print(2+2)" -> {{"action": "system_skill", "skill": "python_exec", "args": {{"code": "print(2+2)"}}, "confidence": 0.95}}
-- "what's on my screen" -> {{"action": "system_skill", "skill": "ocr_screen", "args": {{}}, "confidence": 0.95}}
-- "search for what is a black hole" -> {{"action": "system_skill", "skill": "fast_search", "args": {{"query": "what is a black hole"}}, "confidence": 0.9}}
-- "save a note: buy milk" -> {{"action": "system_skill", "skill": "note_add", "args": {{"content": "buy milk"}}, "confidence": 0.95}}
-- "show my notes" -> {{"action": "system_skill", "skill": "note_list", "args": {{}}, "confidence": 0.95}}
-- "search notes for grocery" -> {{"action": "system_skill", "skill": "note_search", "args": {{"query": "grocery"}}, "confidence": 0.95}}
-- "turn on the bedroom light" -> {{"action": "system_skill", "skill": "ha_set", "args": {{"entity_id": "light.bedroom", "service": "turn_on"}}, "confidence": 0.9}}
-- "what's the bedroom light status" -> {{"action": "system_skill", "skill": "ha_get", "args": {{"entity_id": "light.bedroom"}}, "confidence": 0.9}}
-- "send telegram: hey call me" -> {{"action": "system_skill", "skill": "send_telegram", "args": {{"message": "hey call me"}}, "confidence": 0.95}}"""
-
-        result = await self.api.analyze_json(prompt, smart=True)
-        if not result:
-            return None
-
-        action = result.get("action", "none")
-        confidence = result.get("confidence", 0)
-
-        if confidence < 0.7 or action == "none":
-            return None
-
-        logger.info(f"PC control: action={action} confidence={confidence}")
-
-        if action == "browser_open":
-            url = result.get("url", "")
-            if url:
-                return self.openclaw.browser.open_url(url)
-            return None
-
-        if action == "browser_agent":
-            goal = result.get("goal", message)
-            url = result.get("url")
-            return await self._execute_browser_agent(goal, start_url=url)
-
-        if action == "browser_screenshot":
-            path = self.openclaw.browser.screenshot()
-            return f"Screenshot saved to {path}." if path else "Couldn't take screenshot."
-
-        if action == "cron_list":
-            jobs = self.openclaw.cron.list_jobs(include_disabled=True)
-            return self.openclaw.cron.format_jobs(jobs)
-
-        if action == "cron_add":
-            args = result.get("args", {})
-            name = args.get("name", f"{self.ai_name} task")
-            message = args.get("message", "")
-            every = args.get("every")
-            cron_expr = args.get("cron")
-            at = args.get("at")
-            tz = args.get("tz")
-            if not message:
-                return "Couldn't schedule — no task message specified."
-            job = self.openclaw.cron.add_job(name, message, every=every, cron=cron_expr, at=at, tz=tz)
-            if job.get("ok") is False:
-                return f"Failed to schedule: {job.get('error', 'unknown error')}"
-            job_id = job.get("id", "?")
-            sched = every or cron_expr or at or "?"
-            return f"Scheduled '{name}' ({sched}) — ID: {job_id}"
-
-        if action == "cron_remove":
-            job_id = result.get("args", {}).get("id", "")
-            if not job_id:
-                return "Which cron job? Tell me the ID (use 'show my scheduled tasks' to list them)."
-            return self.openclaw.cron.remove_job(job_id)
-
-        if action == "cron_run":
-            job_id = result.get("args", {}).get("id", "")
-            if not job_id:
-                return "Which cron job? Tell me the ID."
-            return self.openclaw.cron.run_now(job_id)
-
-        if action == "system_skill":
-            skill_name = result.get("skill")
-            args = result.get("args", {})
-            if not skill_name:
-                return None
-            return await self.system_skills.execute(skill_name, args)
-
-        return None
-
-    async def _execute_browser_agent(self, goal: str, start_url: str = None, max_steps: int = 8) -> str:
-        """
-        Agentic browser loop — reads the page, decides next action, executes, repeats.
-        Gives Leon the full power of OpenClaw's browser control.
-        """
-        browser = self.openclaw.browser
-        history = []
-
-        logger.info(f"Browser agent: goal='{goal}' start_url={start_url}")
-
-        # Ensure browser is running (sessions persist in ~/.openclaw/browser/openclaw/user-data/)
-        browser.ensure_running()
-        await asyncio.sleep(1.0)
-
-        # Navigate to starting URL — reuse existing tab (navigate) instead of
-        # open_url (which spawns a new 300MB renderer tab every time)
-        if start_url:
-            browser.navigate(start_url)
-            logger.info(f"Browser agent: navigated to {start_url}")
-            await asyncio.sleep(2.5)  # Let page load
-
-        for step in range(max_steps):
-            # Get current page state
-            snapshot = browser.snapshot()
-            if not snapshot:
-                return "Browser isn't responding — is it running?"
-
-            # Truncate snapshot to avoid token overflow
-            snap_truncated = snapshot[:4000] if len(snapshot) > 4000 else snapshot
-
-            history_summary = "\n".join(
-                f"Step {h['step']}: {h['action']} — {h['reason']}"
-                for h in history[-5:]  # Last 5 steps
-            )
-
-            prompt = f"""You are controlling a browser to accomplish this goal: "{goal}"
-
-Current page (accessibility tree — element refs are numbers like [1], [23], etc.):
-{snap_truncated}
-
-Steps taken so far:
-{history_summary or "None yet"}
-
-What is the SINGLE best next action? Respond with ONLY valid JSON (no markdown):
-{{
-  "action": "click" | "type" | "press" | "navigate" | "scroll" | "fill" | "select" | "evaluate" | "wait" | "download" | "dialog" | "done",
-  "ref": "element ref number — required for click/type/select/download/fill",
-  "text": "text to type — required for type",
-  "key": "key name — required for press (Enter, Tab, Escape, ArrowDown, etc.)",
-  "url": "full URL — required for navigate; also used for wait",
-  "fields": [{{"ref": "12", "value": "text"}}, ...],
-  "values": ["option1", "option2"],
-  "fn": "JS function string e.g. '() => document.title' — for evaluate",
-  "wait_text": "text to wait for — for wait action",
-  "wait_load": "load|domcontentloaded|networkidle — for wait action",
-  "download_path": "/tmp/openclaw/downloads/filename.ext",
-  "dialog_accept": true,
-  "reason": "one sentence explaining this action",
-  "done": true | false
-}}
-
-Action guide:
-- click: click a button, link, or element
-- type: type text into an input (use fill for multiple fields at once)
-- fill: fill several form fields at once (more efficient than click+type per field)
-- select: pick an option from a <select> dropdown
-- press: keyboard shortcut (Enter to submit, Tab to advance, Escape to close)
-- navigate: go to a new URL
-- scroll: scroll down the page
-- evaluate: run JS to read data from the page (e.g. get text that's not in snapshot)
-- wait: wait for text/URL/load before next action (use after navigation)
-- download: click a download link and save the file
-- dialog: accept or dismiss a browser popup/alert
-- done: goal fully accomplished
-
-Rules:
-- Use element refs from the page snapshot (numbers in brackets like [42])
-- "done" = true only when the goal is fully accomplished
-- For search boxes: type the search text, then press Enter
-- After clicking links or buttons that load new pages, prefer wait action next
-- If stuck after 3+ steps, try a different approach
-- AUTH RULE: The browser is pre-authenticated with saved sessions for GitHub, Google, Railway, Discord, Reddit and more. NEVER enter passwords or credentials. If you see a login page, navigate directly to the dashboard/home URL instead (e.g. https://github.com, https://railway.app/dashboard).
-- AUTH RULE: If a page asks to log in, assume you ARE logged in and navigate to the main app URL — the session cookie will kick in automatically.
-- MEDIA RULE: For goals involving playing a song/video/audio — mark done=true immediately after clicking the video/song. Do NOT keep looping to verify it's playing.
-- MEDIA RULE: If a video/song is already playing on the current page, immediately return done=true.
-- Do NOT navigate away from a page if the goal has already been accomplished on that page."""
-
-            result = await self.api.analyze_json(prompt, smart=True)
-            if not result:
-                logger.warning("Browser agent: AI returned no result")
-                break
-
-            action = result.get("action", "done")
-            reason = result.get("reason", "")
-            is_done = result.get("done", False)
-
-            history.append({"step": step + 1, "action": action, "reason": reason})
-            logger.info(f"Browser agent step {step+1}: {action} — {reason}")
-
-            if action == "done" or is_done:
-                # Return the reason if it's a natural sentence, otherwise generic done
-                _action_words = ("click", "type", "navigate", "fill", "scroll",
-                                 "press", "select", "wait", "step ")
-                if reason and not any(reason.lower().startswith(w) for w in _action_words):
-                    return reason
-                return "Done."
-
-            elif action == "click":
-                ref = str(result.get("ref", ""))
-                if ref:
-                    browser.click(ref)
-                    await asyncio.sleep(1.5)
-
-            elif action == "type":
-                ref = str(result.get("ref", ""))
-                text = result.get("text", "")
-                if ref and text:
-                    browser.type_text(ref, text)
-                    await asyncio.sleep(0.5)
-
-            elif action == "press":
-                key = result.get("key", "Enter")
-                browser.press(key)
-                await asyncio.sleep(1.5)
-
-            elif action == "navigate":
-                url = result.get("url", "")
-                if url:
-                    browser.navigate(url)
-                    await asyncio.sleep(2.5)
-
-            elif action == "scroll":
-                browser.press("PageDown")
-                await asyncio.sleep(0.8)
-
-            elif action == "fill":
-                fields = result.get("fields", [])
-                if fields:
-                    browser.fill(fields)
-                    await asyncio.sleep(0.5)
-
-            elif action == "select":
-                ref = str(result.get("ref", ""))
-                values = result.get("values", [])
-                if ref and values:
-                    browser.select(ref, *values)
-                    await asyncio.sleep(0.5)
-
-            elif action == "evaluate":
-                fn = result.get("fn", "() => document.title")
-                ref = result.get("ref")
-                eval_result = browser.evaluate(fn, ref=ref)
-                # Inject result into next step's history so AI can use it
-                history[-1]["reason"] += f" | result: {eval_result[:200]}"
-                await asyncio.sleep(0.3)
-
-            elif action == "wait":
-                wait_text = result.get("wait_text")
-                wait_url = result.get("url")
-                wait_load = result.get("wait_load")
-                browser.wait(text=wait_text, url=wait_url, load=wait_load or ("load" if not wait_text and not wait_url else None))
-                await asyncio.sleep(0.5)
-
-            elif action == "download":
-                ref = str(result.get("ref", ""))
-                path = result.get("download_path", "/tmp/openclaw/downloads/download")
-                if ref:
-                    saved = browser.download(ref, path)
-                    history[-1]["reason"] += f" | saved: {saved}"
-                await asyncio.sleep(1.0)
-
-            elif action == "dialog":
-                accept = result.get("dialog_accept", True)
-                browser.dialog(accept=accept)
-                await asyncio.sleep(0.5)
-
-        return "Done."
+    # _route_special_commands → routing_mixin.py
+    # _SITE_MAP               → routing_mixin.py
+    # _route_to_system_skill  → routing_mixin.py
+    # _web_search             → browser_mixin.py
+    # _execute_browser_agent  → browser_mixin.py
+
+    # (routing and browser methods removed — see routing_mixin.py / browser_mixin.py)
 
     def _check_sensitive_permissions(self, message: str) -> Optional[str]:
         """Check if the message requests a sensitive action that needs approval."""
@@ -1485,7 +885,7 @@ Known projects: {json.dumps(project_names) if project_names else "None"}
 
 Respond with ONLY valid JSON (no markdown fences):
 {{
-  "type": "simple" | "single_task" | "multi_task" | "plan",
+  "type": "simple" | "device_control" | "single_task" | "multi_task" | "plan",
   "tasks": ["description of each discrete task"],
   "projects": ["project name for each task or 'unknown'"],
   "complexity": 1-10,
@@ -1495,6 +895,7 @@ Respond with ONLY valid JSON (no markdown fences):
 
 Rules:
 - "simple" = status question, quick answer, clarification, greeting, asking what you did
+- "device_control" = request to control a physical device — lights, switches, thermostat, TV, fan, speaker volume, smart plug. Even if garbled or misspelled. Do NOT classify as single_task — it should never spawn a coding agent.
 - "single_task" = one focused coding/research task
 - "multi_task" = 2+ distinct tasks that can be parallelized
 - "plan" = user wants a large, multi-hour autonomous build — they want you to take over a whole project or goal and execute it fully without interruption. Detect this from intent, not exact phrases. Examples that should classify as "plan": "go ham on X", "just go build it", "make it production ready", "work through the whole thing", "do everything needed to launch X", "take it from here and run with it", "build out the whole feature", "overhaul X completely", "just fix everything wrong with it"
@@ -1510,31 +911,6 @@ For "plan" type, set plan_goal to a precise one-line description of what should 
     # Response strategies
     # ------------------------------------------------------------------
 
-    async def _handle_plan_request(self, message: str, analysis: dict) -> str:
-        """Route a plan-type request from _analyze_request into PlanMode."""
-        if self.plan_mode.active:
-            status = self.plan_mode.get_status()
-            done = status["doneTasks"]
-            total = status["totalTasks"]
-            return f"There's already a plan running ({done}/{total} tasks done). Say 'cancel plan' if you want to start a new one."
-
-        goal = analysis.get("plan_goal") or message
-        project_name = analysis.get("plan_project") or ""
-
-        project = self._resolve_project(project_name, message)
-        if not project:
-            projects = self.projects_config.get("projects", [])
-            project = projects[0] if projects else None
-        if not project:
-            return "No projects configured — add one in config/projects.yaml first."
-
-        asyncio.create_task(self.plan_mode.run(goal, project))
-        return (
-            f"On it. Analyzing {project['name']} and building a plan now — "
-            f"I'll execute everything automatically. Check the dashboard for live progress."
-        )
-
-    # ------------------------------------------------------------------
 
     async def _respond_conversationally(self, message: str) -> str:
         """Direct API response for simple queries - no agent needed."""
@@ -1580,225 +956,11 @@ Vision: {vision_desc}
             messages=messages,
         )
 
-    async def _handle_single_task(self, message: str, analysis: dict) -> str:
-        """Spawn a single Claude Code agent for one task."""
-        task_desc = analysis["tasks"][0] if analysis.get("tasks") else message
-        project_name = (analysis.get("projects") or ["unknown"])[0]
-        project = self._resolve_project(project_name, message)
-
-        if not project:
-            projects = self.projects_config.get("projects", [])
-            if not projects:
-                return "No projects configured — add one to config/projects.yaml first."
-            return f"Couldn't match that to a project. Known projects: {', '.join(p['name'] for p in projects)}. Which one?"
-
-        # ── Agent Zero routing ─────────────────────────────────────────────
-        # For heavy coding/CI/infra tasks, dispatch to the Docker execution engine
-        try:
-            from tools.agent_zero_runner import get_runner
-            az = get_runner()
-            if az.is_enabled() and az.should_dispatch(task_desc):
-                if az.active_job_count() >= az.max_parallel:
-                    logger.info("Agent Zero at capacity (%d jobs) — falling back to Claude", az.max_parallel)
-                elif await az.is_available_async():
-                    return await self._dispatch_to_agent_zero(task_desc, project, message)
-                else:
-                    logger.warning("Agent Zero enabled but not reachable — run setup-agent-zero.sh")
-        except ImportError:
-            pass  # tools.agent_zero_runner not yet installed — skip silently
-
-        brief_path = await self._create_task_brief(task_desc, project)
-
-        # Dispatch to Right Brain if connected, otherwise run locally
-        if self.brain_role == "left" and self.bridge and self.bridge.connected:
-            return await self._dispatch_to_right_brain(task_desc, brief_path, project)
-
-        agent_id = await self.agent_manager.spawn_agent(
-            brief_path=brief_path,
-            project_path=project["path"],
-        )
-
-        task_obj = {
-            "id": agent_id,
-            "description": task_desc,
-            "project_name": project["name"],
-            "brief_path": brief_path,
-        }
-        self.task_queue.add_task(agent_id, task_obj)
-        self.memory.add_active_task(agent_id, task_obj)
-        self.agent_index.record_spawn(
-            agent_id, task_desc, project["name"], brief_path,
-            str(self.agent_manager.output_dir / f"{agent_id}.log"),
-        )
-
-        return (
-            f"On it. Spinning up an agent for **{task_desc}** "
-            f"in {project['name']}.\n\n"
-            f"I'll let you know when it's done."
-        )
-
-    async def _orchestrate(self, message: str, analysis: dict) -> str:
-        """Break down a complex request and spawn multiple agents."""
-        tasks = analysis.get("tasks", [])
-        project_names = analysis.get("projects", [])
-        spawned = []
-        queued_to_night = []  # tasks deferred to night mode to avoid project conflicts
-        use_right_brain = (
-            self.brain_role == "left" and self.bridge and self.bridge.connected
-        )
-
-        # Projects that already have a running agent (from task queue)
-        active_projects = {
-            t.get("project_name", "") for t in self.task_queue.active_tasks.values()
-        }
-        # Projects claimed in this batch (prevent same-project duplicates within one orchestration)
-        batch_projects: set[str] = set()
-
-        for i, task_desc in enumerate(tasks):
-            proj_name = project_names[i] if i < len(project_names) else "unknown"
-            project = self._resolve_project(proj_name, task_desc)
-
-            if not project:
-                spawned.append((None, task_desc, "No project matched", ""))
-                continue
-
-            # Per-project guard: never run two agents on the same codebase simultaneously.
-            # If this project already has a running agent (from this batch or the task queue),
-            # queue the task in night mode instead of spawning a new agent.
-            proj_key = project["name"]
-            if proj_key in active_projects or proj_key in batch_projects:
-                self.night_mode.add_task(task_desc, proj_name)
-                queued_to_night.append((task_desc, proj_key))
-                continue
-            batch_projects.add(proj_key)
-
-            brief_path = await self._create_task_brief(task_desc, project)
-
-            if use_right_brain:
-                # Dispatch to Right Brain
-                dispatch_msg = BridgeMessage(
-                    type=MSG_TASK_DISPATCH,
-                    payload={
-                        "brief_path": brief_path,
-                        "project_path": project["path"],
-                        "description": task_desc,
-                        "project_name": project["name"],
-                        "task_id": uuid.uuid4().hex[:8],
-                    },
-                )
-                resp = await self.bridge.send_and_wait(dispatch_msg, timeout=15)
-                if resp and resp.payload.get("status") == "spawned":
-                    agent_id = resp.payload.get("agent_id", "remote")
-                    task_obj = {
-                        "id": agent_id,
-                        "description": task_desc,
-                        "project_name": project["name"],
-                        "brief_path": brief_path,
-                        "remote": True,
-                    }
-                    self.memory.add_active_task(agent_id, task_obj)
-                    spawned.append((agent_id, task_desc, project["name"], "Right Brain"))
-                else:
-                    # Log rejection reason if applicable
-                    if resp and resp.payload.get("status") == "rejected":
-                        logger.warning(f"Right Brain rejected task: {resp.payload.get('reason', 'unknown')}")
-                    # Fallback to local
-                    agent_id = await self.agent_manager.spawn_agent(
-                        brief_path=brief_path, project_path=project["path"],
-                    )
-                    task_obj = {"id": agent_id, "description": task_desc,
-                                "project_name": project["name"], "brief_path": brief_path}
-                    self.task_queue.add_task(agent_id, task_obj)
-                    self.memory.add_active_task(agent_id, task_obj)
-                    spawned.append((agent_id, task_desc, project["name"], "local fallback"))
-            else:
-                agent_id = await self.agent_manager.spawn_agent(
-                    brief_path=brief_path,
-                    project_path=project["path"],
-                )
-                task_obj = {
-                    "id": agent_id,
-                    "description": task_desc,
-                    "project_name": project["name"],
-                    "brief_path": brief_path,
-                }
-                self.task_queue.add_task(agent_id, task_obj)
-                self.memory.add_active_task(agent_id, task_obj)
-                spawned.append((agent_id, task_desc, project["name"], "local"))
-
-        # Build response — conversational, not robotic
-        actual = [(aid, desc, proj, loc) for (aid, desc, proj, loc) in spawned if aid]
-        if not actual and not queued_to_night:
-            return "Couldn't match any of those to a project I know about."
-
-        lines = []
-        if actual:
-            lines.append(f"On it. Spawning {len(actual)} agent{'s' if len(actual) != 1 else ''}:\n")
-            for idx, (aid, desc, proj, loc) in enumerate(actual, 1):
-                where = f" [{loc}]" if loc and self.brain_role == "left" else ""
-                lines.append(f"{idx}. **{desc}** — {proj}{where}")
-        if queued_to_night:
-            if actual:
-                lines.append("")
-            lines.append(
-                f"{len(queued_to_night)} more task{'s' if len(queued_to_night) != 1 else ''} queued — "
-                f"will run after the current agent finishes (one at a time per codebase)."
-            )
-        if actual:
-            lines.append("\nI'll keep you posted.")
-
-        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Task briefs
     # ------------------------------------------------------------------
 
-    async def _create_task_brief(self, task_desc: str, project: dict) -> str:
-        """Generate a detailed task brief and write it to disk."""
-        task_id = uuid.uuid4().hex[:8]
-        brief_path = self.agent_manager.brief_dir / f"task_{task_id}.md"
-
-        # Get project context from memory
-        mem_context = self.memory.get_project_context(project["name"])
-        recent_changes = ""
-        if mem_context:
-            rc = mem_context.get("context", {}).get("recent_changes", [])
-            recent_changes = "\n".join(f"- {c}" for c in rc[-5:])
-
-        prompt = f"""Create a concise task brief for a Claude Code agent.
-
-Task: {task_desc}
-Project: {project['name']}
-Path: {project['path']}
-Tech stack: {', '.join(project.get('tech_stack', []))}
-Recent changes:
-{recent_changes or 'None'}
-
-Write a markdown brief with these sections:
-# Task Brief
-## Objective
-## Project Context
-## Requirements
-## Success Criteria
-
-Keep it focused and actionable. The agent should be able to start immediately."""
-
-        brief_content = await self.api.quick_request(prompt)
-
-        # Add metadata header + skills manifest
-        skills_section = self._get_skills_manifest()
-        header = f"""---
-agent_task_id: {task_id}
-project: {project['name']}
-created: {datetime.now().isoformat()}
-spawned_by: {self.ai_name} v1.0
----
-
-{skills_section}
-"""
-        brief_path.write_text(header + brief_content)
-        logger.info(f"Created task brief: {brief_path}")
-        return str(brief_path)
 
     def _get_skills_manifest(self) -> str:
         """Return a concise tools/skills section to inject into task briefs."""
@@ -1866,252 +1028,8 @@ spawned_by: {self.ai_name} v1.0
     # Background awareness loop
     # ------------------------------------------------------------------
 
-    async def _ram_watchdog(self):
-        """Monitor RAM every 60s. If above 80%, kill runaway OpenClaw renderer tabs."""
-        import subprocess as _sp
-        while self.running:
-            try:
-                await asyncio.sleep(60)
-                with open("/proc/meminfo") as f:
-                    info = {k.strip(): v.strip() for k, v in
-                            (line.split(":", 1) for line in f if ":" in line)}
-                total = int(info.get("MemTotal", "0 kB").split()[0])
-                avail = int(info.get("MemAvailable", "0 kB").split()[0])
-                used_pct = (total - avail) / total * 100 if total else 0
-
-                if used_pct > 80:
-                    # Find OpenClaw renderer PIDs
-                    r = _sp.run(
-                        ["pgrep", "-f", "remote-debugging-port=18800"],
-                        capture_output=True, text=True
-                    )
-                    pids = r.stdout.strip().split()
-                    # Keep 2, kill the rest (oldest first = lowest PIDs)
-                    pids_sorted = sorted(int(p) for p in pids if p.isdigit())
-                    to_kill = pids_sorted[:-2] if len(pids_sorted) > 2 else []
-                    if to_kill:
-                        for pid in to_kill:
-                            try:
-                                _sp.run(["kill", str(pid)], check=False)
-                            except Exception:
-                                pass
-                        logger.warning(
-                            "RAM watchdog: %.0f%% used — killed %d OpenClaw renderer(s)",
-                            used_pct, len(to_kill)
-                        )
-                        # Notify via voice if available
-                        vs = self.hotkey_listener.voice_system if self.hotkey_listener else None
-                        if vs and vs.is_listening:
-                            asyncio.create_task(vs.speak(
-                                f"Heads up — RAM hit {used_pct:.0f}%. "
-                                "Cleaned up some browser processes to free memory."
-                            ))
-            except Exception as e:
-                logger.debug("RAM watchdog error: %s", e)
-
-    async def _awareness_loop(self):
-        """Continuously monitor active agents and update state."""
-        logger.info("Awareness loop started")
-        while self.running:
-            try:
-                # Monitor local agents
-                # check_status handles all state transitions including 500-error retries.
-                # Do NOT pre-clean failed agents here — that would bypass the retry logic.
-                agent_ids = list(self.agent_manager.active_agents.keys())
-                for agent_id in agent_ids:
-                    status = await self.agent_manager.check_status(agent_id)
-
-                    if status.get("retrying"):
-                        # Agent is being retried — update memory with new agent ID
-                        new_id = status.get("new_agent_id")
-                        if new_id:
-                            old_task = self.memory.get_active_task(agent_id)
-                            if old_task:
-                                self.memory.remove_active_task(agent_id)
-                                old_task["id"] = new_id
-                                self.memory.add_active_task(new_id, old_task)
-                            # Update task queue mapping and persist to disk
-                            task = self.task_queue.active_tasks.pop(agent_id, None)
-                            if task:
-                                task["agent_id"] = new_id
-                                self.task_queue.active_tasks[new_id] = task
-                                self.task_queue._save()
-                        logger.info(f"Agent {agent_id} retrying as {new_id}")
-
-                    elif status.get("completed"):
-                        results = await self.agent_manager.get_agent_results(agent_id)
-                        self.memory.complete_task(agent_id, results)
-                        self.task_queue.complete_task(agent_id)
-                        self.agent_index.record_completion(
-                            agent_id,
-                            results.get("summary", ""),
-                            results.get("files_modified", []),
-                            status.get("duration_seconds", 0),
-                        )
-                        self.agent_manager.cleanup_agent(agent_id)
-                        logger.info(f"Agent {agent_id} finished: {results.get('summary', '')[:80]}")
-
-                        # Push natural completion message to dashboard + desktop
-                        completion_msg = self._pick_completion_phrase(
-                            results.get("summary", "")
-                        )
-                        await self._broadcast_to_dashboard({
-                            "type": "agent_completed",
-                            "agent_id": agent_id,
-                            "summary": completion_msg,
-                        })
-                        self.notifications.push_agent_completed(
-                            agent_id, completion_msg
-                        )
-
-                        # Auto mode: mark done + spawn a self-directed continuation if queue is empty
-                        self.night_mode.mark_agent_completed(agent_id, results.get("summary", ""))
-                        if self.night_mode.active and not self.night_mode.get_pending():
-                            # Find the project from the last completed task
-                            last_task = next((t for t in reversed(self.night_mode._backlog)
-                                             if t.get("status") == "completed"), None)
-                            if last_task:
-                                project_name = last_task.get("project", "unknown")
-                                continuation = (
-                                    f"Continue improving the {project_name} codebase. "
-                                    f"Read LEON_PROGRESS.md to see what has already been done, "
-                                    f"then find the next highest-value things to improve — "
-                                    f"performance, code quality, UI polish, bugs, anything that makes it better. "
-                                    f"Do not repeat work already done. Self-direct entirely. "
-                                    f"Commit your changes. Log progress to LEON_PROGRESS.md."
-                                )
-                                self.night_mode.add_task(continuation, project_name)
-                                logger.info(f"Auto mode: queued self-directed continuation for {project_name}")
-                        asyncio.create_task(self.night_mode.try_dispatch())
-
-                    elif status.get("failed"):
-                        results = await self.agent_manager.get_agent_results(agent_id)
-                        raw_error = results.get("errors", "unknown error")
-                        self.memory.complete_task(agent_id, {
-                            "summary": f"FAILED: {raw_error[:200]}",
-                            "files_modified": [],
-                        })
-                        self.task_queue.fail_task(agent_id, raw_error)
-                        self.agent_index.record_failure(
-                            agent_id,
-                            raw_error,
-                            status.get("duration_seconds", 0),
-                        )
-                        self.agent_manager.cleanup_agent(agent_id)
-                        logger.warning(f"Agent {agent_id} failed")
-
-                        # Push natural failure message to dashboard + desktop
-                        failure_msg = self._pick_failure_phrase(raw_error)
-                        await self._broadcast_to_dashboard({
-                            "type": "agent_failed",
-                            "agent_id": agent_id,
-                            "error": failure_msg,
-                        })
-                        self.notifications.push_agent_failed(
-                            agent_id, failure_msg
-                        )
-
-                        # Night mode: mark failed + try to dispatch next task
-                        self.night_mode.mark_agent_failed(agent_id, raw_error)
-                        asyncio.create_task(self.night_mode.try_dispatch())
-
-                # --- Per-cycle operations (outside per-agent loop) ---
-
-                # Poll Right Brain status if Left Brain
-                if self.brain_role == "left" and self.bridge and self.bridge.connected:
-                    resp = await self.bridge.send_and_wait(
-                        BridgeMessage(type=MSG_STATUS_REQUEST), timeout=5
-                    )
-                    if resp:
-                        self._right_brain_status = resp.payload
-                        self._bridge_connected = True
-                    else:
-                        self._bridge_connected = self.bridge.connected
-                elif self.brain_role == "left":
-                    self._bridge_connected = False
-                    self._right_brain_status = {}
-
-                # Check scheduled tasks
-                if self.scheduler:
-                    due_tasks = self.scheduler.get_due_tasks()
-                    for sched_task in due_tasks:
-                        cmd = sched_task.get("command", "")
-                        if cmd:
-                            logger.info(f"Running scheduled task: {sched_task['name']} -> {cmd}")
-                            try:
-                                await self.process_user_input(cmd)
-                            except Exception as e:
-                                logger.error(f"Scheduled task failed: {sched_task['name']}: {e}")
-                            self.scheduler.mark_completed(sched_task["name"])
-
-                # Watchdog: check agent resource usage
-                await self._watchdog_check()
-
-                # Periodic update check
-                if self.update_checker:
-                    import time as _time
-                    now_ts = _time.monotonic()
-                    if now_ts - self._last_update_check >= self._update_interval:
-                        self._last_update_check = now_ts
-                        try:
-                            found = await self.update_checker.check()
-                            if found and self.update_checker.should_notify():
-                                self._update_available = True
-                                self._update_mentioned = False
-                                self.update_checker.mark_notified()
-                                # Dashboard notification
-                                msg = (
-                                    f"Update available: v{self.update_checker.latest_version}\n"
-                                    f"Run: cd ~/leon-system && git pull\n"
-                                    f"{self.update_checker.release_url}"
-                                )
-                                logger.info("Update notification: %s", msg)
-                                await self._broadcast_to_dashboard({
-                                    "type": "update_available",
-                                    "version": self.update_checker.latest_version,
-                                    "url": self.update_checker.release_url,
-                                })
-                        except Exception as e:
-                            logger.debug("Update check error: %s", e)
-
-                # Proactive Discord update every 10 minutes when agents are running
-                import time as _time
-                _now_ts = _time.monotonic()
-                _active_agents = list(self.agent_manager.active_agents.keys())
-                _plan_running  = self.plan_mode.active if self.plan_mode else False
-                _night_running = self.night_mode.active if self.night_mode else False
-                if (_active_agents or _plan_running or _night_running) and \
-                        _now_ts - self._last_discord_update >= 600:  # 600s = 10 min
-                    self._last_discord_update = _now_ts
-                    try:
-                        _count = len(_active_agents)
-                        _nm_pending = len(self.night_mode.get_pending()) if self.night_mode else 0
-                        if _plan_running and self.plan_mode:
-                            _ps = self.plan_mode.get_status()
-                            _update = (
-                                f"**Plan update** — {_ps.get('goal','')[:60]}\n"
-                                f"{_ps['doneTasks']}/{_ps['totalTasks']} tasks done"
-                                + (f", {_ps['runningTasks']} running" if _ps['runningTasks'] else "")
-                                + (f", {_ps['failedTasks']} failed" if _ps['failedTasks'] else "")
-                            )
-                        else:
-                            _update = (
-                                f"**Agent update** — {_count} agent{'s' if _count != 1 else ''} running"
-                                + (f", {_nm_pending} queued" if _nm_pending else "")
-                            )
-                        await self._send_discord_message(_update)
-                    except Exception as _e:
-                        logger.debug("Discord update tick error: %s", _e)
-
-                # Periodic save
-                self.memory.save()
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Awareness loop error: {e}")
-
-            await asyncio.sleep(10)
+    # _ram_watchdog   → awareness_mixin.py
+    # _awareness_loop → awareness_mixin.py
 
     # ------------------------------------------------------------------
     # Personality helpers
@@ -2300,183 +1218,8 @@ spawned_by: {self.ai_name} v1.0
     # Bridge dispatch + remote task handling (Left Brain)
     # ------------------------------------------------------------------
 
-    async def _dispatch_to_right_brain(self, task_desc: str, brief_path: str, project: dict) -> str:
-        """Send a single task to the Right Brain for execution."""
-        task_id = uuid.uuid4().hex[:8]
-        dispatch_msg = BridgeMessage(
-            type=MSG_TASK_DISPATCH,
-            payload={
-                "brief_path": brief_path,
-                "project_path": project["path"],
-                "description": task_desc,
-                "project_name": project["name"],
-                "task_id": task_id,
-            },
-        )
-
-        resp = await self.bridge.send_and_wait(dispatch_msg, timeout=15)
-
-        if resp and resp.payload.get("status") == "spawned":
-            agent_id = resp.payload.get("agent_id", f"remote_{task_id}")
-            task_obj = {
-                "id": agent_id,
-                "description": task_desc,
-                "project_name": project["name"],
-                "brief_path": brief_path,
-                "remote": True,
-            }
-            self.memory.add_active_task(agent_id, task_obj)
-            return (
-                f"Sent that to the homelab. Working on **{task_desc}** "
-                f"in {project['name']}.\n\nI'll let you know when it's done."
-            )
-
-        # Handle explicit rejection (backpressure)
-        if resp and resp.payload.get("status") == "rejected":
-            reason = resp.payload.get("reason", "unknown")
-            logger.warning(f"Right Brain rejected task — reason: {reason}, falling back to local")
-        else:
-            # Fallback to local execution
-            logger.warning("Right Brain dispatch failed — falling back to local")
-        agent_id = await self.agent_manager.spawn_agent(
-            brief_path=brief_path,
-            project_path=project["path"],
-        )
-        task_obj = {
-            "id": agent_id,
-            "description": task_desc,
-            "project_name": project["name"],
-            "brief_path": brief_path,
-        }
-        self.task_queue.add_task(agent_id, task_obj)
-        self.memory.add_active_task(agent_id, task_obj)
-        return (
-            f"Homelab's not responding — running it locally instead. "
-            f"Working on **{task_desc}** in {project['name']}.\n\n"
-            f"I'll let you know when it's done."
-        )
-
-    async def _handle_self_repair(self, message: str, component: str, file_hint: str) -> str:
-        """
-        Leon received criticism / a bug report about itself.
-        Dispatch a targeted self-repair job to Agent Zero (or Claude agent fallback)
-        pointed at the leon-system codebase.
-
-        Agent Zero is ideal here: it can read the code, reproduce the issue,
-        write a fix, run a quick test, and hand back a diff — just like it would
-        for any other project, but the project IS Leon itself.
-        """
-        leon_path = str(Path(__file__).parent.parent)
-        project = {
-            "name": "Leon System",
-            "path": leon_path,
-            "type": "system",
-            "tech_stack": ["Python", "aiohttp", "asyncio", "JavaScript"],
-            "context": (
-                f"This is Leon's OWN source code at {leon_path}.\n"
-                "You are repairing a bug that the owner just reported.\n"
-                "Key files: core/leon.py (main brain), integrations/discord/bot.py "
-                "(Discord bridge), core/voice.py (TTS/STT), core/agent_manager.py, "
-                "core/memory.py, dashboard/server.py.\n"
-                "After fixing, write a REPORT.md with: what the bug was, what you changed, "
-                "and the exact file + line numbers."
-            ),
-        }
-
-        # Pull the last few conversation turns for full context
-        recent = self.memory.get_recent_context(limit=6)
-        context_lines = []
-        for turn in recent[-6:]:
-            role = turn.get("role", "?")
-            content = turn.get("content", "")[:300]
-            context_lines.append(f"{role.upper()}: {content}")
-        conversation_context = "\n".join(context_lines)
-
-        task_desc = (
-            f"SELF-REPAIR: Fix a bug in Leon's own code.\n\n"
-            f"WHAT THE USER REPORTED:\n{message}\n\n"
-            f"SUSPECTED COMPONENT: {component}\n"
-            f"LIKELY FILE: {file_hint}\n\n"
-            f"RECENT CONVERSATION (for context):\n{conversation_context}\n\n"
-            f"YOUR JOB:\n"
-            f"1. Read {file_hint} and understand the current implementation.\n"
-            f"2. Identify exactly what is causing the reported problem.\n"
-            f"3. Fix it. Test if possible.\n"
-            f"4. Write REPORT.md: bug root cause, files changed, lines changed.\n"
-            f"Do NOT make unrelated changes. Stay focused on the reported issue."
-        )
-
-        # Use Agent Zero if available (can build tools on the fly, test, verify)
-        try:
-            from tools.agent_zero_runner import get_runner
-            az = get_runner()
-            if az.is_enabled() and await az.is_available_async():
-                leon_context = self._build_az_memory_context(project)
-                job_id_preview = f"AZ-SELFREPAIR-{datetime.now().strftime('%H%M%S')}"
-                task_obj = {
-                    "id": job_id_preview,
-                    "description": f"Self-repair: {component}",
-                    "project_name": "Leon System",
-                    "executor": "agent_zero",
-                }
-                self.memory.add_active_task(job_id_preview, task_obj)
-
-                async def _repair_and_notify():
-                    try:
-                        result = await az.run_job(
-                            task_desc=task_desc,
-                            project_path=leon_path,
-                            project_name="Leon System",
-                            leon_context=leon_context,
-                        )
-                        summary = result.get("summary", "")
-                        diff_path = result.get("diff_path", "")
-                        self.memory.memory.get("active_tasks", {}).pop(job_id_preview, None)
-                        self.memory.save()
-
-                        # Offer to apply the patch and restart
-                        if diff_path and Path(diff_path).exists():
-                            await self._send_discord_message(
-                                f"🔧 **Self-repair complete** ({component})\n"
-                                f"{summary[:300]}\n\n"
-                                f"**To apply:** `git apply {diff_path}` then restart Leon.\n"
-                                f"Or say: **apply self-repair and restart**"
-                            )
-                        else:
-                            await self._send_discord_message(
-                                f"🔧 **Self-repair complete** ({component})\n{summary[:400]}"
-                            )
-                    except Exception as exc:
-                        logger.exception("Self-repair job failed: %s", exc)
-
-                asyncio.create_task(_repair_and_notify())
-                return (
-                    f"Got it — I know my {component} failed. "
-                    f"Dispatching Agent Zero to diagnose and fix it now.\n\n"
-                    f"It'll read `{file_hint}`, find the root cause, and send you the fix via Discord."
-                )
-        except ImportError:
-            pass
-
-        # Fallback: Claude Code agent directly on leon-system (no workspace copy)
-        brief_path = await self._create_task_brief(task_desc, project)
-        agent_id = await self.agent_manager.spawn_agent(
-            brief_path=brief_path,
-            project_path=leon_path,
-        )
-        task_obj = {
-            "id": agent_id,
-            "description": f"Self-repair: {component}",
-            "project_name": "Leon System",
-            "brief_path": brief_path,
-        }
-        self.task_queue.add_task(agent_id, task_obj)
-        self.memory.add_active_task(agent_id, task_obj)
-        return (
-            f"Got it — my {component} is broken. "
-            f"Spawning an agent to read `{file_hint}` and fix it.\n"
-            f"I'll let you know what it finds."
-        )
+    # _dispatch_to_right_brain    → task_mixin.py
+    # _handle_self_repair         → task_mixin.py
 
     async def _delayed_restart(self, delay_seconds: int = 3):
         """Restart Leon after a short delay (used after self-repair patch apply)."""
@@ -2603,8 +1346,58 @@ spawned_by: {self.ai_name} v1.0
             f"Hard stop anytime: `kill agent zero job {job_id_preview}`"
         )
 
-    async def _send_discord_message(self, text: str):
-        """Proactively push a message to the owner's Discord channel via the bot token."""
+    async def _repair_openclaw_cron(self, error_text: str) -> None:
+        """Auto-dispatch Agent Zero when OpenClaw cron fails — self-healing."""
+        try:
+            from tools.agent_zero_runner import get_runner
+            runner = get_runner()
+            if not runner:
+                return
+            task_desc = (
+                f"SELF REPAIR: OpenClaw cron is broken with this error:\n{error_text}\n\n"
+                f"Config file: /home/deansabr/.openclaw/openclaw.json\n"
+                f"1. Check the config for any invalid/unrecognized keys (OpenClaw is strict about this)\n"
+                f"2. Check if the OpenClaw gateway process is running (it should be listening on ws://127.0.0.1:18789)\n"
+                f"3. Fix the config and/or restart the gateway so 'openclaw cron add' works\n"
+                f"4. Test with: ~/.openclaw/bin/openclaw cron list\n"
+                f"After fixing, post a brief summary of what was wrong and what you changed."
+            )
+            await runner.run_job(task_desc, project="leon-system")
+            logger.info("Agent Zero dispatched to fix OpenClaw cron")
+        except Exception as e:
+            logger.debug("Could not dispatch AZ for cron repair: %s", e)
+
+    # _fire_reminder  → reminder_mixin.py
+    # _save_reminders → reminder_mixin.py
+    # _load_reminders → reminder_mixin.py
+
+    async def _send_discord_message(self, text: str, channel: str = "updates"):
+        """
+        Proactively push a message to the owner's Discord.
+
+        channel:
+          "updates" → #updates  (proactive messages, briefs, alerts — default)
+          "chat"    → #chat     (direct conversational replies)
+          "log"     → #log      (autonomous action one-liners)
+        """
+        try:
+            from integrations.discord.dashboard import get_dashboard
+            db = get_dashboard()
+            if db:
+                if channel == "log":
+                    await db.post_to_log(text)
+                    return
+                elif channel == "chat":
+                    ch = db._channels.get("chat")
+                    if ch:
+                        await ch.send(text[:2000])
+                        return
+                else:
+                    await db.post_to_updates(text)
+                    return
+        except Exception:
+            pass
+
         try:
             channel_file = Path("/tmp/leon_discord_channel.json")
             token_file   = Path("/tmp/leon_discord_bot_token.txt")
@@ -2638,44 +1431,5 @@ spawned_by: {self.ai_name} v1.0
         except Exception:
             pass  # Dashboard may not be running
 
-    async def _handle_remote_task_status(self, msg: BridgeMessage):
-        """Handle task status updates from Right Brain."""
-        payload = msg.payload
-        task_id = payload.get("task_id", "")
-        agent_id = payload.get("agent_id", task_id)
-        status = payload.get("status", "")
-        logger.info(f"Remote task {task_id} status: {status}")
-
-        # Update task state in memory
-        active_task = self.memory.get_active_task(agent_id)
-        if active_task:
-            active_task["remote_status"] = status
-            if payload.get("error"):
-                active_task["remote_error"] = payload["error"]
-            self.memory.update_active_task(agent_id, active_task)
-        elif status == "spawned" and agent_id:
-            # Track newly spawned remote agent
-            self.memory.add_active_task(agent_id, {
-                "id": agent_id,
-                "description": payload.get("description", "remote task"),
-                "remote": True,
-                "remote_status": status,
-            })
-
-    async def _handle_remote_task_result(self, msg: BridgeMessage):
-        """Handle completed/failed task results from Right Brain."""
-        payload = msg.payload
-        task_id = payload.get("task_id", "")
-        agent_id = payload.get("agent_id", task_id)
-        status = payload.get("status", "")
-        results = payload.get("results", {})
-
-        if status == "completed":
-            self.memory.complete_task(agent_id, results)
-            logger.info(f"Remote agent {agent_id} completed: {results.get('summary', '')[:80]}")
-        elif status == "failed":
-            self.memory.complete_task(agent_id, {
-                "summary": results.get("summary", "Remote task failed"),
-                "files_modified": [],
-            })
-            logger.warning(f"Remote agent {agent_id} failed")
+    # _handle_remote_task_status → task_mixin.py
+    # _handle_remote_task_result → task_mixin.py

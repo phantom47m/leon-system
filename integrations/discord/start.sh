@@ -10,11 +10,8 @@ if [ ! -f "$PYTHON" ]; then
     PYTHON="python3"
 fi
 
-# Install dependencies if needed (into venv)
-if ! "$PYTHON" -c "import discord" 2>/dev/null; then
-    echo "[discord] Installing discord.py..."
-    "$PYTHON" -m pip install discord.py aiohttp -q
-fi
+# Install full requirements (discord.py, aiohttp, Pillow, pyscreenshot, psutil)
+"$PYTHON" -m pip install -r "$SCRIPT_DIR/requirements.txt" -q
 
 # Read Discord bot token from user_config.yaml
 DISCORD_TOKEN=$("$PYTHON" -c "
@@ -41,12 +38,31 @@ if [ -z "$DISCORD_TOKEN" ]; then
     exit 1
 fi
 
+# Kill ALL existing discord bot processes (not just the pid file)
+pkill -f "integrations/discord/bot.py" 2>/dev/null
+sleep 1
+
 LEON_TOKEN=$(cat config/api_token.txt 2>/dev/null || echo "")
 
+# Absolute path to config root so dashboard can find projects.yaml
+CONFIG_ROOT="$(cd "$BASE_DIR" && pwd)/config"
+
 ARGS="--token $DISCORD_TOKEN --leon-url http://localhost:3000 --leon-token $LEON_TOKEN"
+ARGS="$ARGS --config-root $CONFIG_ROOT"
 if [ -n "$ALLOWED_USERS" ]; then
     ARGS="$ARGS --allowed-users $ALLOWED_USERS"
 fi
+
+# Optional guild ID from user_config.yaml
+GUILD_ID=$("$PYTHON" -c "
+import yaml
+try:
+    c = yaml.safe_load(open('config/user_config.yaml'))
+    print(c.get('discord_guild_id', '') or '')
+except:
+    print('')
+" 2>/dev/null)
+[ -n "$GUILD_ID" ] && ARGS="$ARGS --guild-id $GUILD_ID"
 
 echo "[discord] Starting Discord bridge..."
 # Export Wayland env vars so the screenshot subprocess can reach the compositor

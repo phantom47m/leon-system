@@ -245,7 +245,7 @@ def run_gui():
 # HEADLESS MODE (Left Brain daemon — no REPL)
 # ═════════════════════════════════════════════════════════
 
-def run_headless():
+def run_headless(enable_voice: bool = True):
     """Left Brain headless mode — bridge + dashboard, no terminal input."""
     import os
     os.environ["LEON_BRAIN_ROLE"] = "unified"
@@ -276,29 +276,32 @@ def run_headless():
     loop.run_until_complete(site.start())
     logger.info("Dashboard running on http://localhost:3000")
 
-    # Start voice system in background thread
-    import threading
-    def start_voice():
-        from core.voice import VoiceSystem
-        from dashboard.server import broadcast_vad_event
-        vloop = asyncio.new_event_loop()
-        asyncio.set_event_loop(vloop)
-        voice_cfg = leon.get_voice_config()
+    # Start voice system in background thread (skip when Discord handles voice)
+    if enable_voice:
+        import threading
+        def start_voice():
+            from core.voice import VoiceSystem
+            from dashboard.server import broadcast_vad_event
+            vloop = asyncio.new_event_loop()
+            asyncio.set_event_loop(vloop)
+            voice_cfg = leon.get_voice_config()
 
-        async def voice_command_handler(text: str) -> str:
-            return await leon.process_user_input(text)
+            async def voice_command_handler(text: str) -> str:
+                return await leon.process_user_input(text)
 
-        async def vad_event_handler(event: str, text: str):
-            await broadcast_vad_event(event, text)
+            async def vad_event_handler(event: str, text: str):
+                await broadcast_vad_event(event, text)
 
-        voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
-        voice.on_vad_event = vad_event_handler
-        leon.set_voice_system(voice)
-        vloop.run_until_complete(voice.start())
+            voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
+            voice.on_vad_event = vad_event_handler
+            leon.set_voice_system(voice)
+            vloop.run_until_complete(voice.start())
 
-    voice_thread = threading.Thread(target=start_voice, daemon=True)
-    voice_thread.start()
-    logger.info("Voice system starting in background...")
+        voice_thread = threading.Thread(target=start_voice, daemon=True)
+        voice_thread.start()
+        logger.info("Voice system starting in background...")
+    else:
+        logger.info("Voice system disabled (--no-voice) — Discord bridge handles voice")
 
     try:
         loop.run_forever()
@@ -371,12 +374,13 @@ Examples:
     parser.add_argument("--full", action="store_true", help="Everything: CLI + voice + dashboard")
     parser.add_argument("--left-brain", action="store_true", dest="left_brain", help="Left Brain mode (main PC)")
     parser.add_argument("--right-brain", action="store_true", dest="right_brain", help="Right Brain mode (homelab)")
+    parser.add_argument("--no-voice", action="store_true", dest="no_voice", help="Disable local mic (use when Discord bridge handles voice)")
     args = parser.parse_args()
 
     if args.right_brain:
         run_right_brain()
     elif args.left_brain:
-        run_headless()
+        run_headless(enable_voice=not args.no_voice)
     elif args.full:
         run_cli(enable_voice=True, enable_dashboard=True)
     elif args.gui:

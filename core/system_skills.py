@@ -4,6 +4,15 @@ Leon System Skills — PC control via natural language
 Provides categorized system control functions that Leon can invoke
 based on AI-classified user intent. All commands use subprocess with
 argument lists (no shell=True) to prevent injection.
+
+Home Assistant skills (ha_set, ha_get, ha_list):
+  - Use the Home Assistant REST API (not Tuya Cloud).
+  - Require HA_URL and HA_TOKEN environment variables.
+  - Designed for HA-managed devices (e.g. ZigBee, Z-Wave, other HA integrations).
+
+See also: tools/lights.py — Tuya Cloud API (tinytuya) for lab ceiling and Geeni devices.
+  These are two intentional parallel hardware backends, not duplicates.
+  lights.py handles Tuya-direct; system_skills.py HA section handles Home Assistant REST.
 """
 
 import asyncio

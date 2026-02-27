@@ -590,9 +590,16 @@ async def api_message(request):
     })
 
     # ── Process through Leon ──
-    if leon and hasattr(leon, "process_user_input"):
+    if leon:
         try:
-            response = await leon.process_user_input(message)
+            # Voice messages use the fast path (single LLM call, no classify step)
+            is_voice = source.startswith("voice:")
+            if is_voice and hasattr(leon, "process_voice_input"):
+                response = await leon.process_voice_input(message)
+            elif hasattr(leon, "process_user_input"):
+                response = await leon.process_user_input(message)
+            else:
+                response = f"[Demo] Received: {message}"
         except Exception as e:
             logger.error(f"API message processing error: {e}")
             response = f"Error processing message: {e}"

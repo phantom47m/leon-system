@@ -27,6 +27,14 @@ import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+
+# Ensure the project root (leon-system/) is on sys.path so that
+# "from integrations.discord.dashboard import ..." works when bot.py
+# is run directly (Python adds the script dir, not the project root).
+_PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import aiohttp
 import discord
@@ -35,6 +43,26 @@ CHANNEL_FILE = "/tmp/leon_discord_channel.json"
 TOKEN_FILE   = "/tmp/leon_discord_bot_token.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [discord] %(levelname)s: %(message)s")
+
+# Filter out RTCP / low-value library noise from our log handler
+class _DropRTCP(logging.Filter):
+    _DROP = ("rtcp packet", "heartbeat", "voice handshake", "timed out connecting to voice")
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage().lower()
+        return not any(kw in msg for kw in self._DROP)
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_DropRTCP())
+
+# Suppress these noisy library loggers entirely
+for _noisy in (
+    "discord.ext.voice_recv.reader",
+    "discord.ext.voice_recv",
+    "discord.gateway",
+):
+    _l = logging.getLogger(_noisy)
+    _l.setLevel(logging.WARNING)
+    _l.propagate = False
 logger = logging.getLogger("leon.discord")
 
 MAX_DISCORD_LENGTH = 1900   # Discord limit is 2000 — leave headroom for splitting
@@ -49,14 +77,25 @@ SCREENSHOT_KEYWORDS = [
 
 
 class AIDiscordBot(discord.Client):
-    def __init__(self, leon_url: str, leon_token: str, allowed_user_ids: list[int], bot_token: str = ""):
+    def __init__(
+        self,
+        leon_url: str,
+        leon_token: str,
+        allowed_user_ids: list[int],
+        bot_token: str = "",
+        config_root: str = "config",
+        guild_id: int = 0,
+    ):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.voice_states = True
         super().__init__(intents=intents)
         self.leon_url = leon_url.rstrip("/")
         self.leon_token = leon_token
         self.allowed_user_ids = set(allowed_user_ids)   # empty = allow all DMs
         self._bot_token = bot_token
+        self._config_root = config_root
+        self._guild_id = guild_id
 
     async def on_ready(self):
         logger.info("Discord bot online as %s (ID: %s)", self.user, self.user.id)
@@ -71,6 +110,52 @@ class AIDiscordBot(discord.Client):
             type=discord.ActivityType.listening,
             name="your commands"
         ))
+        # Initialise the Discord dashboard (server layout + live stats)
+        try:
+            from integrations.discord.dashboard import init_dashboard
+            db = init_dashboard(self, self._config_root)
+            guild = (
+                self.get_guild(self._guild_id) if self._guild_id else None
+            ) or (self.guilds[0] if self.guilds else None)
+            if guild:
+                await db.setup(guild)
+                await db.start_updater()
+                # Point the proactive channel file at #chat so Leon messages land there
+                chat_ch = db._channels.get("chat")
+                if chat_ch:
+                    Path(CHANNEL_FILE).write_text(
+                        json.dumps({"channel_id": str(chat_ch.id), "is_dm": False})
+                    )
+        except Exception as e:
+            logger.error("Dashboard setup failed (non-fatal): %s", e)
+
+        # Initialise voice handler (join/listen/TTS pipeline)
+        try:
+            from integrations.discord.voice_handler import init_voice_manager
+            init_voice_manager(
+                bot=self,
+                config_root=self._config_root,
+                leon_url=self.leon_url,
+                leon_token=self.leon_token,
+                allowed_user_ids=self.allowed_user_ids,
+            )
+            logger.info("Voice: voice manager initialized")
+        except Exception as e:
+            logger.warning("Voice manager init failed (non-fatal): %s", e)
+
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        try:
+            from integrations.discord.voice_handler import get_voice_manager
+            vm = get_voice_manager()
+            if vm:
+                await vm.on_voice_state_update(member, before, after)
+        except Exception as e:
+            logger.debug("Voice state update error: %s", e)
 
     async def on_message(self, message: discord.Message):
         # Ignore own messages
@@ -86,6 +171,21 @@ class AIDiscordBot(discord.Client):
                 await message.reply("You're not authorised to use this bot.")
             return
 
+        # Check if this is the #chat channel
+        is_chat_channel = False
+        try:
+            from integrations.discord.dashboard import get_dashboard
+            db = get_dashboard()
+            if db:
+                chat_ch = db._channels.get("chat")
+                if chat_ch and message.channel.id == chat_ch.id:
+                    is_chat_channel = True
+        except Exception:
+            pass
+
+        if not (is_dm or is_mention or is_chat_channel):
+            return
+
         # Strip bot mention from message text
         text = message.content
         if self.user.mention in text:
@@ -95,14 +195,15 @@ class AIDiscordBot(discord.Client):
 
         msg_lower = text.lower()
 
-        # Save channel so Leon can send proactive updates
-        try:
-            Path(CHANNEL_FILE).write_text(json.dumps({
-                "channel_id": str(message.channel.id),
-                "is_dm": isinstance(message.channel, discord.DMChannel),
-            }))
-        except Exception:
-            pass
+        # Save channel so Leon can send proactive updates (skip if #chat already set on_ready)
+        if not is_chat_channel:
+            try:
+                Path(CHANNEL_FILE).write_text(json.dumps({
+                    "channel_id": str(message.channel.id),
+                    "is_dm": isinstance(message.channel, discord.DMChannel),
+                }))
+            except Exception:
+                pass
 
         # Screenshot request
         if any(kw in msg_lower for kw in SCREENSHOT_KEYWORDS):
@@ -119,7 +220,16 @@ class AIDiscordBot(discord.Client):
                 label = f"All {len(monitors)} monitors" if monitors else "Screen"
 
             if path:
-                await message.reply(f"{label}:", file=discord.File(path, filename="screenshot.png"))
+                try:
+                    from integrations.discord.dashboard import get_dashboard as _gd
+                    _db = _gd()
+                    if _db:
+                        await _db.post_screenshot(path, f"Requested by {message.author.display_name}")
+                        await message.reply("Posted to #screenshots.")
+                    else:
+                        await message.reply(f"{label}:", file=discord.File(path, filename="screenshot.png"))
+                except Exception:
+                    await message.reply(f"{label}:", file=discord.File(path, filename="screenshot.png"))
                 try:
                     os.unlink(path)
                 except OSError:
@@ -165,6 +275,16 @@ class AIDiscordBot(discord.Client):
                     self._trigger_screenshot_repair(str(message.author))
             else:
                 await message.reply(chunk)
+
+        # Play TTS in voice channel if Leon is connected there
+        if clean_response:
+            try:
+                from integrations.discord.voice_handler import get_voice_manager
+                vm = get_voice_manager()
+                if vm:
+                    asyncio.create_task(vm._play_tts(clean_response))
+            except Exception:
+                pass
 
         if not chunks and wants_screenshot:
             path = await _take_screenshot(None)
@@ -483,7 +603,9 @@ def main():
     parser.add_argument("--leon-url",      default="http://localhost:3000",    help="Leon dashboard URL")
     parser.add_argument("--leon-token",    default="",                         help="Leon API bearer token")
     parser.add_argument("--config-dir",    default="config",                   help="Path to Leon config dir")
+    parser.add_argument("--config-root",   default="config",                   help="Path to Leon config root (for dashboard)")
     parser.add_argument("--allowed-users", default="",                         help="Comma-separated Discord user IDs")
+    parser.add_argument("--guild-id",      default=0, type=int,                help="Discord guild ID (auto-detects if omitted)")
     args = parser.parse_args()
 
     leon_token = args.leon_token or _load_token_from_config(args.config_dir)
@@ -504,6 +626,8 @@ def main():
         leon_token=leon_token,
         allowed_user_ids=allowed_ids,
         bot_token=args.token,
+        config_root=args.config_root,
+        guild_id=args.guild_id,
     )
 
     logger.info("Starting Discord bot...")

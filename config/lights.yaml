@@ -1,0 +1,22 @@
+lights:
+  - name: lab ceiling
+    aliases: [office, ceiling, lab, lab light, ceiling light,
+              sealing, lab sealing, sealing light, see-ling, ceiling lamp]
+    type: tuya
+    device_id: eba97b803a9c3cbc14w0pp
+    local_key: ":v]0Dl3<D|2tU!/b"
+    ip: 192.168.68.63
+    version: 3.3
+
+  - name: bedroom
+    aliases: [sabr, bedroom light, my light, my room, room light]
+    type: tuya
+    device_id: ebc72b5fcf16060cc6uloe
+    local_key: ""        # TODO: link Geeni account to Tuya portal to get key
+    ip: ""
+    version: 3.3
+
+  - name: lab walls
+    aliases: [wall lights, walls, wall, magic lantern, lab walls]
+    type: magic_lantern
+    mac: ""              # TODO: run bluetoothctl scan to find MAC address

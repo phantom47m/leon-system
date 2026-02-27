@@ -1,17 +1,48 @@
-# Define your projects here. Each project is a codebase your AI can spawn agents on.
+# Leon's project registry — all codebases Leon can spawn agents on or track.
+# type: local (Agent Zero can edit), railway (deployed, Agent Zero works on local copy)
 
 projects:
+
+  # ── Mobile App ───────────────────────────────────────────────────────────────
   - name: "Motorev"
     path: "/home/deansabr/motorev-v2"
     type: "mobile"
     aliases: ["motorev", "the app", "moto", "mv2", "motorev app", "the motorev app"]
     tech_stack: ["React Native", "Expo", "TypeScript"]
 
+  - name: "Motorev Backend"
+    path: "/home/deansabr/motorev-backend"
+    type: "railway"
+    url: "https://railway.app"
+    aliases: ["motorev backend", "motorev api", "moto backend", "moto api"]
+    tech_stack: ["Node.js", "Express", "MySQL", "JWT"]
+
+  - name: "Motorev YouTube Proxy"
+    path: "/home/deansabr/motorev-youtube-proxy"
+    type: "railway"
+    aliases: ["youtube proxy", "motorev proxy", "yt proxy"]
+    tech_stack: ["Node.js", "Vercel Functions"]
+
+  # ── Business ─────────────────────────────────────────────────────────────────
+  - name: "Vape Shop"
+    path: "/home/deansabr/vape-shop"
+    type: "railway"
+    url: "https://shopspark8.com"
+    aliases: ["vape shop", "spark8", "spark 8", "the shop", "shopspark8"]
+    tech_stack: ["Next.js 14", "TypeScript", "Prisma", "PostgreSQL", "Tailwind"]
+    context: |
+      SPARK 8 Smoke Shop & Lounge — 2 locations (Clearwater + St. Pete).
+      Live at shopspark8.com. Railway auto-deploys on git push.
+      GitHub: https://github.com/47-Industries/vape-shop
+      Admin panel at /admin. Images stored as base64 in PostgreSQL.
+      Always git push after changes — Railway auto-deploys.
+
+  # ── Infrastructure ───────────────────────────────────────────────────────────
   - name: "Leon System"
     path: "/home/deansabr/leon-system"
-    type: "python"
+    type: "local"
     aliases: ["leon", "leon system", "the ai", "yourself", "your own code", "leon-system"]
-    tech_stack: ["Python", "aiohttp", "asyncio"]
+    tech_stack: ["Python", "aiohttp", "asyncio", "discord.py"]
 
   - name: "macOS VM"
     path: "/home/deansabr/macos-vm"
@@ -20,11 +51,10 @@ projects:
               "ios simulator", "virtual machine", "mac", "system", "machine", "pc"]
     tech_stack: ["QEMU", "KVM", "macOS", "bash", "linux"]
     context: |
-      macOS VM on Linux using QEMU/KVM via OSX-KVM (github.com/kholia/OSX-KVM).
-      Host: Pop!_OS Linux, Intel i7-11700F (VT-x on), /dev/kvm exists, 16GB RAM, 1.7TB free.
-      Goal: Running macOS Sonoma VM accessible via VNC (port 5900) for Xcode + iOS Simulator.
-      All work goes in /home/deansabr/macos-vm/. Tasks are shell commands, not code edits.
-      Agents have full sudo access and internet connectivity.
+      macOS Sonoma VM on Linux using QEMU/KVM via OSX-KVM.
+      Host: Pop!_OS Linux, Intel i7-11700F, 16GB RAM, 1.7TB free.
+      VM accessible via VNC port 5900 for Xcode + iOS Simulator.
+      All work goes in /home/deansabr/macos-vm/.
 
 default_preferences:
   coding_style: "clean, well-commented"

@@ -184,7 +184,10 @@ class AgentZeroRunner:
         self._active[job_id] = job
 
         job.log(f"Job created — task: {task_desc[:80]}")
-        await self._send_discord(f"🔧 **Job {job_id} started**\n> {task_desc[:120]}\n> Project: {project_name or 'unknown'} | Max runtime: {self.max_runtime//60}min")
+        await self._send_discord(
+            f"🔧 **Job {job_id} started**\n> {task_desc[:120]}\n> Project: {project_name or 'unknown'} | Max runtime: {self.max_runtime//60}min",
+            channel_type="jobs",
+        )
 
         try:
             job.status = "running"
@@ -208,10 +211,10 @@ class AgentZeroRunner:
             job.status = "done"
             job.log(f"Job complete — elapsed {job.elapsed_min:.1f}min")
 
-            # 5. Final Discord notification
+            # 5. Final Discord notification — completion with diff goes to #patches
             diff_lines = self._read_diff_preview(artifacts.get("diff_path"))
             final_msg = self._format_completion(job_id, summary, artifacts, diff_lines)
-            await self._send_discord(final_msg)
+            await self._send_discord(final_msg, channel_type="patches")
 
             return {
                 "job_id":      job_id,
@@ -227,14 +230,20 @@ class AgentZeroRunner:
             job.status = "timeout"
             job.log(f"TIMEOUT after {self.max_runtime//60}min")
             await self._kill_container()
-            await self._send_discord(f"⏱️ **Job {job_id} timed out** after {self.max_runtime//60}min — container restarted.")
+            await self._send_discord(
+                f"⏱️ **Job {job_id} timed out** after {self.max_runtime//60}min — container restarted.",
+                channel_type="jobs",
+            )
             return {"job_id": job_id, "status": "timeout", "summary": "Job timed out."}
 
         except Exception as exc:
             job.status = "failed"
             job.log(f"ERROR: {exc}")
             logger.exception("Agent Zero job %s failed", job_id)
-            await self._send_discord(f"❌ **Job {job_id} failed**: {str(exc)[:200]}")
+            await self._send_discord(
+                f"❌ **Job {job_id} failed**: {str(exc)[:200]}",
+                channel_type="jobs",
+            )
             return {"job_id": job_id, "status": "failed", "summary": str(exc)[:200]}
 
         finally:
@@ -251,7 +260,10 @@ class AgentZeroRunner:
             job.log("KILLED by user")
         killed = await self._kill_container()
         logger.warning("Kill switch triggered for job %s — container stopped: %s", job_id, killed)
-        await self._send_discord(f"🛑 **Job {job_id} killed** — container stopped.")
+        await self._send_discord(
+            f"🛑 **Job {job_id} killed** — container stopped.",
+            channel_type="jobs",
+        )
         return killed
 
     async def _kill_container(self) -> bool:
@@ -431,7 +443,8 @@ Begin immediately. Make reasonable assumptions and document them in REPORT.md.
                             if now - last_discord_update >= self.progress_every and content:
                                 await self._send_discord(
                                     f"⏳ **{job_id}** ({job.elapsed_min:.0f}min elapsed)\n"
-                                    f"> {content[:200]}"
+                                    f"> {content[:200]}",
+                                    channel_type="jobs",
                                 )
                                 last_discord_update = now
 
@@ -524,8 +537,29 @@ Begin immediately. Make reasonable assumptions and document them in REPORT.md.
 
     # ── Discord notifications ──────────────────────────────────────────────────
 
-    async def _send_discord(self, text: str):
-        """Mirror Leon's _send_discord_message pattern."""
+    async def _send_discord(self, text: str, channel_type: str = "jobs"):
+        """
+        Send a notification to Discord.
+
+        channel_type:
+          "jobs"    → #jobs channel (start, progress, timeout, fail, kill)
+          "patches" → #patches channel (completed job diffs)
+
+        Tries the dashboard singleton first; falls back to raw HTTP.
+        """
+        try:
+            from integrations.discord.dashboard import get_dashboard
+            db = get_dashboard()
+            if db:
+                if channel_type == "patches":
+                    await db.post_to_patches(text)
+                else:
+                    await db.post_to_jobs(text)
+                return
+        except Exception:
+            pass
+
+        # Legacy HTTP fallback (used when dashboard not running)
         try:
             if not _DISCORD_CHANNEL_FILE.exists() or not _DISCORD_TOKEN_FILE.exists():
                 return

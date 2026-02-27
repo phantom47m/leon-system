@@ -24,12 +24,14 @@ if [ -f "venv/bin/activate" ]; then
 fi
 
 MODE="${1:---left-brain}"
-echo "Starting Leon $MODE..."
+# When running with Discord bridge, disable local mic to avoid two voice systems
+NO_VOICE="--no-voice"
+echo "Starting Leon $MODE $NO_VOICE..."
 # Try higher CPU priority (requires root on some systems — falls back gracefully)
 if nice -n -5 true 2>/dev/null; then
-    nice -n -5 python3 main.py $MODE >> "$LOG" 2>&1 &
+    nice -n -5 python3 main.py $MODE $NO_VOICE >> "$LOG" 2>&1 &
 else
-    python3 main.py $MODE >> "$LOG" 2>&1 &
+    python3 main.py $MODE $NO_VOICE >> "$LOG" 2>&1 &
 fi
 sleep 4
 

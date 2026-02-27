@@ -247,7 +247,7 @@ class AnthropicAPI:
             logger.error(f"Ollama request failed: {e}")
             return f"Ollama error: {e}"
 
-    async def _claude_cli_request(self, prompt: str, model: str = "claude-haiku-4-5-20251001") -> str:
+    async def _claude_cli_request(self, prompt: str, model: str = "claude-sonnet-4-6") -> str:
         """Send a prompt through claude --print using the subscription auth."""
         # Strip all Claude Code session env vars so the subprocess doesn't think it's nested
         _strip = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
@@ -355,12 +355,15 @@ class AnthropicAPI:
     async def analyze_json(self, prompt: str, image_b64: str = None, smart: bool = False) -> Optional[dict]:
         """Request that expects JSON back — parses it automatically.
 
-        smart=True uses the larger, more capable model (for browser agent tasks).
+        Always uses Groq when available (< 1s vs 5s Claude CLI) — analysis/routing
+        doesn't need Claude quality, just fast JSON classification.
+        smart=True uses the larger 70b model.
         """
-        if smart and self._auth_method == "groq":
+        if self._groq_key:
+            # Groq is always faster for routing/analysis — use it regardless of primary auth
             raw = await self._groq_request(
                 [{"role": "user", "content": prompt}],
-                model=GROQ_AGENT_MODEL,
+                model=GROQ_AGENT_MODEL,  # 70b: reliable JSON output, still < 1s on Groq
             )
         else:
             raw = await self.quick_request(prompt, image_b64=image_b64)
