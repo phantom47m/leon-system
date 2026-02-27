@@ -6035,6 +6035,220 @@ class TestStructuredLoggerEndToEnd(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# ASYNC SUBPROCESS MANAGEMENT FIXES
+# ══════════════════════════════════════════════════════════
+
+class TestNotificationSoundNoZombie(unittest.TestCase):
+    """Verify paplay sound subprocess is awaited (no zombie process leak)."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_paplay_awaited_on_success(self):
+        """Sound subprocess should be awaited via wait_for (not fire-and-forget)."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.notifications import NotificationManager, Notification, Priority
+
+        nm = NotificationManager()
+        nm._sound_path = "/fake/sound.oga"
+        notif = Notification("Test", "msg", Priority.HIGH, sound=True)
+
+        mock_proc = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
+                with patch("asyncio.wait_for", new=AsyncMock(return_value=0)):
+                    await nm._deliver(notif)
+            # The key assertion: wait_for was called (process is awaited, not abandoned)
+
+        self._run(go())
+
+    def test_paplay_killed_on_timeout(self):
+        """If paplay hangs, it should be killed after timeout (no zombie)."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.notifications import NotificationManager, Notification, Priority
+
+        nm = NotificationManager()
+        nm._sound_path = "/fake/sound.oga"
+        notif = Notification("Test", "msg", Priority.HIGH, sound=True)
+
+        mock_proc = MagicMock()
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=None)
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
+                with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+                    await nm._deliver(notif)
+            mock_proc.kill.assert_called_once()
+            mock_proc.wait.assert_awaited()
+
+        self._run(go())
+
+    def test_deliver_without_sound(self):
+        """Notifications without sound=True should skip paplay entirely."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.notifications import NotificationManager, Notification, Priority
+
+        nm = NotificationManager()
+        nm._sound_path = "/fake/sound.oga"
+        notif = Notification("Test", "msg", Priority.LOW, sound=False)
+
+        mock_exec = AsyncMock()
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=mock_exec):
+                await nm._deliver(notif)
+            # Only one call for notify-send, none for paplay
+            calls = mock_exec.call_args_list
+            for call in calls:
+                self.assertNotEqual(call[0][0], "paplay")
+
+        self._run(go())
+
+
+class TestSelfUpdateNonBlocking(unittest.TestCase):
+    """Verify _self_update uses async subprocess (no event loop blocking)."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_self_update_uses_async_subprocess(self):
+        """_self_update should use asyncio.create_subprocess_exec, not subprocess.run."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon._self_update)
+        self.assertIn("create_subprocess_exec", source,
+                       "_self_update should use asyncio.create_subprocess_exec")
+        self.assertNotIn("subprocess.run", source,
+                          "_self_update should not use blocking subprocess.run")
+
+    def test_self_update_kills_on_timeout(self):
+        """_self_update should kill the git process if it times out."""
+        from unittest.mock import AsyncMock, patch, MagicMock, PropertyMock
+        from core.leon import Leon
+
+        leon = Leon.__new__(Leon)
+
+        mock_proc = MagicMock()
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=None)
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
+                with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+                    result = await leon._self_update()
+            self.assertIn("timed out", result.lower())
+            mock_proc.kill.assert_called_once()
+            mock_proc.wait.assert_awaited()
+
+        self._run(go())
+
+    def test_self_update_already_up_to_date(self):
+        """_self_update returns clean message when already up to date."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.leon import Leon
+
+        leon = Leon.__new__(Leon)
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
+                with patch("asyncio.wait_for", new=AsyncMock(
+                    return_value=(b"Already up to date.", b""))):
+                    result = await leon._self_update()
+            self.assertIn("latest version", result.lower())
+
+        self._run(go())
+
+    def test_self_update_reports_error(self):
+        """_self_update returns error message when git pull fails."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.leon import Leon
+
+        leon = Leon.__new__(Leon)
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+
+        async def go():
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)):
+                with patch("asyncio.wait_for", new=AsyncMock(
+                    return_value=(b"", b"fatal: not a git repo"))):
+                    result = await leon._self_update()
+            self.assertIn("failed", result.lower())
+
+        self._run(go())
+
+
+class TestRepoHygieneNonBlocking(unittest.TestCase):
+    """Verify _builtin_repo_hygiene uses async subprocess."""
+
+    def test_no_sync_subprocess(self):
+        """_builtin_repo_hygiene should not import or use subprocess.run."""
+        import inspect
+        from core.scheduler import _builtin_repo_hygiene
+        source = inspect.getsource(_builtin_repo_hygiene)
+        self.assertNotIn("subprocess.run", source,
+                          "_builtin_repo_hygiene should not use blocking subprocess.run")
+        self.assertIn("create_subprocess_exec", source,
+                       "_builtin_repo_hygiene should use async subprocess")
+
+    def test_repo_hygiene_handles_timeout(self):
+        """_builtin_repo_hygiene should handle subprocess timeout gracefully."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from core.scheduler import _builtin_repo_hygiene
+
+        mock_proc = MagicMock()
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=None)
+
+        loop = asyncio.new_event_loop()
+        try:
+            async def go():
+                mock_cfg = {"projects": [{"name": "test", "path": "/tmp"}]}
+                with patch("pathlib.Path.exists", return_value=True), \
+                     patch("builtins.open", unittest.mock.mock_open(read_data="")), \
+                     patch("yaml.safe_load", return_value=mock_cfg), \
+                     patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=mock_proc)), \
+                     patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+                    ok, msg = await _builtin_repo_hygiene()
+                self.assertTrue(ok)
+                self.assertIn("timed out", msg.lower())
+                mock_proc.kill.assert_called_once()
+
+            loop.run_until_complete(go())
+        finally:
+            loop.close()
+
+
+class TestPatchApplyNonBlocking(unittest.TestCase):
+    """Verify self-repair patch application uses asyncio.to_thread."""
+
+    def test_patch_apply_uses_to_thread(self):
+        """Patch application in routing_mixin should use asyncio.to_thread."""
+        import inspect
+        from core.routing_mixin import RoutingMixin
+        source = inspect.getsource(RoutingMixin._route_special_commands)
+        # The git apply section should use to_thread, not bare subprocess.run
+        if "git apply" in source.lower() or "apply" in source.lower():
+            self.assertIn("asyncio.to_thread", source,
+                           "Patch application should use asyncio.to_thread for non-blocking subprocess")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

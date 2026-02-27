@@ -301,7 +301,12 @@ class NotificationManager:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                # Don't await — fire and forget
+                # Await with timeout to prevent zombie processes
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.debug("paplay sound timed out — killed")
             except Exception:
                 pass
 

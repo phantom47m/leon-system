@@ -468,8 +468,6 @@ async def _builtin_daily_summary(leon=None) -> tuple[bool, str]:
 
 async def _builtin_repo_hygiene(leon=None) -> tuple[bool, str]:
     """Lightweight weekly hygiene: stale branches + outdated deps check."""
-    import subprocess
-
     results = []
     cfg_path = Path("config/projects.yaml")
     if not cfg_path.exists():
@@ -483,12 +481,20 @@ async def _builtin_repo_hygiene(leon=None) -> tuple[bool, str]:
         if not path.exists() or not (path / ".git").exists():
             continue
         try:
-            # List branches older than 30 days with no recent commits
-            r = subprocess.run(
-                ["git", "branch", "--sort=-committerdate", "--format=%(refname:short)"],
-                cwd=path, capture_output=True, text=True, timeout=5,
+            proc = await asyncio.create_subprocess_exec(
+                "git", "branch", "--sort=-committerdate", "--format=%(refname:short)",
+                cwd=str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            branches = r.stdout.strip().split("\n")[:10]
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                results.append(f"{p['name']}: git branch timed out")
+                continue
+            branches = stdout.decode().strip().split("\n")[:10]
             results.append(f"{p['name']}: {len(branches)} branches")
         except Exception as e:
             results.append(f"{p['name']}: git check failed — {e}")

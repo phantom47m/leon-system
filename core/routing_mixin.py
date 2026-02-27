@@ -250,13 +250,19 @@ class RoutingMixin:
             if not patches:
                 return "No self-repair patch found. Run a self-repair first."
             patch = patches[0]
-            result = subprocess.run(
+            # Non-blocking: run git apply in a thread to avoid stalling the event loop
+            check_result = await asyncio.to_thread(
+                subprocess.run,
                 ["git", "apply", "--check", patch],
-                cwd=leon_path, capture_output=True, text=True
+                cwd=leon_path, capture_output=True, text=True, timeout=15,
             )
-            if result.returncode != 0:
-                return f"Patch check failed: {result.stderr[:200]}\nApply manually: `git apply {patch}`"
-            subprocess.run(["git", "apply", patch], cwd=leon_path, check=True)
+            if check_result.returncode != 0:
+                return f"Patch check failed: {check_result.stderr[:200]}\nApply manually: `git apply {patch}`"
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "apply", patch],
+                cwd=leon_path, check=True, capture_output=True, text=True, timeout=15,
+            )
             await self._send_discord_message("✅ Patch applied. Restarting Leon in 3 seconds...", channel="chat")
             create_safe_task(self._delayed_restart(3), name="delayed-restart")
             return "Patch applied. Restarting now."

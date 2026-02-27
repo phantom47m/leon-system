@@ -1084,17 +1084,24 @@ Vision: {vision_desc}
     # _strip_sir               → response_mixin.py
 
     async def _self_update(self) -> str:
-        """Run git pull and restart the process."""
-        import subprocess
+        """Run git pull and restart the process (non-blocking)."""
         try:
-            result = subprocess.run(
-                ["git", "pull"],
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull",
                 cwd=str(Path(__file__).parent.parent),
-                capture_output=True, text=True, timeout=60
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            output = result.stdout.strip()
-            if result.returncode != 0:
-                return f"Update failed — git pull returned an error:\n{result.stderr.strip() or output}"
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return "Update failed — git pull timed out after 60 seconds."
+            output = stdout.decode().strip()
+            if proc.returncode != 0:
+                err = stderr.decode().strip()
+                return f"Update failed — git pull returned an error:\n{err or output}"
             if "Already up to date" in output:
                 return "Already on the latest version. Nothing to update."
             # Restart the process
