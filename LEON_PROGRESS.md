@@ -139,7 +139,7 @@
 ### Leon System
 - [x] Sandbox/confirmation for `python_exec` (Issue #4 from audit)
 - [ ] Evaluate `--dangerously-skip-permissions` alternatives (Issue #5)
-- [ ] Fix event loop threading model (Issue #7)
+- [x] Fix event loop threading model (Issue #7)
 - [ ] Fix SSL cert verification for bridge (Issue #12 — generate self-signed cert)
 - [x] Add keyword pre-router for system skills (Issue #20)
 - [ ] Refactor `leon.py` into smaller modules (Issue #19)
@@ -148,3 +148,5 @@
 **2026-02-27 — Issue #4 fixed:** `python_exec` now blocks 10 dangerous module imports (subprocess, shutil, ctypes, socket, etc.) and 15 dangerous patterns (os.system, os.remove, __import__, open, eval, exec, compile) before execution; 33 new security tests added.
 
 **2026-02-27 — Issue #7 hardened:** `python_exec` sandbox hardened — subprocess env stripped to {PATH, HOME, LANG} (no API keys/tokens exposed), cwd set to /tmp (no project file access), denylist expanded to 34 patterns (adds os.environ, os.path, os.listdir, os.walk, builtins, getattr, globals, locals, breakpoint) and 13 blocked imports (adds pathlib, tempfile, webbrowser); 23 new sandbox tests added.
+
+**2026-02-27 — Issue #7 fixed:** Event loop threading model overhauled — daemon threads (dashboard, voice) now expose event loop references via `_DaemonHandle` dataclass, enabling graceful shutdown via `call_soon_threadsafe(loop.stop)` instead of abrupt daemon thread termination; `_stop_daemon()` helper joins threads with timeout; dashboard runner cleanup runs in thread's finally block; CLI/headless/GUI modes all perform proper daemon shutdown on exit; removed redundant `flush_if_dirty()` call (already handled by `leon.stop()`); all event loops now closed after use to prevent resource leaks; 9 new tests for daemon lifecycle.

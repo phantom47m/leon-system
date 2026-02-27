@@ -17,7 +17,9 @@ import sys
 import logging
 import asyncio
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 # Ensure we're running from the project root
 ROOT = Path(__file__).parent
@@ -50,44 +52,98 @@ logger = logging.getLogger("leon")
 
 
 # ═════════════════════════════════════════════════════════
-# SHARED HELPERS
+# SHARED HELPERS — daemon thread lifecycle
 # ═════════════════════════════════════════════════════════
 
-def _start_dashboard_thread(leon) -> threading.Thread:
+@dataclass
+class _DaemonHandle:
+    """Bundles a daemon thread with its event loop for graceful shutdown."""
+    thread: threading.Thread
+    loop: Optional[asyncio.AbstractEventLoop] = field(default=None)
+    _loop_ready: threading.Event = field(default_factory=threading.Event)
+
+    def wait_loop_ready(self, timeout: float = 10.0):
+        """Block until the daemon thread has set its event loop."""
+        self._loop_ready.wait(timeout)
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self._loop_ready.set()
+
+
+def _stop_daemon(handle: Optional[_DaemonHandle], timeout: float = 5.0):
+    """Gracefully stop a daemon thread's event loop, then join the thread.
+
+    Uses call_soon_threadsafe to safely stop the loop from the main thread.
+    Falls back to a timed join if the loop is already closed or None.
+    """
+    if handle is None:
+        return
+    if handle.loop is not None and handle.loop.is_running():
+        try:
+            handle.loop.call_soon_threadsafe(handle.loop.stop)
+        except RuntimeError:
+            pass  # loop already closed
+    handle.thread.join(timeout=timeout)
+    if handle.thread.is_alive():
+        logger.warning(f"Daemon thread {handle.thread.name} did not stop within {timeout}s")
+
+
+def _start_dashboard_thread(leon) -> _DaemonHandle:
     """Start the dashboard server in a background daemon thread.
 
     Shared by run_cli() and run_gui() to avoid code duplication.
-    Returns the thread so callers can join() for graceful shutdown.
+    Returns a _DaemonHandle for graceful shutdown.
     """
+    handle = _DaemonHandle(thread=threading.Thread(name="dashboard", daemon=True, target=lambda: None))
+
     def _run():
         from dashboard.server import create_app
         from aiohttp import web
         dash_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(dash_loop)
+        handle.set_loop(dash_loop)
         app = create_app(leon_core=leon)
         runner = web.AppRunner(app)
         dash_loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, "127.0.0.1", 3000)
         dash_loop.run_until_complete(site.start())
-        dash_loop.run_forever()
+        try:
+            dash_loop.run_forever()
+        finally:
+            dash_loop.run_until_complete(runner.cleanup())
+            dash_loop.close()
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    handle.thread = threading.Thread(target=_run, name="dashboard", daemon=True)
+    handle.thread.start()
     logger.info("🧠 Brain Dashboard: http://localhost:3000")
-    return thread
+    return handle
 
 
-def _start_voice_thread(leon) -> threading.Thread:
+def _start_voice_thread(leon) -> _DaemonHandle:
     """Start the voice system in a background daemon thread.
 
     Shared by run_cli() and run_gui() to avoid code duplication.
-    Returns the thread so callers can join() for graceful shutdown.
+    Returns a _DaemonHandle for graceful shutdown.
     """
+    handle = _DaemonHandle(thread=threading.Thread(name="voice", daemon=True, target=lambda: None))
+
     def _run():
         from core.voice import VoiceSystem
         from dashboard.server import broadcast_vad_event
 
+        main_loop = leon.main_loop  # Set by leon.start()
+
         async def voice_command_handler(text: str) -> str:
+            # Dispatch to Leon's main event loop for thread safety —
+            # ensures fire-and-forget tasks (reminders, memory extraction)
+            # run on the correct loop and aren't lost.
+            if main_loop and not main_loop.is_closed():
+                future = asyncio.run_coroutine_threadsafe(
+                    leon.process_user_input(text), main_loop
+                )
+                return await asyncio.wrap_future(future)
+            # Fallback: run on voice thread's own loop (degraded mode)
             return await leon.process_user_input(text)
 
         async def vad_event_handler(event: str, text: str):
@@ -95,17 +151,21 @@ def _start_voice_thread(leon) -> threading.Thread:
 
         vloop = asyncio.new_event_loop()
         asyncio.set_event_loop(vloop)
+        handle.set_loop(vloop)
         voice_cfg = leon.get_voice_config()
         voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
         voice.on_vad_event = vad_event_handler
         leon.set_voice_system(voice)
-        vloop.run_until_complete(voice.start())
+        try:
+            vloop.run_until_complete(voice.start())
+        finally:
+            vloop.close()
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
+    handle.thread = threading.Thread(target=_run, name="voice", daemon=True)
+    handle.thread.start()
     ai_name = getattr(leon, 'ai_name', 'Leon')
     logger.info(f"🎤 Voice system active — say 'Hey {ai_name}'")
-    return thread
+    return handle
 
 
 # ═════════════════════════════════════════════════════════
@@ -113,7 +173,14 @@ def _start_voice_thread(leon) -> threading.Thread:
 # ═════════════════════════════════════════════════════════
 
 def run_cli(enable_voice=False, enable_dashboard=False):
-    """Terminal mode with optional voice and dashboard."""
+    """Terminal mode with optional voice and dashboard.
+
+    The event loop runs continuously in the main thread so that
+    fire-and-forget tasks (reminders, memory extraction, night mode
+    dispatch, awareness loop) execute promptly.  The blocking input()
+    call is moved to a background thread and dispatches commands to
+    the main loop via run_coroutine_threadsafe().
+    """
     from core.leon import Leon
 
     leon = Leon(str(ROOT / "config" / "settings.yaml"))
@@ -121,13 +188,15 @@ def run_cli(enable_voice=False, enable_dashboard=False):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(leon.start())
 
-    # ── Start dashboard server in background ──
-    if enable_dashboard:
-        _start_dashboard_thread(leon)
+    # ── Start daemon threads (keep handles for graceful shutdown) ──
+    dash_handle: Optional[_DaemonHandle] = None
+    voice_handle: Optional[_DaemonHandle] = None
 
-    # ── Start voice system in background ──
+    if enable_dashboard:
+        dash_handle = _start_dashboard_thread(leon)
+
     if enable_voice:
-        _start_voice_thread(leon)
+        voice_handle = _start_voice_thread(leon)
 
     # ── Print banner ──
     print()
@@ -141,53 +210,79 @@ def run_cli(enable_voice=False, enable_dashboard=False):
     print("╚════════════════════════════════════════════╝")
     print()
 
-    # ── Main input loop ──
+    # ── Input loop runs in a background thread ──
+    # This keeps the main event loop free to process async tasks
+    # (reminders, night mode dispatch, awareness, memory extraction)
+    # between user inputs.
+
+    def _input_loop():
+        """Blocking input loop — runs in a daemon thread."""
+        try:
+            while True:
+                try:
+                    user_input = input("You > ").strip()
+                except EOFError:
+                    break
+
+                if not user_input:
+                    continue
+                if user_input.lower() in ("quit", "exit", "q"):
+                    break
+
+                if user_input.lower() == "status":
+                    # get_status() is a synchronous read-only method — safe from any thread
+                    status = leon.get_status()
+                    print(f"\n  Active agents: {status['active_agents']}")
+                    tasks = status["tasks"]
+                    print(f"  Active tasks:  {tasks['active']}")
+                    print(f"  Queued tasks:  {tasks['queued']}")
+                    print(f"  Completed:     {tasks['completed']}")
+                    for t in tasks.get("active_tasks", []):
+                        print(f"    • {t['description'][:60]} ({t['project']})")
+                    v = status.get("vision", {})
+                    if v.get("active"):
+                        print(f"  Vision:        ACTIVE — {v.get('scene', 'N/A')}")
+                        print(f"                 People: {v.get('people_count', 0)} | Objects: {len(v.get('objects', []))}")
+                    else:
+                        print(f"  Vision:        INACTIVE")
+                    sec = status.get("security", {})
+                    print(f"  Vault:         {'UNLOCKED' if sec.get('vault_unlocked') else 'LOCKED'}")
+                    print(f"  Auth:          {'OK' if sec.get('authenticated') else 'REQUIRED'}")
+                    print(f"  3D Printer:    {'CONNECTED' if status.get('printer') else 'NOT CONFIGURED'}")
+                    print()
+                    continue
+
+                # Dispatch async command to the main event loop
+                future = asyncio.run_coroutine_threadsafe(
+                    leon.process_user_input(user_input), loop
+                )
+                try:
+                    response = future.result(timeout=300)  # 5 min timeout
+                    print(f"\nLeon > {response}\n")
+                except Exception as e:
+                    print(f"\nLeon > Error: {e}\n")
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            # Signal the main event loop to stop
+            loop.call_soon_threadsafe(loop.stop)
+
+    input_thread = threading.Thread(target=_input_loop, name="cli-input", daemon=True)
+    input_thread.start()
+
+    # ── Main event loop runs continuously in the main thread ──
     try:
-        while True:
-            try:
-                user_input = input("You > ").strip()
-            except EOFError:
-                break
-
-            if not user_input:
-                continue
-            if user_input.lower() in ("quit", "exit", "q"):
-                break
-
-            if user_input.lower() == "status":
-                status = leon.get_status()
-                print(f"\n  Active agents: {status['active_agents']}")
-                tasks = status["tasks"]
-                print(f"  Active tasks:  {tasks['active']}")
-                print(f"  Queued tasks:  {tasks['queued']}")
-                print(f"  Completed:     {tasks['completed']}")
-                for t in tasks.get("active_tasks", []):
-                    print(f"    • {t['description'][:60]} ({t['project']})")
-                # Vision
-                v = status.get("vision", {})
-                if v.get("active"):
-                    print(f"  Vision:        ACTIVE — {v.get('scene', 'N/A')}")
-                    print(f"                 People: {v.get('people_count', 0)} | Objects: {len(v.get('objects', []))}")
-                else:
-                    print(f"  Vision:        INACTIVE")
-                # Security
-                sec = status.get("security", {})
-                print(f"  Vault:         {'UNLOCKED' if sec.get('vault_unlocked') else 'LOCKED'}")
-                print(f"  Auth:          {'OK' if sec.get('authenticated') else 'REQUIRED'}")
-                # Printer
-                print(f"  3D Printer:    {'CONNECTED' if status.get('printer') else 'NOT CONFIGURED'}")
-                print()
-                continue
-
-            response = loop.run_until_complete(leon.process_user_input(user_input))
-            print(f"\nLeon > {response}\n")
-
+        loop.run_forever()
     except KeyboardInterrupt:
         print("\n")
 
-    # Graceful shutdown — flush any pending memory writes before stopping
-    leon.memory.flush_if_dirty()
+    # Graceful shutdown — stop daemon threads first, then Leon core
+    # (leon.stop() already calls memory.save(force=True) internally)
+    _stop_daemon(voice_handle)
+    _stop_daemon(dash_handle)
     loop.run_until_complete(leon.stop())
+    loop.close()
     print("Leon stopped. See you next time!")
 
 
@@ -218,24 +313,48 @@ def run_gui():
             )
             self.leon_core = None
             self.win = None
+            self._leon_loop: Optional[asyncio.AbstractEventLoop] = None
+            self._dash_handle: Optional[_DaemonHandle] = None
+            self._voice_handle: Optional[_DaemonHandle] = None
 
         def do_activate(self):
             if not self.win:
                 self.leon_core = Leon(str(ROOT / "config" / "settings.yaml"))
 
-                # Start Leon core
+                # Start Leon core in a daemon thread with its own event loop
+                leon_ready = threading.Event()
                 def start_leon():
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
+                    self._leon_loop = loop
                     loop.run_until_complete(self.leon_core.start())
-                threading.Thread(target=start_leon, daemon=True).start()
+                    leon_ready.set()
+                    loop.run_forever()
+                threading.Thread(target=start_leon, name="leon-core", daemon=True).start()
+                leon_ready.wait(timeout=15)
 
                 # Start dashboard and voice (shared helpers)
-                _start_dashboard_thread(self.leon_core)
-                _start_voice_thread(self.leon_core)
+                self._dash_handle = _start_dashboard_thread(self.leon_core)
+                self._voice_handle = _start_voice_thread(self.leon_core)
 
                 self.win = LeonWindow(self, self.leon_core)
             self.win.present()
+
+        def do_shutdown(self):
+            """Clean up daemon threads and Leon core when GTK app exits."""
+            _stop_daemon(self._voice_handle)
+            _stop_daemon(self._dash_handle)
+            if self._leon_loop and self.leon_core:
+                import concurrent.futures
+                future = asyncio.run_coroutine_threadsafe(
+                    self.leon_core.stop(), self._leon_loop
+                )
+                try:
+                    future.result(timeout=10)
+                except (concurrent.futures.TimeoutError, Exception) as e:
+                    logger.warning(f"Leon core shutdown error: {e}")
+                self._leon_loop.call_soon_threadsafe(self._leon_loop.stop)
+            super().do_shutdown()
 
     app = LeonApp()
     app.run(sys.argv)
@@ -277,28 +396,9 @@ def run_headless(enable_voice: bool = True):
     logger.info("Dashboard running on http://localhost:3000")
 
     # Start voice system in background thread (skip when Discord handles voice)
+    voice_handle: Optional[_DaemonHandle] = None
     if enable_voice:
-        import threading
-        def start_voice():
-            from core.voice import VoiceSystem
-            from dashboard.server import broadcast_vad_event
-            vloop = asyncio.new_event_loop()
-            asyncio.set_event_loop(vloop)
-            voice_cfg = leon.get_voice_config()
-
-            async def voice_command_handler(text: str) -> str:
-                return await leon.process_user_input(text)
-
-            async def vad_event_handler(event: str, text: str):
-                await broadcast_vad_event(event, text)
-
-            voice = VoiceSystem(on_command=voice_command_handler, config=voice_cfg, name=getattr(leon, 'ai_name', 'leon'))
-            voice.on_vad_event = vad_event_handler
-            leon.set_voice_system(voice)
-            vloop.run_until_complete(voice.start())
-
-        voice_thread = threading.Thread(target=start_voice, daemon=True)
-        voice_thread.start()
+        voice_handle = _start_voice_thread(leon)
         logger.info("Voice system starting in background...")
     else:
         logger.info("Voice system disabled (--no-voice) — Discord bridge handles voice")
@@ -308,8 +408,10 @@ def run_headless(enable_voice: bool = True):
     except KeyboardInterrupt:
         print("\n")
     finally:
+        _stop_daemon(voice_handle)
         loop.run_until_complete(runner.cleanup())
         loop.run_until_complete(leon.stop())
+        loop.close()
         print("Left Brain stopped.")
 
 
@@ -343,6 +445,7 @@ def run_right_brain():
         print("\n")
     finally:
         loop.run_until_complete(right.stop())
+        loop.close()
         print("Right Brain stopped.")
 
 
