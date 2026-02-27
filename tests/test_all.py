@@ -7077,6 +7077,298 @@ class TestModelRouterPersistentClient(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# CONVERSATION MIXIN (Issue #19 extraction)
+# ══════════════════════════════════════════════════════════
+
+class TestConversationMixin(unittest.TestCase):
+    """Tests for core/conversation_mixin.py — extracted from leon.py."""
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def _make_leon(self):
+        from unittest.mock import MagicMock, AsyncMock
+        from core.leon import Leon
+        leon = Leon.__new__(Leon)
+        leon.api = MagicMock()
+        leon.memory = MagicMock()
+        leon.memory.memory = {"learned_context": {}, "conversation_history": []}
+        leon.memory.get_all_active_tasks = MagicMock(return_value={})
+        leon.memory.list_projects = MagicMock(return_value=[])
+        leon.memory.get_recent_context = MagicMock(return_value=[])
+        leon.system_prompt = "You are a helpful AI assistant."
+        leon.ai_name = "Leon"
+        leon.owner_name = "User"
+        leon.vision = None
+        leon.permissions = None
+        return leon
+
+    # ── Module structure ──
+
+    def test_conversation_mixin_importable(self):
+        """ConversationMixin can be imported from conversation_mixin."""
+        from core.conversation_mixin import ConversationMixin
+        self.assertTrue(hasattr(ConversationMixin, '_analyze_request'))
+        self.assertTrue(hasattr(ConversationMixin, '_respond_conversationally'))
+        self.assertTrue(hasattr(ConversationMixin, '_extract_memory'))
+        self.assertTrue(hasattr(ConversationMixin, '_check_sensitive_permissions'))
+
+    def test_is_trivial_conversation_importable_from_conversation_mixin(self):
+        """_is_trivial_conversation can be imported from conversation_mixin."""
+        from core.conversation_mixin import _is_trivial_conversation
+        self.assertTrue(callable(_is_trivial_conversation))
+
+    def test_is_trivial_conversation_re_exported_from_leon(self):
+        """_is_trivial_conversation is re-exported from core.leon for backwards compat."""
+        from core.leon import _is_trivial_conversation
+        from core.conversation_mixin import _is_trivial_conversation as direct
+        self.assertIs(_is_trivial_conversation, direct)
+
+    def test_trivial_constants_re_exported_from_leon(self):
+        """Trivial conversation constants are re-exported from core.leon."""
+        from core.leon import _TRIVIAL_EXACT, _TRIVIAL_CHAT_RE
+        import re
+        self.assertIsInstance(_TRIVIAL_EXACT, frozenset)
+        self.assertIsInstance(_TRIVIAL_CHAT_RE, re.Pattern)
+
+    def test_leon_inherits_conversation_mixin(self):
+        """Leon class includes ConversationMixin in its MRO."""
+        from core.conversation_mixin import ConversationMixin
+        from core.leon import Leon
+        self.assertIn(ConversationMixin, Leon.__mro__)
+
+    # ── _check_sensitive_permissions ──
+
+    def test_check_sensitive_permissions_blocks_purchase(self):
+        """_check_sensitive_permissions blocks purchase keywords."""
+        from unittest.mock import MagicMock
+        leon = self._make_leon()
+        leon.permissions = MagicMock()
+        leon.permissions.check_permission.return_value = False
+        result = leon._check_sensitive_permissions("I want to buy a new laptop")
+        self.assertIsNotNone(result)
+        self.assertIn("go-ahead", result)
+        leon.permissions.check_permission.assert_called_once_with("make_purchase")
+
+    def test_check_sensitive_permissions_blocks_money_transfer(self):
+        """_check_sensitive_permissions blocks money transfer keywords."""
+        from unittest.mock import MagicMock
+        leon = self._make_leon()
+        leon.permissions = MagicMock()
+        leon.permissions.check_permission.return_value = False
+        result = leon._check_sensitive_permissions("transfer money to my account")
+        self.assertIsNotNone(result)
+        self.assertIn("send_money", result)
+
+    def test_check_sensitive_permissions_blocks_publish(self):
+        """_check_sensitive_permissions blocks public posting keywords."""
+        from unittest.mock import MagicMock
+        leon = self._make_leon()
+        leon.permissions = MagicMock()
+        leon.permissions.check_permission.return_value = False
+        result = leon._check_sensitive_permissions("tweet about the new release")
+        self.assertIsNotNone(result)
+        self.assertIn("post_publicly", result)
+
+    def test_check_sensitive_permissions_allows_when_approved(self):
+        """_check_sensitive_permissions returns None when permission is granted."""
+        from unittest.mock import MagicMock
+        leon = self._make_leon()
+        leon.permissions = MagicMock()
+        leon.permissions.check_permission.return_value = True
+        result = leon._check_sensitive_permissions("I want to buy a new laptop")
+        self.assertIsNone(result)
+
+    def test_check_sensitive_permissions_allows_normal_messages(self):
+        """_check_sensitive_permissions returns None for non-sensitive messages."""
+        from unittest.mock import MagicMock
+        leon = self._make_leon()
+        leon.permissions = MagicMock()
+        result = leon._check_sensitive_permissions("what's the weather like")
+        self.assertIsNone(result)
+        leon.permissions.check_permission.assert_not_called()
+
+    def test_check_sensitive_permissions_none_when_no_permissions(self):
+        """_check_sensitive_permissions returns None when permissions system is absent."""
+        leon = self._make_leon()
+        leon.permissions = None
+        # The caller checks `if self.permissions:` before calling, but the method
+        # itself should handle any keyword without crashing if permissions is None.
+        # In practice the method is only called when permissions is set, so this
+        # just verifies the normal-message path.
+        result = leon._check_sensitive_permissions("what's the weather like")
+        self.assertIsNone(result)
+
+    # ── _extract_memory ──
+
+    def test_extract_memory_triggers_on_remember(self):
+        """_extract_memory calls analyze_json when 'remember that' is in the message."""
+        from unittest.mock import MagicMock, AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value={"key": "fav_color", "value": "blue"})
+        leon.memory.learn = MagicMock()
+        self._run(leon._extract_memory("remember that my favorite color is blue", "Got it!"))
+        leon.api.analyze_json.assert_called_once()
+        leon.memory.learn.assert_called_once_with("fav_color", "blue")
+
+    def test_extract_memory_no_trigger_on_normal_message(self):
+        """_extract_memory does not call LLM for normal messages."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock()
+        self._run(leon._extract_memory("hello how are you", "I'm good!"))
+        leon.api.analyze_json.assert_not_called()
+
+    def test_extract_memory_skips_empty_result(self):
+        """_extract_memory does not learn if LLM returns empty dict."""
+        from unittest.mock import MagicMock, AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value={})
+        leon.memory.learn = MagicMock()
+        self._run(leon._extract_memory("remember that something", "OK"))
+        leon.memory.learn.assert_not_called()
+
+    def test_extract_memory_skips_missing_key(self):
+        """_extract_memory does not learn if LLM result has no 'key' field."""
+        from unittest.mock import MagicMock, AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value={"value": "something"})
+        leon.memory.learn = MagicMock()
+        self._run(leon._extract_memory("remember that something", "OK"))
+        leon.memory.learn.assert_not_called()
+
+    def test_extract_memory_all_trigger_phrases(self):
+        """_extract_memory triggers on all known remember phrases."""
+        from unittest.mock import MagicMock, AsyncMock
+        triggers = ["remember that", "remember my", "my name is", "i am ",
+                     "i prefer ", "i like ", "i hate ", "i always ", "i never ",
+                     "my favorite", "my email is", "my phone", "note that",
+                     "keep in mind", "don't forget"]
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value={})
+        leon.memory.learn = MagicMock()
+        for trigger in triggers:
+            leon.api.analyze_json.reset_mock()
+            msg = f"{trigger} something important"
+            self._run(leon._extract_memory(msg, "OK"))
+            self.assertTrue(
+                leon.api.analyze_json.called,
+                f"_extract_memory should trigger on '{trigger}'"
+            )
+
+    # ── _analyze_request ──
+
+    def test_analyze_request_calls_api(self):
+        """_analyze_request calls api.analyze_json with the user message."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value={"type": "simple", "tasks": []})
+        result = self._run(leon._analyze_request("what's the weather"))
+        leon.api.analyze_json.assert_called_once()
+        prompt = leon.api.analyze_json.call_args[0][0]
+        self.assertIn("what's the weather", prompt)
+        self.assertEqual(result["type"], "simple")
+
+    def test_analyze_request_returns_none_on_api_failure(self):
+        """_analyze_request returns None if the API returns None."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.api.analyze_json = AsyncMock(return_value=None)
+        result = self._run(leon._analyze_request("do something"))
+        self.assertIsNone(result)
+
+    def test_analyze_request_includes_project_names(self):
+        """_analyze_request includes known project names in the prompt."""
+        from unittest.mock import MagicMock, AsyncMock
+        leon = self._make_leon()
+        leon.memory.list_projects = MagicMock(return_value=[
+            {"name": "myproject", "status": "active"}
+        ])
+        leon.api.analyze_json = AsyncMock(return_value={"type": "simple", "tasks": []})
+        self._run(leon._analyze_request("update the homepage"))
+        prompt = leon.api.analyze_json.call_args[0][0]
+        self.assertIn("myproject", prompt)
+
+    def test_analyze_request_includes_active_tasks(self):
+        """_analyze_request includes active tasks in the prompt."""
+        from unittest.mock import MagicMock, AsyncMock
+        leon = self._make_leon()
+        leon.memory.get_all_active_tasks = MagicMock(return_value={
+            "task-1": {"description": "building API"}
+        })
+        leon.api.analyze_json = AsyncMock(return_value={"type": "simple", "tasks": []})
+        self._run(leon._analyze_request("what are you doing"))
+        prompt = leon.api.analyze_json.call_args[0][0]
+        self.assertIn("building API", prompt)
+
+    # ── _respond_conversationally ──
+
+    def test_respond_conversationally_calls_create_message(self):
+        """_respond_conversationally calls api.create_message."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.api.create_message = AsyncMock(return_value="Hello!")
+        result = self._run(leon._respond_conversationally("hi"))
+        self.assertEqual(result, "Hello!")
+        leon.api.create_message.assert_called_once()
+
+    def test_respond_conversationally_includes_learned_context(self):
+        """_respond_conversationally injects learned_context into the system prompt."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.memory.memory = {"learned_context": {"fav_color": "blue"}, "conversation_history": []}
+        leon.api.create_message = AsyncMock(return_value="noted!")
+        self._run(leon._respond_conversationally("hi"))
+        call_kwargs = leon.api.create_message.call_args
+        system_prompt = call_kwargs.kwargs.get("system") or call_kwargs[1].get("system", "")
+        self.assertIn("fav_color", system_prompt)
+        self.assertIn("blue", system_prompt)
+
+    def test_respond_conversationally_includes_vision_inactive(self):
+        """_respond_conversationally reports 'Vision inactive' when vision is off."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.api.create_message = AsyncMock(return_value="yo")
+        self._run(leon._respond_conversationally("hi"))
+        call_kwargs = leon.api.create_message.call_args
+        system_prompt = call_kwargs.kwargs.get("system") or call_kwargs[1].get("system", "")
+        self.assertIn("Vision inactive", system_prompt)
+
+    def test_respond_conversationally_passes_system_prompt(self):
+        """_respond_conversationally uses the configured system_prompt."""
+        from unittest.mock import AsyncMock
+        leon = self._make_leon()
+        leon.system_prompt = "You are TestBot, a test assistant."
+        leon.api.create_message = AsyncMock(return_value="test")
+        self._run(leon._respond_conversationally("hi"))
+        call_kwargs = leon.api.create_message.call_args
+        system_prompt = call_kwargs.kwargs.get("system") or call_kwargs[1].get("system", "")
+        self.assertIn("You are TestBot", system_prompt)
+
+    def test_respond_conversationally_no_duplicate_append(self):
+        """_respond_conversationally must not append the user message (already in history)."""
+        import inspect
+        from core.conversation_mixin import ConversationMixin
+        source = inspect.getsource(ConversationMixin._respond_conversationally)
+        self.assertNotIn("messages.append", source,
+                         "_respond_conversationally should not append a duplicate user message")
+
+    def test_conversation_methods_not_in_leon_module(self):
+        """Extracted methods should not have duplicate definitions in leon.py."""
+        import inspect
+        from core import leon as leon_module
+        source = inspect.getsource(leon_module.Leon)
+        self.assertNotIn("def _analyze_request", source)
+        self.assertNotIn("def _respond_conversationally", source)
+        self.assertNotIn("def _extract_memory", source)
+        self.assertNotIn("def _check_sensitive_permissions", source)
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 
