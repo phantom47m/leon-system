@@ -162,7 +162,13 @@ class ScreenAwareness:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.debug("grim timed out")
+                return None
 
             if proc.returncode != 0:
                 # Fallback to scrot (X11)
@@ -171,7 +177,13 @@ class ScreenAwareness:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                _, stderr = await proc.communicate()
+                try:
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.debug("scrot timed out")
+                    return None
 
             if proc.returncode != 0:
                 # Final fallback: gnome-screenshot
@@ -180,7 +192,13 @@ class ScreenAwareness:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await proc.communicate()
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=15)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    logger.debug("gnome-screenshot timed out")
+                    return None
 
             path = Path(tmp_path)
             if path.exists() and path.stat().st_size > 0:
@@ -247,7 +265,13 @@ Rules:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await proc.communicate()
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.debug("xdotool timed out")
+                return None
             window_title = stdout.decode().strip() if stdout else "unknown"
 
             # Classify based on window title

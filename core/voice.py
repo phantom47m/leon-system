@@ -1367,6 +1367,10 @@ class VoiceSystem:
                 )
                 await asyncio.wait_for(proc.wait(), timeout=30)
                 return
+            except asyncio.TimeoutError:
+                logger.warning("espeak-ng timed out — killing subprocess")
+                proc.kill()
+                await proc.wait()
             except Exception as e:
                 logger.warning("espeak-ng failed: %s", e)
 

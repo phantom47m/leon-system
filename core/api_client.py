@@ -413,7 +413,9 @@ class AnthropicAPI:
             logger.error(f"Claude CLI error: {err[:200]}")
             return f"Error: {err[:100]}"
         except asyncio.TimeoutError:
-            logger.error("Claude CLI request timed out")
+            logger.error("Claude CLI request timed out — killing subprocess")
+            proc.kill()
+            await proc.wait()
             return "Request timed out."
         except Exception as e:
             logger.error(f"Claude CLI error: {e}")
