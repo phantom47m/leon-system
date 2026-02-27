@@ -4510,6 +4510,174 @@ class TestBridgePendingCleanup(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# ResponseMixin Tests (Issue #19 — extracted from leon.py)
+# ══════════════════════════════════════════════════════════
+
+class TestResponseMixin(unittest.TestCase):
+    """Tests for the ResponseMixin extracted from leon.py."""
+
+    def _make_mixin(self):
+        """Create a minimal ResponseMixin instance with required attributes."""
+        from core.response_mixin import ResponseMixin
+
+        class FakeHost(ResponseMixin):
+            pass
+
+        host = FakeHost()
+        host._task_complete_phrases = ["Done.", "All good — {summary}"]
+        host._task_failed_phrases = ["Failed — {error}.", "Didn't work — {error}"]
+        host._error_translations = {
+            "rate_limit": "API hit rate limit",
+            "timeout": "Request timed out",
+        }
+        host.printer = None
+        host.vision = None
+        return host
+
+    # ── _strip_sir ────────────────────────────────────────────────────
+
+    def test_strip_sir_basic(self):
+        from core.response_mixin import ResponseMixin
+        self.assertEqual(ResponseMixin._strip_sir("Yes, sir, right away."), "Yes, right away.")
+
+    def test_strip_sir_case_insensitive(self):
+        from core.response_mixin import ResponseMixin
+        self.assertEqual(ResponseMixin._strip_sir("Of course, Sir."), "Of course")
+
+    def test_strip_sir_no_sir(self):
+        from core.response_mixin import ResponseMixin
+        self.assertEqual(ResponseMixin._strip_sir("Hello there."), "Hello there.")
+
+    def test_strip_sir_multiple(self):
+        from core.response_mixin import ResponseMixin
+        result = ResponseMixin._strip_sir("Yes sir, right away sir.")
+        self.assertNotIn("sir", result.lower())
+
+    def test_strip_sir_double_spaces_cleaned(self):
+        from core.response_mixin import ResponseMixin
+        result = ResponseMixin._strip_sir("Hello  sir  world")
+        self.assertNotIn("  ", result)
+
+    def test_strip_sir_preserves_siren(self):
+        """'siren' should not be mangled by the sir filter."""
+        from core.response_mixin import ResponseMixin
+        # The word 'siren' contains 'sir' but has a word boundary after 'sir'
+        # The regex uses \b so 'siren' should not match
+        result = ResponseMixin._strip_sir("I heard a siren outside.")
+        self.assertIn("siren", result)
+
+    # ── _translate_error ──────────────────────────────────────────────
+
+    def test_translate_error_known_pattern(self):
+        m = self._make_mixin()
+        self.assertEqual(m._translate_error("rate_limit exceeded"), "API hit rate limit")
+
+    def test_translate_error_case_insensitive(self):
+        m = self._make_mixin()
+        self.assertEqual(m._translate_error("TIMEOUT on request"), "Request timed out")
+
+    def test_translate_error_fallback(self):
+        m = self._make_mixin()
+        result = m._translate_error("some unknown error happened")
+        self.assertTrue(result.startswith("Something went wrong"))
+
+    def test_translate_error_truncates_long(self):
+        m = self._make_mixin()
+        result = m._translate_error("x" * 200)
+        self.assertLessEqual(len(result), 200)
+
+    # ── _pick_completion_phrase ───────────────────────────────────────
+
+    def test_completion_phrase_returns_string(self):
+        m = self._make_mixin()
+        result = m._pick_completion_phrase("built the feature")
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_completion_phrase_substitutes_summary(self):
+        m = self._make_mixin()
+        # At least one phrase has {summary}, test that it gets replaced
+        results = [m._pick_completion_phrase("test summary") for _ in range(20)]
+        # At least one should contain the summary text
+        self.assertTrue(any("test summary" in r for r in results))
+
+    def test_completion_phrase_no_summary(self):
+        m = self._make_mixin()
+        result = m._pick_completion_phrase()
+        self.assertNotIn("{summary}", result)
+
+    # ── _pick_failure_phrase ──────────────────────────────────────────
+
+    def test_failure_phrase_returns_string(self):
+        m = self._make_mixin()
+        result = m._pick_failure_phrase("something broke")
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_failure_phrase_translates_error(self):
+        m = self._make_mixin()
+        results = [m._pick_failure_phrase("rate_limit exceeded") for _ in range(20)]
+        self.assertTrue(any("API hit rate limit" in r for r in results))
+
+    def test_failure_phrase_no_error(self):
+        m = self._make_mixin()
+        result = m._pick_failure_phrase()
+        self.assertIn("unknown issue", result)
+
+    # ── _build_help_text ──────────────────────────────────────────────
+
+    def test_help_text_contains_modules(self):
+        m = self._make_mixin()
+        text = m._build_help_text()
+        self.assertIn("Available Modules", text)
+        self.assertIn("Daily Briefing", text)
+        self.assertIn("Dashboard Commands", text)
+
+    def test_help_text_includes_printer_when_available(self):
+        m = self._make_mixin()
+        m.printer = object()  # truthy
+        text = m._build_help_text()
+        self.assertIn("3D Printing", text)
+
+    def test_help_text_excludes_printer_when_absent(self):
+        m = self._make_mixin()
+        text = m._build_help_text()
+        self.assertNotIn("3D Printing", text)
+
+    def test_help_text_includes_vision_when_available(self):
+        m = self._make_mixin()
+        m.vision = object()  # truthy
+        text = m._build_help_text()
+        self.assertIn("Vision", text)
+
+    # ── _get_skills_manifest ──────────────────────────────────────────
+
+    def test_skills_manifest_returns_string(self):
+        m = self._make_mixin()
+        text = m._get_skills_manifest()
+        self.assertIsInstance(text, str)
+        self.assertIn("Available Tools", text)
+        self.assertIn("bash", text.lower())
+
+    # ── Mixin integration ─────────────────────────────────────────────
+
+    def test_response_mixin_on_leon_class(self):
+        """Leon class should inherit from ResponseMixin."""
+        from core.response_mixin import ResponseMixin
+        # Import the class definition only (don't instantiate — needs config)
+        import importlib
+        import core.leon as leon_mod
+        self.assertTrue(issubclass(leon_mod.Leon, ResponseMixin))
+
+    def test_response_mixin_methods_present(self):
+        """ResponseMixin should expose all expected methods."""
+        from core.response_mixin import ResponseMixin
+        for method in ['_strip_sir', '_translate_error', '_pick_completion_phrase',
+                        '_pick_failure_phrase', '_build_help_text', '_get_skills_manifest']:
+            self.assertTrue(hasattr(ResponseMixin, method), f"Missing method: {method}")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

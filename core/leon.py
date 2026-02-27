@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import subprocess
 import uuid
 from datetime import datetime
@@ -43,6 +42,7 @@ from .browser_mixin import BrowserMixin
 from .task_mixin import TaskMixin
 from .awareness_mixin import AwarenessMixin
 from .reminder_mixin import ReminderMixin
+from .response_mixin import ResponseMixin
 
 logger = logging.getLogger("leon")
 
@@ -166,7 +166,7 @@ def _extract_issue(msg: str) -> str:
     return msg[:200].strip()
 
 
-class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin):
+class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin, ResponseMixin):
     """Main orchestration system - the brain that coordinates everything.
 
     Routing, browser automation, task orchestration, awareness loop, and reminders
@@ -865,44 +865,7 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
                     )
         return None
 
-    def _build_help_text(self) -> str:
-        """Build a help text listing all available modules and commands."""
-        modules = []
-        modules.append("**Available Modules:**\n")
-        modules.append("- **Daily Briefing** — \"daily briefing\", \"brief me\", \"catch me up\"")
-        modules.append("- **CRM** — \"pipeline\", \"clients\", \"deals\"")
-        modules.append("- **Finance** — \"revenue\", \"invoice\", \"earnings\"")
-        modules.append("- **Leads** — \"find leads\", \"prospect\", \"generate leads\"")
-        modules.append("- **Comms** — \"check email\", \"inbox\", \"send email\"")
-        if self.printer:
-            modules.append("- **3D Printing** — \"printer status\", \"find stl\"")
-        if self.vision:
-            modules.append("- **Vision** — \"what do you see\", \"look at\"")
-        modules.append("- **Security** — \"audit log\", \"security log\"")
-        modules.append("\n**System Skills** (natural language — AI-routed):")
-        modules.append("- **App Control** — \"open firefox\", \"close spotify\", \"switch to code\"")
-        modules.append("- **System Info** — \"CPU usage\", \"RAM\", \"disk space\", \"top processes\"")
-        modules.append("- **Media** — \"pause\", \"next track\", \"volume up\", \"now playing\"")
-        modules.append("- **Desktop** — \"screenshot\", \"lock screen\", \"brightness up\"")
-        modules.append("- **Files** — \"find file\", \"recent downloads\", \"trash\"")
-        modules.append("- **Network** — \"wifi status\", \"my IP\", \"ping google\"")
-        modules.append("- **Timers** — \"set timer 5 minutes\", \"set alarm 7:00\"")
-        modules.append("- **Web** — \"search for X\", \"weather\", \"define Y\"")
-        modules.append("- **Dev** — \"git status\", \"port check 3000\"")
-        modules.append("\n**Dashboard Commands** (type / in command bar):")
-        modules.append("- `/agents` — list active agents")
-        modules.append("- `/status` — system overview")
-        modules.append("- `/queue` — queued tasks")
-        modules.append("- `/kill <id>` — terminate agent")
-        modules.append("- `/retry <id>` — retry failed agent")
-        modules.append("- `/history` — recent completed tasks")
-        modules.append("- `/bridge` — Right Brain connection status")
-        modules.append("- `/plan` — show active plan status")
-        modules.append("\n**Plan Mode:**")
-        modules.append("- \"plan and build [goal]\" — generate + execute a multi-phase plan")
-        modules.append("- \"plan status\" — check plan progress")
-        modules.append("- \"cancel plan\" — stop execution (agents finish current task)")
-        return "\n".join(modules)
+    # _build_help_text → response_mixin.py
 
     # ------------------------------------------------------------------
     # Request analysis
@@ -1001,42 +964,7 @@ Vision: {vision_desc}
     # ------------------------------------------------------------------
 
 
-    def _get_skills_manifest(self) -> str:
-        """Return a concise tools/skills section to inject into task briefs."""
-        oc_bin = Path.home() / ".openclaw" / "bin" / "openclaw"
-        skills_dir = Path.home() / ".openclaw" / "workspace" / "skills"
-        openclaw_available = oc_bin.exists()
-        skill_names = []
-        if skills_dir.exists():
-            skill_names = sorted(d.name for d in skills_dir.iterdir() if d.is_dir())
-
-        lines = ["## Available Tools\n"]
-        lines.append("You have full bash access.")
-
-        if openclaw_available and skill_names:
-            # Key skills relevant to coding tasks
-            coding_skills = [
-                s for s in skill_names
-                if any(k in s for k in [
-                    "github", "docker", "cloud", "frontend", "debug", "clean-code",
-                    "security", "database", "sql", "drizzle", "research", "search",
-                    "in-depth", "senior-dev", "spark", "jarvis", "task-dev", "self-improving",
-                    "kubernetes", "jenkins", "mlops", "linux",
-                ])
-            ]
-            lines.append(f"You can also leverage these installed OpenClaw skills")
-            lines.append(f"({len(skill_names)} total) — invoke via `{oc_bin} agent` or use their expertise")
-            lines.append(f"directly since their knowledge is available to you:\n")
-            if coding_skills:
-                lines.append("**Relevant skills for this task:**")
-                for s in coding_skills[:20]:
-                    lines.append(f"  - `{s}`")
-
-        lines.append("\n**Always:**")
-        lines.append("  - Write tests for any code you add")
-        lines.append("  - Commit changes with descriptive git messages")
-        lines.append("  - Leave the codebase in a working state\n")
-        return "\n".join(lines)
+    # _get_skills_manifest → response_mixin.py
 
     # ------------------------------------------------------------------
     # Project resolution
@@ -1070,19 +998,10 @@ Vision: {vision_desc}
     # _ram_watchdog   → awareness_mixin.py
     # _awareness_loop → awareness_mixin.py
 
-    # ------------------------------------------------------------------
-    # Personality helpers
-    # ------------------------------------------------------------------
-
-    def _translate_error(self, raw_error: str) -> str:
-        """Turn a raw error string into human-friendly language."""
-        error_lower = raw_error.lower()
-        for pattern, friendly in self._error_translations.items():
-            if pattern.lower() in error_lower:
-                return friendly
-        # Fallback: truncate and present simply
-        short = raw_error[:120].rstrip(".")
-        return f"Something went wrong — {short}"
+    # _translate_error         → response_mixin.py
+    # _pick_completion_phrase  → response_mixin.py
+    # _pick_failure_phrase     → response_mixin.py
+    # _strip_sir               → response_mixin.py
 
     async def _self_update(self) -> str:
         """Run git pull and restart the process."""
@@ -1110,34 +1029,6 @@ Vision: {vision_desc}
         await asyncio.sleep(2)
         logger.info("Restarting after self-update...")
         os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    @staticmethod
-    def _strip_sir(text: str) -> str:
-        """
-        Hard post-processing filter — remove every form of 'sir' the LLM might generate.
-        This runs on 100% of outgoing responses. No exceptions.
-        """
-        import re
-        # Remove patterns like ", sir.", ", sir!", " sir.", " sir,", "Sir,"
-        text = re.sub(r',?\s*\bsir\b\.?', '', text, flags=re.IGNORECASE)
-        # Clean up any double spaces or leading/trailing whitespace left behind
-        text = re.sub(r'  +', ' ', text).strip()
-        return text
-
-    def _pick_completion_phrase(self, summary: str = "") -> str:
-        """Pick a random task completion phrase, optionally with summary."""
-        phrase = random.choice(self._task_complete_phrases)
-        if "{summary}" in phrase and summary:
-            return phrase.replace("{summary}", summary[:100])
-        elif "{summary}" in phrase:
-            return phrase.replace("{summary}", "").strip()
-        return phrase
-
-    def _pick_failure_phrase(self, error: str = "") -> str:
-        """Pick a random task failure phrase with translated error."""
-        friendly = self._translate_error(error) if error else "unknown issue"
-        phrase = random.choice(self._task_failed_phrases)
-        return phrase.replace("{error}", friendly)
 
     # ------------------------------------------------------------------
     # Public helpers
