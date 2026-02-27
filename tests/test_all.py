@@ -6249,6 +6249,182 @@ class TestPatchApplyNonBlocking(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# MEMORY BACKUP ROTATION
+# ══════════════════════════════════════════════════════════
+
+class TestMemoryBackupRotation(unittest.TestCase):
+    """Verify memory backup rotation and crash recovery."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.mem_path = os.path.join(self.tmp_dir, "leon_memory.json")
+        from core.memory import MemorySystem
+        self.MemorySystem = MemorySystem
+        self.mem = MemorySystem(self.mem_path)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_backup_created_on_flush(self):
+        """First flush should create .bak1 from the previous state."""
+        # Initial save creates the primary file
+        self.mem.save(force=True)
+        # Second save should rotate primary → .bak1
+        self.mem.memory["learned_context"]["key1"] = "value1"
+        self.mem.save(force=True)
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        self.assertTrue(bak1.exists(), ".bak1 should exist after second flush")
+
+    def test_backup_rotation_order(self):
+        """Backups should rotate: current→.bak1→.bak2→.bak3."""
+        # Save 4 times to populate all backup slots
+        for i in range(4):
+            self.mem.memory["learned_context"][f"version"] = f"v{i}"
+            self.mem.save(force=True)
+
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        bak2 = Path(self.mem_path).with_suffix(".bak2")
+        bak3 = Path(self.mem_path).with_suffix(".bak3")
+        self.assertTrue(bak1.exists())
+        self.assertTrue(bak2.exists())
+        self.assertTrue(bak3.exists())
+
+        # .bak1 should contain v2 (the state before the v3 write)
+        with open(bak1) as f:
+            data = json.load(f)
+        self.assertEqual(data["learned_context"]["version"], "v2")
+
+    def test_recover_from_corrupt_primary(self):
+        """If primary is corrupt, should load from .bak1."""
+        self.mem.memory["learned_context"]["important"] = "data"
+        self.mem.save(force=True)
+        # Ensure backup exists
+        self.mem.memory["learned_context"]["important"] = "updated"
+        self.mem.save(force=True)
+
+        # Corrupt the primary file
+        with open(self.mem_path, "w") as f:
+            f.write("{broken json!!!!")
+
+        # Reload — should recover from backup
+        mem2 = self.MemorySystem(self.mem_path)
+        self.assertEqual(mem2.memory["learned_context"]["important"], "data")
+
+    def test_recover_from_missing_primary(self):
+        """If primary is deleted, should load from .bak1."""
+        self.mem.memory["learned_context"]["key"] = "saved"
+        self.mem.save(force=True)
+        # Force a second save so .bak1 exists
+        self.mem.memory["learned_context"]["key"] = "updated"
+        self.mem.save(force=True)
+
+        # Delete primary
+        os.unlink(self.mem_path)
+
+        mem2 = self.MemorySystem(self.mem_path)
+        self.assertEqual(mem2.memory["learned_context"]["key"], "saved")
+
+    def test_recover_skips_corrupt_backups(self):
+        """If .bak1 is also corrupt, should try .bak2."""
+        # Create 3 saves to populate .bak1 and .bak2
+        for i in range(3):
+            self.mem.memory["learned_context"]["ver"] = f"v{i}"
+            self.mem.save(force=True)
+
+        # Corrupt both primary and .bak1
+        with open(self.mem_path, "w") as f:
+            f.write("corrupt!")
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        with open(bak1, "w") as f:
+            f.write("also corrupt!")
+
+        # .bak2 should have v0
+        mem2 = self.MemorySystem(self.mem_path)
+        self.assertEqual(mem2.memory["learned_context"]["ver"], "v0")
+
+    def test_all_corrupt_starts_fresh(self):
+        """If everything is corrupt, should start fresh (not crash)."""
+        self.mem.save(force=True)
+        # Corrupt everything
+        with open(self.mem_path, "w") as f:
+            f.write("corrupt!")
+        for i in range(1, 4):
+            bak = Path(self.mem_path).with_suffix(f".bak{i}")
+            with open(bak, "w") as f:
+                f.write("corrupt!")
+
+        mem2 = self.MemorySystem(self.mem_path)
+        # Should have empty default structure
+        self.assertIn("identity", mem2.memory)
+        self.assertEqual(mem2.memory.get("conversation_history"), [])
+
+    def test_backup_preserves_data_integrity(self):
+        """Backup files should contain valid JSON matching previous state."""
+        self.mem.memory["conversation_history"] = [
+            {"role": "user", "content": "hello", "timestamp": "2026-01-01"}
+        ]
+        self.mem.save(force=True)
+
+        self.mem.memory["conversation_history"].append(
+            {"role": "assistant", "content": "hi", "timestamp": "2026-01-01"}
+        )
+        self.mem.save(force=True)
+
+        # .bak1 should have the old state (1 message, not 2)
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        with open(bak1) as f:
+            data = json.load(f)
+        self.assertEqual(len(data["conversation_history"]), 1)
+        self.assertEqual(data["conversation_history"][0]["content"], "hello")
+
+    def test_no_backup_for_empty_primary(self):
+        """Should not create .bak1 from a near-empty (<=2 bytes) file."""
+        # Write an empty file
+        with open(self.mem_path, "w") as f:
+            f.write("{}")
+        # Trigger flush
+        self.mem.save(force=True)
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        self.assertFalse(bak1.exists(),
+                         "Should not back up near-empty files")
+
+    def test_backup_rotation_failure_is_nonfatal(self):
+        """Backup rotation failure should not prevent the save itself."""
+        # Make backup dir read-only to force rotation failure
+        bak1 = Path(self.mem_path).with_suffix(".bak1")
+        bak1.write_text("old backup")
+        bak1.chmod(0o000)
+        try:
+            # Flush should still succeed (data written to primary)
+            self.mem.memory["learned_context"]["test"] = "works"
+            self.mem.save(force=True)
+            with open(self.mem_path) as f:
+                data = json.load(f)
+            self.assertEqual(data["learned_context"]["test"], "works")
+        finally:
+            bak1.chmod(0o644)
+
+    def test_backup_path_naming(self):
+        """_backup_path should return correct suffixed paths."""
+        p1 = self.mem._backup_path(1)
+        p2 = self.mem._backup_path(2)
+        p3 = self.mem._backup_path(3)
+        self.assertTrue(str(p1).endswith(".bak1"))
+        self.assertTrue(str(p2).endswith(".bak2"))
+        self.assertTrue(str(p3).endswith(".bak3"))
+
+    def test_old_backups_dropped_after_max(self):
+        """After _BACKUP_COUNT+1 flushes, no .bak4 should exist."""
+        for i in range(6):
+            self.mem.memory["learned_context"]["v"] = str(i)
+            self.mem.save(force=True)
+
+        bak4 = Path(self.mem_path).with_suffix(".bak4")
+        self.assertFalse(bak4.exists(), ".bak4 should not exist (only 3 backups kept)")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

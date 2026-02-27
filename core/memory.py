@@ -15,6 +15,7 @@ from typing import Optional
 logger = logging.getLogger("leon.memory")
 
 _SAVE_DEBOUNCE_SECONDS = 5  # Minimum interval between disk writes
+_BACKUP_COUNT = 3            # Number of rotated backups to keep
 
 
 class MemorySystem:
@@ -32,13 +33,32 @@ class MemorySystem:
     # Persistence
     # ------------------------------------------------------------------
 
+    def _backup_path(self, n: int) -> Path:
+        """Return the path for backup slot *n* (1-based)."""
+        return self.memory_file.with_suffix(f".bak{n}")
+
     def _load(self) -> dict:
+        # Try the primary file first
         if self.memory_file.exists():
             try:
                 with open(self.memory_file, "r") as f:
                     return json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Corrupt memory file, starting fresh")
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Primary memory file corrupt: %s", e)
+
+        # Primary missing or corrupt — try backups (most recent first)
+        for i in range(1, _BACKUP_COUNT + 1):
+            bak = self._backup_path(i)
+            if bak.exists():
+                try:
+                    with open(bak, "r") as f:
+                        data = json.load(f)
+                    logger.warning("Recovered memory from backup %s", bak.name)
+                    return data
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        logger.warning("No valid memory file or backup found, starting fresh")
         return self._empty()
 
     def save(self, force: bool = False):
@@ -54,8 +74,24 @@ class MemorySystem:
             return
         self._flush()
 
+    def _rotate_backups(self):
+        """Rotate backup files: .bak3 is deleted, .bak2→.bak3, .bak1→.bak2, current→.bak1."""
+        try:
+            # Shift older backups down (3 is oldest, gets dropped)
+            for i in range(_BACKUP_COUNT, 1, -1):
+                src = self._backup_path(i - 1)
+                dst = self._backup_path(i)
+                if src.exists():
+                    shutil.copy2(str(src), str(dst))
+
+            # Current → .bak1 (only if current exists and is valid)
+            if self.memory_file.exists() and self.memory_file.stat().st_size > 2:
+                shutil.copy2(str(self.memory_file), str(self._backup_path(1)))
+        except OSError as e:
+            logger.warning("Backup rotation failed (non-fatal): %s", e)
+
     def _flush(self):
-        """Immediately write memory to disk (atomic write)."""
+        """Immediately write memory to disk (atomic write with backup rotation)."""
         # Trim completed_tasks to prevent unbounded growth
         if "completed_tasks" in self.memory:
             ct = self.memory["completed_tasks"]
@@ -63,6 +99,10 @@ class MemorySystem:
                 # Migrate legacy dict → list (older Agent Zero sessions stored as dict)
                 ct = list(ct.values())
             self.memory["completed_tasks"] = ct[-500:]
+
+        # Rotate backups before writing new data
+        self._rotate_backups()
+
         tmp = self.memory_file.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(self.memory, f, indent=2, default=str)
