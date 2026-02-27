@@ -3631,6 +3631,157 @@ class TestEventLoopThreading(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+# CRITICAL BUG FIXES (Phase 14)
+# ══════════════════════════════════════════════════════════
+
+class TestSelfUpdateFix(unittest.TestCase):
+    """Verify _self_update is a proper instance method (not @staticmethod)."""
+
+    def test_self_update_is_not_static(self):
+        """_self_update must be a regular method, not a staticmethod."""
+        from core.leon import Leon
+        # staticmethod objects are stored as staticmethod descriptors in __dict__
+        raw = Leon.__dict__.get("_self_update")
+        self.assertIsNotNone(raw, "_self_update should exist on Leon")
+        self.assertNotIsInstance(raw, staticmethod,
+                                "_self_update must not be @staticmethod — it uses self")
+
+    def test_self_update_is_coroutine_function(self):
+        """_self_update should be an async method."""
+        import inspect
+        from core.leon import Leon
+        self.assertTrue(inspect.iscoroutinefunction(Leon._self_update))
+
+    def test_restart_after_update_exists(self):
+        """The renamed _restart_after_update method must exist."""
+        from core.leon import Leon
+        self.assertTrue(hasattr(Leon, "_restart_after_update"),
+                        "_restart_after_update should exist (renamed from first _delayed_restart)")
+
+    def test_delayed_restart_is_not_shadowed(self):
+        """_delayed_restart should accept delay_seconds (int), not update_output (str)."""
+        import inspect
+        from core.leon import Leon
+        sig = inspect.signature(Leon._delayed_restart)
+        params = list(sig.parameters.keys())
+        # Should have 'self' and 'delay_seconds', NOT 'update_output'
+        self.assertIn("delay_seconds", params,
+                       "_delayed_restart should accept delay_seconds (the script-restart version)")
+        self.assertNotIn("update_output", params,
+                         "The update_output version should be renamed to _restart_after_update")
+
+
+class TestCompletedTasksTypeFix(unittest.TestCase):
+    """Verify completed_tasks handles both list and legacy dict formats."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        self.tmp.close()
+        from core.memory import MemorySystem
+        self.mem = MemorySystem(self.tmp.name)
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def test_flush_with_list(self):
+        """_flush works correctly when completed_tasks is a list (default)."""
+        self.mem.memory["completed_tasks"] = [
+            {"task_id": f"t{i}", "description": f"Task {i}"} for i in range(10)
+        ]
+        self.mem._flush()  # Should not raise
+        self.assertIsInstance(self.mem.memory["completed_tasks"], list)
+        self.assertEqual(len(self.mem.memory["completed_tasks"]), 10)
+
+    def test_flush_with_legacy_dict(self):
+        """_flush migrates a dict completed_tasks to list without crashing."""
+        self.mem.memory["completed_tasks"] = {
+            "job-1": {"task_id": "t1", "description": "Dict task 1"},
+            "job-2": {"task_id": "t2", "description": "Dict task 2"},
+        }
+        self.mem._flush()  # Should not raise TypeError
+        self.assertIsInstance(self.mem.memory["completed_tasks"], list)
+        self.assertEqual(len(self.mem.memory["completed_tasks"]), 2)
+
+    def test_flush_trims_to_500(self):
+        """completed_tasks list is trimmed to 500 entries on flush."""
+        self.mem.memory["completed_tasks"] = [
+            {"task_id": f"t{i}"} for i in range(600)
+        ]
+        self.mem._flush()
+        self.assertEqual(len(self.mem.memory["completed_tasks"]), 500)
+
+    def test_flush_legacy_dict_trims(self):
+        """Legacy dict with >500 entries is migrated and trimmed."""
+        self.mem.memory["completed_tasks"] = {
+            f"job-{i}": {"task_id": f"t{i}"} for i in range(600)
+        }
+        self.mem._flush()
+        self.assertIsInstance(self.mem.memory["completed_tasks"], list)
+        self.assertEqual(len(self.mem.memory["completed_tasks"]), 500)
+
+    def test_empty_initializes_as_list(self):
+        """Fresh memory always has completed_tasks as a list."""
+        empty = self.mem._empty()
+        self.assertIsInstance(empty["completed_tasks"], list)
+
+
+class TestStopAwaitsCancel(unittest.TestCase):
+    """Verify stop() properly awaits cancelled background tasks."""
+
+    def test_stop_gathers_cancelled_tasks(self):
+        """stop() should await cancelled tasks to prevent RuntimeError on loop close."""
+        import inspect
+        from core.leon import Leon
+        # Read the source of stop() and verify it uses asyncio.gather
+        source = inspect.getsource(Leon.stop)
+        self.assertIn("asyncio.gather", source,
+                       "stop() should use asyncio.gather to await cancelled tasks")
+        self.assertIn("return_exceptions=True", source,
+                       "gather should use return_exceptions=True to suppress CancelledError")
+
+    def test_stop_checks_task_done_before_cancel(self):
+        """stop() should check task.done() before cancelling to avoid cancelling completed tasks."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon.stop)
+        self.assertIn(".done()", source,
+                       "stop() should check .done() before cancelling tasks")
+
+    def test_stop_cancels_all_three_tasks(self):
+        """stop() should handle awareness, ram watchdog, and vision tasks."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon.stop)
+        self.assertIn("_awareness_task", source)
+        self.assertIn("_ram_watchdog_task", source)
+        self.assertIn("_vision_task", source)
+
+
+class TestCompletedTasksIntegration(unittest.TestCase):
+    """Integration test: Agent Zero dispatch path appends to list, not dict."""
+
+    def test_agent_zero_completion_uses_list_append(self):
+        """_dispatch_to_agent_zero writes completed_tasks as list.append(), not dict[]."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon._dispatch_to_agent_zero)
+        # Should use .append() instead of dict-style [key] = value
+        self.assertIn("task_list.append(completed)", source,
+                       "Agent Zero completion should append to list, not set dict key")
+        # Should not use dict-style setdefault({})
+        self.assertNotIn('setdefault("completed_tasks", {})', source,
+                         "Should not default to dict — use list")
+
+    def test_build_az_memory_handles_both_types(self):
+        """_build_az_memory_context handles both list and legacy dict completed_tasks."""
+        import inspect
+        from core.leon import Leon
+        source = inspect.getsource(Leon._build_az_memory_context)
+        self.assertIn("isinstance(completed, dict)", source,
+                       "Should handle legacy dict format with isinstance check")
+
+
+# ══════════════════════════════════════════════════════════
 # RUN
 # ══════════════════════════════════════════════════════════
 

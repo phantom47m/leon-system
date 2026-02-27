@@ -58,7 +58,11 @@ class MemorySystem:
         """Immediately write memory to disk (atomic write)."""
         # Trim completed_tasks to prevent unbounded growth
         if "completed_tasks" in self.memory:
-            self.memory["completed_tasks"] = self.memory["completed_tasks"][-500:]
+            ct = self.memory["completed_tasks"]
+            if isinstance(ct, dict):
+                # Migrate legacy dict → list (older Agent Zero sessions stored as dict)
+                ct = list(ct.values())
+            self.memory["completed_tasks"] = ct[-500:]
         tmp = self.memory_file.with_suffix(".tmp")
         with open(tmp, "w") as f:
             json.dump(self.memory, f, indent=2, default=str)

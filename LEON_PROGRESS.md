@@ -152,6 +152,8 @@
 - [ ] Refactor `leon.py` into smaller modules (Issue #19)
 - [ ] Update stale stt_provider config (Issue #22)
 
+**2026-02-27 — Phase 14: 4 critical/high bug fixes:** (1) `_self_update` was `@staticmethod` with `self` — always crashed on "update yourself"; removed decorator, (2) duplicate `_delayed_restart` definitions — second shadowed first causing `TypeError` on update restart; renamed first to `_restart_after_update`, (3) `completed_tasks` type conflict (list in memory.py, dict in Agent Zero dispatch) caused `TypeError` in `_flush()`; standardized on list with legacy dict migration, (4) `stop()` called `.cancel()` on background tasks without awaiting — could cause `RuntimeError: Event loop is closed`; now uses `asyncio.gather(..., return_exceptions=True)`. 14 new tests, 387 total passing.
+
 **2026-02-27 — Issue #4 fixed:** `python_exec` now blocks 10 dangerous module imports (subprocess, shutil, ctypes, socket, etc.) and 15 dangerous patterns (os.system, os.remove, __import__, open, eval, exec, compile) before execution; 33 new security tests added.
 
 **2026-02-27 — API provider failover:** `create_message`, `quick_request`, and `analyze_json` now automatically try fallback providers (Groq/Ollama/Claude CLI) when the primary fails, instead of returning raw error strings to the user; also fixed a bug where Claude CLI's inline Groq fallback sent an empty message list; 24 new tests added.

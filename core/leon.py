@@ -602,12 +602,15 @@ class Leon(RoutingMixin, BrowserMixin, TaskMixin, AwarenessMixin, ReminderMixin)
     async def stop(self):
         logger.info("Stopping Leon...")
         self.running = False
-        if self._awareness_task:
-            self._awareness_task.cancel()
-        if self._ram_watchdog_task:
-            self._ram_watchdog_task.cancel()
-        if self._vision_task:
-            self._vision_task.cancel()
+        # Cancel background tasks and await them to prevent RuntimeError
+        # from coroutines still running when the event loop closes
+        tasks_to_cancel = []
+        for task in (self._awareness_task, self._ram_watchdog_task, self._vision_task):
+            if task and not task.done():
+                task.cancel()
+                tasks_to_cancel.append(task)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         if self.vision:
             self.vision.stop()
         if self.hotkey_listener:
@@ -1073,7 +1076,6 @@ Vision: {vision_desc}
         short = raw_error[:120].rstrip(".")
         return f"Something went wrong — {short}"
 
-    @staticmethod
     async def _self_update(self) -> str:
         """Run git pull and restart the process."""
         import subprocess
@@ -1089,13 +1091,13 @@ Vision: {vision_desc}
             if "Already up to date" in output:
                 return "Already on the latest version. Nothing to update."
             # Restart the process
-            asyncio.create_task(self._delayed_restart(output))
+            asyncio.create_task(self._restart_after_update(output))
             return f"Update pulled. Restarting now...\n{output}"
         except Exception as e:
             return f"Update failed: {e}"
 
-    async def _delayed_restart(self, update_output: str):
-        """Wait 2 seconds then restart the process."""
+    async def _restart_after_update(self, update_output: str):
+        """Wait 2 seconds then restart the process in-place via os.execv."""
         import sys, os
         await asyncio.sleep(2)
         logger.info("Restarting after self-update...")
@@ -1286,10 +1288,14 @@ Vision: {vision_desc}
             lines.append(f"Tech stack: {', '.join(project['tech_stack'])}")
 
         # Recent completed Agent Zero jobs on this project (last 3)
-        completed = self.memory.memory.get("completed_tasks", {})
+        completed = self.memory.memory.get("completed_tasks", [])
+        if isinstance(completed, dict):
+            # Legacy: older sessions stored as dict keyed by job_id
+            completed = list(completed.values())
         proj_jobs = [
-            v for v in completed.values()
-            if v.get("project_name") == project.get("name")
+            v for v in completed
+            if isinstance(v, dict)
+            and v.get("project_name") == project.get("name")
             and v.get("executor") == "agent_zero"
         ]
         if proj_jobs:
@@ -1357,7 +1363,12 @@ Vision: {vision_desc}
                     )
                 completed = dict(task_obj)
                 completed.update({"status": result["status"], "job_id": result["job_id"]})
-                self.memory.memory.setdefault("completed_tasks", {})[result["job_id"]] = completed
+                task_list = self.memory.memory.setdefault("completed_tasks", [])
+                if isinstance(task_list, dict):
+                    # Migrate legacy dict → list
+                    self.memory.memory["completed_tasks"] = list(task_list.values())
+                    task_list = self.memory.memory["completed_tasks"]
+                task_list.append(completed)
                 self.memory.memory.get("active_tasks", {}).pop(job_id_preview, None)
                 self.memory.save()
             except Exception as exc:

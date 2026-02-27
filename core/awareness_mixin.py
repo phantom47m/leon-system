@@ -297,10 +297,24 @@ class AwarenessMixin:
                                 + (f", {_ps['failedTasks']} failed" if _ps['failedTasks'] else "")
                             )
                         else:
-                            _update = (
-                                f"**Agent update** — {_count} agent{'s' if _count != 1 else ''} running"
-                                + (f", {_nm_pending} queued" if _nm_pending else "")
-                            )
+                            # Build a meaningful update — show last git commit per active project
+                            import subprocess as _sp
+                            _lines = [f"**Agent update** — {_count} agent{'s' if _count != 1 else ''} running" + (f", {_nm_pending} queued" if _nm_pending else "")]
+                            _seen_paths = set()
+                            for _aid in _active_agents:
+                                _tobj = self.task_queue.active_tasks.get(_aid, {})
+                                _proj_name = _tobj.get("project_name", "")
+                                _proj = self._resolve_project(_proj_name)
+                                _proj_path = _proj.get("path", "") if _proj else ""
+                                if _proj_path and _proj_path not in _seen_paths:
+                                    _seen_paths.add(_proj_path)
+                                    _git = _sp.run(
+                                        ["git", "log", "--oneline", "-1"],
+                                        cwd=_proj_path, capture_output=True, text=True
+                                    )
+                                    _last_commit = _git.stdout.strip() if _git.returncode == 0 else "no commits yet"
+                                    _lines.append(f"**{_proj_name or 'Unknown'}:** {_last_commit[:120]}")
+                            _update = "\n".join(_lines)
                         await self._send_discord_message(_update)
                     except Exception as _e:
                         logger.debug("Discord update tick error: %s", _e)
