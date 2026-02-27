@@ -3,8 +3,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Kill existing Leon processes
-EXISTING=$(pgrep -f "python3 main.py" 2>/dev/null)
+# Kill existing Leon processes (matches both python3 and venv/bin/python)
+EXISTING=$(pgrep -f "python.*main\.py" 2>/dev/null)
 if [ -n "$EXISTING" ]; then
     echo "Stopping existing Leon (PID: $EXISTING)..."
     kill $EXISTING 2>/dev/null
